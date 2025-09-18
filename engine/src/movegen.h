@@ -64,8 +64,9 @@ void pawn_moves(const Position &position, uint64_t check_filter,
     }
 
     if (position.ep_square != SquareNone) {
-      uint64_t ep_captures =
-          our_non_promos & PawnAttacks[color ^ 1][position.ep_square];
+      uint64_t ep_targets =
+          PAWN_ATK_SAFE(color ^ 1, position.ep_square);
+      uint64_t ep_captures = our_non_promos & ep_targets;
       while (ep_captures) {
         int from = pop_lsb(ep_captures);
         move_list[key++] =
@@ -108,7 +109,8 @@ void pawn_moves(const Position &position, uint64_t check_filter,
 int movegen(const Position &position, Move *move_list,
             uint64_t checkers, int gen_type) {
 
-  uint8_t color = position.color, king_pos = get_king_pos(position, color);
+  uint8_t color = position.color;
+  int king_pos = get_king_pos(position, color);
   int opp_color = color ^ 1;
   int idx = 0;
   uint64_t stm_pieces = position.colors_bb[color],
@@ -124,10 +126,13 @@ int movegen(const Position &position, Move *move_list,
   targets &= ~stm_pieces;
 
   uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
-  uint64_t check_filter = ~0;
+  uint64_t check_filter = ~0ULL;
 
-  uint64_t king = get_king_pos(position, color);
-  uint64_t king_attacks = KingAttacks[king] & targets;
+  if (!is_valid_square(king_pos)) {
+    return idx;
+  }
+
+  uint64_t king_attacks = KING_ATK_SAFE(king_pos) & targets;
   while (king_attacks) {
     move_list[idx++] =
         pack_move(king_pos, pop_lsb(king_attacks), MoveTypes::Normal);
@@ -137,10 +142,12 @@ int movegen(const Position &position, Move *move_list,
     if (checkers & (checkers - 1)) {
       return idx;
     }
-  // Single check: restrict quiet/capture generation (except king moves already added)
-  // Allow: moving into squares between king and checker (for sliders) or capturing the checker.
-  int checker_sq = get_lsb(checkers);
-  check_filter = BetweenBBs[king][checker_sq] | (1ULL << checker_sq);
+    // Single check: restrict quiet/capture generation (except king moves already added)
+    // Allow: moving into squares between king and checker (for sliders) or capturing the checker.
+    int checker_sq = get_lsb(checkers);
+    uint64_t block_mask = BETWEEN_BB_SAFE(king_pos, checker_sq);
+    uint64_t capture_mask = is_valid_square(checker_sq) ? (1ULL << checker_sq) : 0ULL;
+    check_filter = block_mask | capture_mask;
   }
 
   pawn_moves(position, check_filter, move_list, idx, gen_type);
@@ -148,7 +155,7 @@ int movegen(const Position &position, Move *move_list,
   uint64_t knights = position.pieces_bb[PieceTypes::Knight] & stm_pieces;
   while (knights) {
     int from = pop_lsb(knights);
-    uint64_t to = KnightAttacks[from] & targets & check_filter;
+    uint64_t to = KNIGHT_ATK_SAFE(from) & targets & check_filter;
     while (to) {
       move_list[idx++] = pack_move(from, pop_lsb(to), MoveTypes::Normal);
     }
@@ -188,19 +195,23 @@ int movegen(const Position &position, Move *move_list,
   // illegal move.)
 
   for (int side : {Sides::Queenside, Sides::Kingside}) {
+    int rook_square = position.castling_squares[color][side];
 
-    if (position.castling_squares[color][side] == SquareNone) {
+    if (rook_square == SquareNone || !is_valid_square(rook_square) ||
+        !is_valid_square(king_pos)) {
       continue;
     }
 
     int rook_target = 56 * color + 3 + 2 * side;
     int king_target = 56 * color + 2 + 4 * side;
+    if (!is_valid_square(rook_target) || !is_valid_square(king_target)) {
+      continue;
+    }
 
-    uint64_t castle_bb =
-        BetweenBBs[position.castling_squares[color][side]][rook_target];
-    castle_bb |= BetweenBBs[king_pos][king_target];
-    castle_bb &=
-        ~(1ull << king_pos) & ~(1ull << position.castling_squares[color][side]);
+    uint64_t castle_bb = BETWEEN_BB_SAFE(rook_square, rook_target);
+    castle_bb |= BETWEEN_BB_SAFE(king_pos, king_target);
+    castle_bb &= ~(1ULL << king_pos);
+    castle_bb &= ~(1ULL << rook_square);
 
     if (occ & castle_bb) {
       continue;
@@ -324,6 +335,10 @@ int evaluate_promotion_tactics(Position &position, Move move) {
   int promo_type = extract_promo(move);
   int color = position.color;
   int bonus = 0;
+
+  if (!is_valid_square(from) || !is_valid_square(to)) {
+    return 0;
+  }
   
   // Make a temporary copy of the position to simulate the promotion
   Position temp_pos = position;
@@ -331,7 +346,7 @@ int evaluate_promotion_tactics(Position &position, Move move) {
   
   // Knight promotion tactics
   if (promo_type == Promos::Knight) {
-    uint64_t knight_attacks = KnightAttacks[to];
+    uint64_t knight_attacks = KNIGHT_ATK_SAFE(to);
     
     // Check for forks
     int fork_targets = 0;

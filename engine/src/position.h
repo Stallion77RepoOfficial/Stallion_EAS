@@ -395,6 +395,8 @@ uint64_t
 attacks_square(const Position &position, int sq,
                int color) { // Do we attack the square at position "sq"?
 
+  if (!is_valid_square(sq)) return 0ULL;
+
   uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
                      position.pieces_bb[PieceTypes::Queen];
   uint64_t rooks = position.pieces_bb[PieceTypes::Rook] |
@@ -403,11 +405,11 @@ attacks_square(const Position &position, int sq,
       position.colors_bb[Colors::White] | position.colors_bb[Colors::Black];
 
   uint64_t attackers =
-      (PawnAttacks[color ^ 1][sq] & position.pieces_bb[PieceTypes::Pawn]) |
-      (KnightAttacks[sq] & position.pieces_bb[PieceTypes::Knight]) |
+      (PAWN_ATK_SAFE(color ^ 1, sq) & position.pieces_bb[PieceTypes::Pawn]) |
+      (KNIGHT_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::Knight]) |
       (get_bishop_attacks(sq, occ) & bishops) |
       (get_rook_attacks(sq, occ) & rooks) |
-      (KingAttacks[sq] & position.pieces_bb[PieceTypes::King]);
+      (KING_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::King]);
 
   return attackers & position.colors_bb[color];
 }
@@ -416,17 +418,19 @@ uint64_t
 attacks_square(const Position &position, int sq, int color,
                uint64_t occ) { // Do we attack the square at position "sq"?
 
+  if (!is_valid_square(sq)) return 0ULL;
+
   uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
                      position.pieces_bb[PieceTypes::Queen];
   uint64_t rooks = position.pieces_bb[PieceTypes::Rook] |
                    position.pieces_bb[PieceTypes::Queen];
 
   uint64_t attackers =
-      (PawnAttacks[color ^ 1][sq] & position.pieces_bb[PieceTypes::Pawn]) |
-      (KnightAttacks[sq] & position.pieces_bb[PieceTypes::Knight]) |
+      (PAWN_ATK_SAFE(color ^ 1, sq) & position.pieces_bb[PieceTypes::Pawn]) |
+      (KNIGHT_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::Knight]) |
       (get_bishop_attacks(sq, occ) & bishops) |
       (get_rook_attacks(sq, occ) & rooks) |
-      (KingAttacks[sq] & position.pieces_bb[PieceTypes::King]);
+      (KING_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::King]);
 
   return attackers & position.colors_bb[color] & occ;
 }
@@ -434,24 +438,28 @@ attacks_square(const Position &position, int sq, int color,
 // Does anyone attack the square
 uint64_t attacks_square(const Position &position, int sq, uint64_t occ) {
 
+  if (!is_valid_square(sq)) return 0ULL;
+
   uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
                      position.pieces_bb[PieceTypes::Queen];
   uint64_t rooks = position.pieces_bb[PieceTypes::Rook] |
                    position.pieces_bb[PieceTypes::Queen];
 
-  return (PawnAttacks[Colors::White][sq] & position.colors_bb[Colors::Black] &
+  return (PAWN_ATK_SAFE(Colors::White, sq) & position.colors_bb[Colors::Black] &
           position.pieces_bb[PieceTypes::Pawn]) |
-         (PawnAttacks[Colors::Black][sq] & position.colors_bb[Colors::White] &
+         (PAWN_ATK_SAFE(Colors::Black, sq) & position.colors_bb[Colors::White] &
           position.pieces_bb[PieceTypes::Pawn]) |
-         (KnightAttacks[sq] & position.pieces_bb[PieceTypes::Knight]) |
+         (KNIGHT_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::Knight]) |
          (get_bishop_attacks(sq, occ) & bishops) |
          (get_rook_attacks(sq, occ) & rooks) |
-         (KingAttacks[sq] & position.pieces_bb[PieceTypes::King]);
+         (KING_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::King]);
 }
 
 uint64_t
 br_attacks_square(const Position &position, int sq, int color,
                   uint64_t occ) { // Do we attack the square at position "sq"?
+
+  if (!is_valid_square(sq)) return 0ULL;
 
   uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
                      position.pieces_bb[PieceTypes::Queen];
@@ -471,8 +479,16 @@ bool is_cap(const Position &position, Move &move) {
     return false;
   }
   int to = extract_to(move);
+  if (!is_valid_square(to)) {
+    return false;
+  }
+  int from_sq = extract_from(move);
+  if (!is_valid_square(from_sq)) {
+    return false;
+  }
   return (position.board[to] ||
-          (to == position.ep_square && position.board[extract_from(move)] ==
+          (to == position.ep_square &&
+           position.board[from_sq] ==
                                            Pieces::WPawn + position.color) ||
           is_queen_promo((move)));
 }
@@ -483,6 +499,10 @@ void update_nnue_state(ThreadInfo &thread_info, Move move,
   int from = extract_from(move), to = extract_to(move);
   int from_piece = position.board[from];
   int to_piece = from_piece, color = position.color;
+
+  if (!is_valid_square(from) || !is_valid_square(to)) {
+    return;
+  }
 
   int phase = thread_info.phase;
 
@@ -498,7 +518,12 @@ void update_nnue_state(ThreadInfo &thread_info, Move move,
   // en passant
   else if (extract_type(move) == MoveTypes::EnPassant) {
     captured_square = to + (color ? Directions::North : Directions::South);
-    captured_piece = position.board[captured_square];
+    if (is_valid_square(captured_square)) {
+      captured_piece = position.board[captured_square];
+    } else {
+      captured_square = SquareNone;
+      captured_piece = Pieces::Blank;
+    }
   }
 
   if (extract_type(move) ==
@@ -761,30 +786,44 @@ bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
   int piece_type = get_piece_type(piece);
   int type = extract_type(move);
 
+  if (!is_valid_square(from) || !is_valid_square(to)) {
+    return false;
+  }
+
   if (checkers & (checkers - 1)) {
     return (type == MoveTypes::Normal && piece_type == PieceTypes::King &&
-            (KingAttacks[from] & (1ull << to)));
+            (KING_ATK_SAFE(from) & (1ull << to)));
   }
 
   if (type == MoveTypes::Castling) {
     int side = to > from;
     int rook_target = 56 * color + 3 + 2 * side;
     int king_target = 56 * color + 2 + 4 * side;
+    int rook_square = position.castling_squares[color][side];
 
-    uint64_t castle_bb =
-        BetweenBBs[position.castling_squares[color][side]][rook_target];
-    castle_bb |= BetweenBBs[from][king_target];
-    castle_bb &=
-        ~(1ull << from) & ~(1ull << position.castling_squares[color][side]);
+    if (!is_valid_square(rook_square) || !is_valid_square(rook_target) ||
+        !is_valid_square(king_target)) {
+      return false;
+    }
+
+    uint64_t castle_bb = BETWEEN_BB_SAFE(rook_square, rook_target);
+    castle_bb |= BETWEEN_BB_SAFE(from, king_target);
+    if (is_valid_square(from)) {
+      castle_bb &= ~(1ull << from);
+    }
+    if (is_valid_square(rook_square)) {
+      castle_bb &= ~(1ull << rook_square);
+    }
 
     return (!checkers && position.castling_squares[color][side] != SquareNone &&
             !castle_bb);
   }
 
   if (type == MoveTypes::EnPassant) {
-    uint64_t pawn_attacks =
-        position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color];
     int dir = color ? -1 : 1;
+    if (position.ep_square == SquareNone || !is_valid_square(position.ep_square)) {
+      return false;
+    }
     return (to == position.ep_square && piece_type == PieceTypes::Pawn &&
             (to == from + Directions::Northwest * dir ||
              to == from + Directions::Northeast * dir));
@@ -795,13 +834,17 @@ bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
   }
 
   if (piece_type == PieceTypes::King) {
-    return (KingAttacks[from] & (1ull << to));
+    return (KING_ATK_SAFE(from) & (1ull << to));
   }
 
   if (checkers) {
   // Single check: move must block the line or capture the checker square.
   int checker_sq = get_lsb(checkers);
-  uint64_t single_check_filter = BetweenBBs[get_king_pos(position, color)][checker_sq] | (1ULL << checker_sq);
+  int king_sq = get_king_pos(position, color);
+  uint64_t single_check_filter = BETWEEN_BB_SAFE(king_sq, checker_sq);
+  if (is_valid_square(checker_sq)) {
+    single_check_filter |= (1ULL << checker_sq);
+  }
   if (!(single_check_filter & (1ULL << to))) return false;
   }
 
@@ -826,7 +869,7 @@ bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
 
   uint64_t attacks = 0;
   if (piece_type == PieceTypes::Knight) {
-    attacks = KnightAttacks[from];
+    attacks = KNIGHT_ATK_SAFE(from);
   } else if (piece_type == PieceTypes::Bishop) {
     attacks = get_bishop_attacks(from, occ);
   } else if (piece_type == PieceTypes::Rook) {
@@ -845,11 +888,18 @@ bool is_legal(const Position &position,
   int from = extract_from(move), to = extract_to(move), color = position.color,
       opp_color = color ^ 1;
 
+  if (!is_valid_square(from) || !is_valid_square(to)) {
+    return false;
+  }
+
   int from_piece = position.board[from];
 
   if (get_piece_type(from_piece) == PieceTypes::King) {
     if (extract_type(move) == MoveTypes::Castling) {
       to = 56 * color + 2 + (to > from) * 4;
+      if (!is_valid_square(to)) {
+        return false;
+      }
     }
     return !attacks_square(position, to, opp_color, occupied ^ (1ull << from));
   }
@@ -859,6 +909,9 @@ bool is_legal(const Position &position,
   // en passant
   if (extract_type(move) == MoveTypes::EnPassant) {
     int cap_square = to + (color ? Directions::North : Directions::South);
+    if (!is_valid_square(cap_square)) {
+      return false;
+    }
     return !br_attacks_square(position, king_pos, opp_color,
                               occupied ^ (1ull << from) ^ (1ull << to) ^
                                   (1ull << cap_square));

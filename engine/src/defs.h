@@ -195,13 +195,16 @@ namespace Random {
 
 uint8_t flip_sq(uint8_t sq) { return sq ^ 56; }
 uint8_t get_color(uint8_t piece) { return piece & 1; }
+inline bool is_valid_square(int sq) { return sq >= 0 && sq < 64; }
+
 Move pack_move(uint8_t from, uint8_t to, int8_t type) {
-  return (from << 10) + (to << 4) + type;
+  return ((from & 63) << 10) + ((to & 63) << 4) + (type & 3);
 }
 Move pack_move_promo(uint8_t from, uint8_t to, uint8_t promo) {
-  return (from << 10) + (to << 4) + (promo << 2) + MoveTypes::Promotion;
+  return ((from & 63) << 10) + ((to & 63) << 4) + ((promo & 3) << 2) +
+         MoveTypes::Promotion;
 }
-uint8_t extract_from(Move move) { return move >> 10; }
+uint8_t extract_from(Move move) { return (move >> 10) & 63; }
 uint8_t extract_to(Move move) { return (move >> 4) & 63; }
 uint8_t extract_promo(Move move) { return (move >> 2) & 3; }
 uint8_t extract_type(Move move) { return move & 3; }

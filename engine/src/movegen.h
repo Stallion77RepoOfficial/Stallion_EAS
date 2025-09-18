@@ -1,7 +1,9 @@
 #pragma once
 #include "defs.h"
 #include "position.h"
+#include <cassert>
 #include <cstdint>
+#include <cstdio>
 // Removed <span> for wider C++17 compatibility
 
 namespace Generate {
@@ -115,6 +117,31 @@ int movegen(const Position &position, Move *move_list,
   uint64_t stm_pieces = position.colors_bb[color],
            opp_pieces = position.colors_bb[color ^ 1];
 
+  auto load_between_bb = [&](int from_sq, int to_sq, const char *context,
+                             uint64_t &mask) -> bool {
+    if (!is_valid_square(from_sq) || !is_valid_square(to_sq)) {
+#ifndef NDEBUG
+      std::fprintf(stderr,
+                   "[movegen] Invalid BetweenBBs indices %d -> %d in %s\n",
+                   from_sq, to_sq, context);
+#endif
+      return false;
+    }
+    int idx_local = from_sq * 64 + to_sq;
+    assert(idx_local >= 0 && idx_local < 4096);
+    if (idx_local < 0 || idx_local >= 4096) {
+#ifndef NDEBUG
+      std::fprintf(stderr,
+                   "[movegen] BetweenBBs index overflow %d -> %d in %s\n",
+                   from_sq, to_sq, context);
+#endif
+      return false;
+    }
+    mask = BetweenBBs[static_cast<size_t>(from_sq)]
+                         [static_cast<size_t>(to_sq)];
+    return true;
+  };
+
   uint64_t targets = 0;
   if (gen_type != Generate::GenCaptures) {
     targets |= ~opp_pieces;
@@ -127,8 +154,8 @@ int movegen(const Position &position, Move *move_list,
   uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
   uint64_t check_filter = ~0;
 
-  uint64_t king = get_king_pos(position, color);
-  uint64_t king_attacks = KING_ATK_SAFE(king) & targets;
+  int king_sq = static_cast<int>(king_pos);
+  uint64_t king_attacks = KING_ATK_SAFE(king_sq) & targets;
   while (king_attacks) {
     move_list[idx++] =
         pack_move(king_pos, pop_lsb(king_attacks), MoveTypes::Normal);
@@ -138,10 +165,21 @@ int movegen(const Position &position, Move *move_list,
     if (checkers & (checkers - 1)) {
       return idx;
     }
-  // Single check: restrict quiet/capture generation (except king moves already added)
-  // Allow: moving into squares between king and checker (for sliders) or capturing the checker.
-  int checker_sq = get_lsb(checkers);
-  check_filter = BetweenBBs[king][checker_sq] | (1ULL << checker_sq);
+    // Single check: restrict quiet/capture generation (except king moves already added)
+    // Allow: moving into squares between king and checker (for sliders) or capturing the checker.
+    int checker_sq = get_lsb(checkers);
+    if (!is_valid_square(checker_sq)) {
+#ifndef NDEBUG
+      std::fprintf(stderr, "[movegen] Invalid checker square %d\n", checker_sq);
+#endif
+      return idx;
+    }
+    uint64_t between_mask = 0ULL;
+    if (load_between_bb(king_sq, checker_sq, "single check", between_mask)) {
+      check_filter = between_mask | (1ULL << checker_sq);
+    } else {
+      check_filter = (1ULL << checker_sq);
+    }
   }
 
   pawn_moves(position, check_filter, move_list, idx, gen_type);
@@ -201,9 +239,17 @@ int movegen(const Position &position, Move *move_list,
       continue;
     }
 
-    uint64_t castle_bb =
-        BetweenBBs[position.castling_squares[color][side]][rook_target];
-    castle_bb |= BetweenBBs[king_pos][king_target];
+    uint64_t castle_bb = 0ULL;
+    if (!load_between_bb(static_cast<int>(position.castling_squares[color][side]),
+                         rook_target, "castling rook path", castle_bb)) {
+      continue;
+    }
+    uint64_t king_path = 0ULL;
+    if (!load_between_bb(king_sq, king_target, "castling king path",
+                         king_path)) {
+      continue;
+    }
+    castle_bb |= king_path;
     castle_bb &=
         ~(1ull << king_pos) & ~(1ull << position.castling_squares[color][side]);
 

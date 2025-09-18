@@ -242,7 +242,8 @@ int eval(Position &position, ThreadInfo &thread_info) {
   uint64_t own_bishops = position.pieces_bb[PieceTypes::Bishop] & position.colors_bb[color];
   while (own_knights) {
     int sq = pop_lsb(own_knights);
-    mobility_bonus += pop_count(KnightAttacks[sq] & ~position.colors_bb[color]) / 2;
+    mobility_bonus +=
+        pop_count(KNIGHT_ATK_SAFE(sq) & ~position.colors_bb[color]) / 2;
   }
   while (own_bishops) {
     int sq = pop_lsb(own_bishops);
@@ -544,9 +545,11 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
     if (!in_check && picker.stage > Stages::Captures) break;
     if (!is_legal(position, move)) continue;
 
+    int to_sq = extract_to(move);
+    if (!is_valid_square(to_sq) || !is_valid_square(extract_from(move))) continue;
+
     if (!in_check && stand_pat != ScoreNone) {
-      int to = extract_to(move);
-      int captured_piece = position.board[to];
+      int captured_piece = position.board[to_sq];
       if (!captured_piece && extract_type(move) == MoveTypes::EnPassant) {
         captured_piece = Pieces::WPawn + (position.color ^ 1);
       }
@@ -1952,8 +1955,9 @@ finish:
           int to = extract_to(move);
           int promo_type = extract_promo(move);
           int promo_bonus = 0;
+          if (!is_valid_square(to)) continue;
           if (promo_type == Promos::Knight) {
-            uint64_t knight_attacks = KnightAttacks[to];
+            uint64_t knight_attacks = KNIGHT_ATK_SAFE(to);
             uint64_t valuable_targets = (temp_pos.pieces_bb[PieceTypes::Queen] | temp_pos.pieces_bb[PieceTypes::Rook] | temp_pos.pieces_bb[PieceTypes::King]) & temp_pos.colors_bb[position.color ^ 1];
             int fork_count = 0;
             while (valuable_targets) { int target_sq = pop_lsb(valuable_targets); if (knight_attacks & (1ULL << target_sq)) fork_count++; }

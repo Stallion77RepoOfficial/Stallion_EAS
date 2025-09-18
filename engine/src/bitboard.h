@@ -147,6 +147,42 @@ constexpr std::array<uint64_t, 64> RookMagics = {
     0x0082008820100402, 0x0012008410050806, 0x2009408802100144,
     0x821080440020810A};
 
+inline uint64_t KNIGHT_ATK_SAFE(int sq) {
+  if (!is_valid_square(sq)) return 0ULL;
+  return KnightAttacks[static_cast<size_t>(sq)];
+}
+
+inline uint64_t KING_ATK_SAFE(int sq) {
+  if (!is_valid_square(sq)) return 0ULL;
+  return KingAttacks[static_cast<size_t>(sq)];
+}
+
+inline uint64_t PAWN_ATK_SAFE(int color, int sq) {
+  if (!is_valid_square(sq)) return 0ULL;
+  int c = color & 1;
+  return PawnAttacks[static_cast<size_t>(c)][static_cast<size_t>(sq)];
+}
+
+inline uint64_t BISHOP_ATK_SAFE(int sq, uint64_t occ) {
+  if (!is_valid_square(sq)) return 0ULL;
+  size_t idx_sq = static_cast<size_t>(sq);
+  uint64_t mask = BishopMasks[idx_sq];
+  uint64_t index = ((occ & mask) * BishopMagics[idx_sq]) >> 55;
+  size_t attack_index = static_cast<size_t>(index);
+  if (attack_index >= BishopAttacks[idx_sq].size()) return 0ULL;
+  return BishopAttacks[idx_sq][attack_index];
+}
+
+inline uint64_t ROOK_ATK_SAFE(int sq, uint64_t occ) {
+  if (!is_valid_square(sq)) return 0ULL;
+  size_t idx_sq = static_cast<size_t>(sq);
+  uint64_t mask = RookMasks[idx_sq];
+  uint64_t index = ((occ & mask) * RookMagics[idx_sq]) >> 52;
+  size_t attack_index = static_cast<size_t>(index);
+  if (attack_index >= RookAttacks[idx_sq].size()) return 0ULL;
+  return RookAttacks[idx_sq][attack_index];
+}
+
 int get_file(int square) { return square % 8; }
 int get_rank(int square) { return square / 8; }
 
@@ -337,12 +373,10 @@ void fill_pawn_attacks() {
 }
 
 uint64_t get_bishop_attacks(int sq, uint64_t occ) {
-  return BishopAttacks[sq][(occ & BishopMasks[sq]) * BishopMagics[sq] >> 55];
+  return BISHOP_ATK_SAFE(sq, occ);
 }
 
-uint64_t get_rook_attacks(int sq, uint64_t occ) {
-  return RookAttacks[sq][(occ & RookMasks[sq]) * RookMagics[sq] >> 52];
-}
+uint64_t get_rook_attacks(int sq, uint64_t occ) { return ROOK_ATK_SAFE(sq, occ); }
 
 void init_bbs() {
   for (int square = a1; square < SqNone; square++) {

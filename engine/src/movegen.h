@@ -119,7 +119,8 @@ int movegen(const Position &position, Move *move_list,
 
   auto load_between_bb = [&](int from_sq, int to_sq, const char *context,
                              uint64_t &mask) -> bool {
-    if (!is_valid_square(from_sq) || !is_valid_square(to_sq)) {
+    if (!is_valid_square(from_sq) || !is_valid_square(to_sq) ||
+        from_sq >= 64 || to_sq >= 64) {
 #ifndef NDEBUG
       std::fprintf(stderr,
                    "[movegen] Invalid BetweenBBs indices %d -> %d in %s\n",
@@ -155,6 +156,9 @@ int movegen(const Position &position, Move *move_list,
   uint64_t check_filter = ~0;
 
   int king_sq = static_cast<int>(king_pos);
+  if (!is_valid_square(king_sq)) {
+    return idx;
+  }
   uint64_t king_attacks = KING_ATK_SAFE(king_sq) & targets;
   while (king_attacks) {
     move_list[idx++] =

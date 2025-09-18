@@ -387,51 +387,57 @@ bool material_draw(
 bool is_draw(const Position &position,
              ThreadInfo &thread_info) { // Detects if the position is a draw.
 
-  uint64_t hash = position.zobrist_key;
+  const uint64_t hash = position.zobrist_key;
+  const int halfmoves = position.halfmoves;
+  const int game_ply = thread_info.game_ply;
 
-  int halfmoves = position.halfmoves, game_ply = thread_info.game_ply;
+  // Fifty-move rule (automatic draw once counter reaches 100 half-moves)
   if (halfmoves >= 100) {
-    int color = position.color;
-
-    if (!attacks_square(position, get_king_pos(position, color), color ^ 1)) {
-      return true;
-    }
-
-    MoveInfo moves;
-  if (legal_movegen(position, moves.moves.data())) {
-      return true;
-    }
+    return true;
   }
+
+  // Insufficient material detection
   if (material_draw(position)) {
     return true;
   }
-  int start_index =
-      game_ply -
-      4; // game_ply - 1: last played move, game_ply - 2: your last played move,
-         // game_ply - 4 is the first opportunity a repetition is possible
-  int end_indx = std::max(game_ply - halfmoves, 0);
-  for (int i = start_index; i >= end_indx; i -= 2) {
-    if (hash == thread_info.game_hist[i].position_key) {
+
+  // Threefold repetition: only need to examine positions since the last
+  // irreversible move (captured by the half-move clock)
+  if (game_ply >= 2) {
+    const int min_index = std::max(game_ply - halfmoves, 0);
+    for (int i = game_ply - 2; i >= min_index; i -= 2) {
+      if (thread_info.game_hist[i].position_key == hash) {
+        return true;
+      }
+    }
+  }
+
+  // Stalemate: side to move has no legal moves and is not in check
+  const int king_sq = get_king_pos(position, position.color);
+  if (!attacks_square(position, king_sq, position.color ^ 1)) {
+    std::array<Move, ListSize> legal_moves{};
+    if (legal_movegen(position, legal_moves.data()) == 0) {
       return true;
     }
   }
+
   return false;
 }
 
 int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
-            std::vector<TTBucket> &TT) {
+            std::vector<TTBucket> &TT, int qdepth = 0) {
   constexpr int MAX_QPLY = 128;
-  constexpr int MAX_QDEPTH = 64;
+  constexpr int MAX_QDEPTH = 128;
 
   auto eval_now = [&](Position &pos) {
     return correct_eval(pos, thread_info, eval(pos, thread_info));
   };
 
-  int ply = thread_info.search_ply;
-
-  if (ply >= MAX_QDEPTH) {
+  if (qdepth >= MAX_QDEPTH) {
     return eval_now(position);
   }
+
+  int ply = thread_info.search_ply;
 
   if (ply && is_draw(position, thread_info)) {
     return eval_now(position);
@@ -589,7 +595,8 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
 
     if (can_recurse) {
       ss_push(position, thread_info, move);
-      score = -qsearch(-beta, -alpha, moved_position, thread_info, TT);
+      score = -qsearch(-beta, -alpha, moved_position, thread_info, TT,
+                       qdepth + 1);
       ss_pop(thread_info);
     } else {
       int leaf_eval = eval_now(moved_position);

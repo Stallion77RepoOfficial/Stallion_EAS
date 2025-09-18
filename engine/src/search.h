@@ -421,12 +421,26 @@ bool is_draw(const Position &position,
 int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
             std::vector<TTBucket> &TT) {
   constexpr int MAX_QPLY = 128;
+  constexpr int MAX_QDEPTH = 64;
 
   auto eval_now = [&](Position &pos) {
     return correct_eval(pos, thread_info, eval(pos, thread_info));
   };
 
   int ply = thread_info.search_ply;
+
+  if (ply >= MAX_QDEPTH) {
+    return eval_now(position);
+  }
+
+  if (ply && is_draw(position, thread_info)) {
+    return eval_now(position);
+  }
+
+  MoveInfo legal_probe;
+  if (legal_movegen(position, legal_probe.moves.data()) == 0) {
+    return eval_now(position);
+  }
 
   if (thread_info.max_depth > 0 && ply >= thread_info.max_depth) {
     return eval_now(position);
@@ -450,16 +464,6 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
 
   if (ply >= MaxSearchDepth - 1 || ply >= MAX_QPLY) {
     return eval_now(position);
-  }
-
-  if (ply && is_draw(position, thread_info)) {
-    int draw_score = 1 - (thread_info.nodes.load() & 3);
-    int material = material_eval(position);
-    if (material < 0)
-      draw_score += 50;
-    else if (material > 0)
-      draw_score -= 50;
-    return draw_score;
   }
 
   uint64_t hash = position.zobrist_key;

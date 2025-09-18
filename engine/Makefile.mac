@@ -1,5 +1,7 @@
-# Summary: Removed duplicate recipes and guarded strip invocation with newline termination.
-.PHONY: build default
+# Makefile.mac — macOS için
+# Normal ve ASAN build hedefleri
+
+.PHONY: all asan
 
 EXE := stallion_eas_mac
 
@@ -8,23 +10,26 @@ SOURCES := src/stallion.cpp \
            fathom/src/tbchess.cpp
 
 CXX := clang++
-
 CXXFLAGS := -O3 -std=c++23 -ffast-math -march=armv8-a -pthread
-
 LINKER := -lm
-
-OUT := $(EXE)
-
 STRIP := llvm-strip
 
-build: $(EXE)
-
-default: build
-
-$(EXE): $(SOURCES)
-	$(CXX) $^ $(CXXFLAGS) -o $(OUT) $(LINKER)
+# Varsayılan release build
+all:
+	@echo "Building for macOS..."
+	$(CXX) $(SOURCES) $(CXXFLAGS) -o $(EXE) $(LINKER)
 	@if command -v $(STRIP) >/dev/null 2>&1; then \
-	$(STRIP) $(OUT); \
+		$(STRIP) $(EXE); \
 	else \
-	echo "Strip tool '$(STRIP)' not found; skipping."; \
+		echo "Strip tool '$(STRIP)' not found; skipping."; \
 	fi
+
+# AddressSanitizer ile debug build
+asan:
+	@echo "Building ASAN version for macOS..."
+	$(CXX) $(SOURCES) \
+		-std=c++23 -g -O1 -fsanitize=address -fno-omit-frame-pointer \
+		-march=armv8-a -pthread -o $(EXE)_asan $(LINKER)
+	@echo "ASAN build created as $(EXE)_asan (symbols preserved, no strip)"
+
+debug: asan

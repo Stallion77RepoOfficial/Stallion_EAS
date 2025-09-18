@@ -28,3 +28,10 @@ $(EXE): $(SOURCES)
 	else \
 	echo "Strip tool '$(STRIP)' not found; skipping."; \
 	fi
+
+# AddressSanitizer ile debug build
+asan:
+	$(CXX) $(SOURCES) -std=c++23 -g -O1 -fsanitize=address -fno-omit-frame-pointer -pthread -o $(EXE)_asan.exe $(LINKER)
+	@echo "ASAN build created as $(EXE)_asan.exe (symbols preserved, no strip)"
+
+debug: asan

@@ -31,3 +31,20 @@ all:
 	$(MAKE) -f Makefile.linux
 
 default: mac
+
+# Debug/ASAN build targets
+debug-mac:
+	@echo "Building debug/ASAN for macOS..."
+	$(MAKE) -f Makefile.mac asan
+
+debug-linux:
+	@echo "Building debug/ASAN for Linux..."
+	$(MAKE) -f Makefile.linux asan
+
+debug-windows:
+	@echo "Building debug/ASAN for Windows..."
+	$(MAKE) -f Makefile.windows asan
+
+debug-android:
+	@echo "Building debug/ASAN for Android..."
+	$(MAKE) -f Makefile.android asan

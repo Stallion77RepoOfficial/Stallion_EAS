@@ -422,15 +422,20 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
             std::vector<TTBucket> &TT) {
   constexpr int MAX_QPLY = 128;
 
-  if (thread_info.max_depth > 0 &&
-      thread_info.search_ply >= thread_info.max_depth) {
-    return correct_eval(position, thread_info, eval(position, thread_info));
+  auto eval_now = [&](Position &pos) {
+    return correct_eval(pos, thread_info, eval(pos, thread_info));
+  };
+
+  int ply = thread_info.search_ply;
+
+  if (thread_info.max_depth > 0 && ply >= thread_info.max_depth) {
+    return eval_now(position);
   }
 
   if (out_of_time(thread_info)) {
-    return correct_eval(position, thread_info,
-                        thread_info.nnue_state.evaluate(position.color,
-                                                         thread_info.phase));
+    int nnue_eval = thread_info.nnue_state.evaluate(position.color,
+                                                    thread_info.phase);
+    return correct_eval(position, thread_info, nnue_eval);
   }
 
   if (thread_info.use_syzygy && tb_initialized) {
@@ -439,25 +444,26 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
   }
 
   GameHistory *ss = &(thread_info.game_hist[thread_info.game_ply]);
-  int ply = thread_info.search_ply;
 
   ++thread_info.nodes;
-
   if (ply > thread_info.seldepth) thread_info.seldepth = ply;
+
   if (ply >= MaxSearchDepth - 1 || ply >= MAX_QPLY) {
-    return correct_eval(position, thread_info, eval(position, thread_info));
+    return eval_now(position);
   }
 
   if (ply && is_draw(position, thread_info)) {
     int draw_score = 1 - (thread_info.nodes.load() & 3);
     int material = material_eval(position);
-    if (material < 0) draw_score += 50;
-    else if (material > 0) draw_score -= 50;
+    if (material < 0)
+      draw_score += 50;
+    else if (material > 0)
+      draw_score -= 50;
     return draw_score;
   }
 
   uint64_t hash = position.zobrist_key;
-  uint8_t phase = thread_info.phase;
+  uint8_t saved_phase = thread_info.phase;
 
   bool tt_hit;
   TTEntry &entry = probe_entry(hash, tt_hit, thread_info.searches, TT);
@@ -474,12 +480,11 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
     tt_move = entry.best_move;
   }
 
-  if (tt_score != ScoreNone) {
-    if ((entry_type == EntryTypes::Exact) ||
-        (entry_type == EntryTypes::LBound && tt_score >= beta) ||
-        (entry_type == EntryTypes::UBound && tt_score <= alpha)) {
-      return tt_score;
-    }
+  if (tt_score != ScoreNone &&
+      ((entry_type == EntryTypes::Exact) ||
+       (entry_type == EntryTypes::LBound && tt_score >= beta) ||
+       (entry_type == EntryTypes::UBound && tt_score <= alpha))) {
+    return tt_score;
   }
 
   bool in_check = attacks_square(position, get_king_pos(position, position.color),
@@ -493,11 +498,8 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
   bool raised_alpha = false;
 
   if (!in_check) {
-    if (tt_static_eval == ScoreNone) {
-      raw_eval = eval(position, thread_info);
-    } else {
-      raw_eval = tt_static_eval;
-    }
+    raw_eval = (tt_static_eval == ScoreNone) ? eval(position, thread_info)
+                                             : tt_static_eval;
     static_eval = correct_eval(position, thread_info, raw_eval);
     ss->static_eval = static_eval;
 
@@ -540,13 +542,20 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
       PieceTypes::Knight, PieceTypes::Bishop, PieceTypes::Rook,
       PieceTypes::Queen};
 
+  auto fallback_score = [&](int current_best) {
+    if (current_best != ScoreNone) return current_best;
+    if (!in_check && stand_pat != ScoreNone) return stand_pat;
+    return eval_now(position);
+  };
+
   while (Move move =
              next_move(picker, position, thread_info, tt_move, !in_check)) {
     if (!in_check && picker.stage > Stages::Captures) break;
     if (!is_legal(position, move)) continue;
 
+    int from_sq = extract_from(move);
     int to_sq = extract_to(move);
-    if (!is_valid_square(to_sq) || !is_valid_square(extract_from(move))) continue;
+    if (!is_valid_square(from_sq) || !is_valid_square(to_sq)) continue;
 
     if (!in_check && stand_pat != ScoreNone) {
       int captured_piece = position.board[to_sq];
@@ -566,47 +575,58 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
 
     Position moved_position = position;
     make_move(moved_position, move);
+    auto *nnue_before = thread_info.nnue_state.m_curr;
     update_nnue_state(thread_info, move, position, moved_position);
 
-    ss_push(position, thread_info, move);
-    int score = -qsearch(-beta, -alpha, moved_position, thread_info, TT);
-    ss_pop(thread_info);
-    thread_info.phase = phase;
+    int score = ScoreNone;
+    bool can_recurse = (thread_info.search_ply + 1 < MaxSearchDepth) &&
+                       (thread_info.search_ply + 1 < MAX_QPLY) &&
+                       (thread_info.game_ply < GameSize);
 
-    if (thread_data.stop || thread_info.datagen_stop) {
-      int fallback = best_score != ScoreNone
-                          ? best_score
-                          : (!in_check && stand_pat != ScoreNone
-                                 ? stand_pat
-                                 : correct_eval(position, thread_info,
-                                                eval(position, thread_info)));
-      return fallback;
-    }
-
-    if (score > best_score) {
-      best_score = score;
-      if (score > alpha) {
-        best_move = move;
-        raised_alpha = true;
-        alpha = score;
-        if (score >= beta) break;
+    if (can_recurse) {
+      ss_push(position, thread_info, move);
+      score = -qsearch(-beta, -alpha, moved_position, thread_info, TT);
+      ss_pop(thread_info);
+    } else {
+      int leaf_eval = eval_now(moved_position);
+      score = -leaf_eval;
+      if (thread_info.nnue_state.m_curr != nnue_before) {
+        thread_info.nnue_state.pop();
       }
     }
+
+    thread_info.phase = saved_phase;
+
+    if (thread_data.stop || thread_info.datagen_stop) {
+      return fallback_score(best_score);
+    }
+
+    if (best_score == ScoreNone || score > best_score) {
+      best_score = score;
+    }
+
+    if (score > alpha) {
+      alpha = score;
+      best_move = move;
+      raised_alpha = true;
+      if (score >= beta) break;
+    }
   }
+
+  thread_info.phase = saved_phase;
 
   if (best_score == ScoreNone) {
     if (in_check) {
       return Mate + ply;
     }
-    best_score = stand_pat != ScoreNone
-                     ? stand_pat
-                     : correct_eval(position, thread_info,
-                                     eval(position, thread_info));
+    best_score = (stand_pat != ScoreNone) ? stand_pat : eval_now(position);
   }
 
   uint8_t store_type = EntryTypes::UBound;
-  if (best_score >= beta) store_type = EntryTypes::LBound;
-  else if (raised_alpha) store_type = EntryTypes::Exact;
+  if (best_score >= beta)
+    store_type = EntryTypes::LBound;
+  else if (raised_alpha)
+    store_type = EntryTypes::Exact;
 
   insert_entry(entry, hash, 0, best_move, raw_eval,
                score_to_tt(best_score, ply), store_type, thread_info.searches);

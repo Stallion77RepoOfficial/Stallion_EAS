@@ -144,7 +144,9 @@ struct ThreadInfoBase {
   float endgame_aggressiveness = 1.50f;
 
   // (Legacy) Sacrifice lookahead parametreleri - ileride kaldırılabilir
-  int sacrifice_lookahead = 3;
+  // Sacrifice lookahead: 0 = disabled, 1 = one-ply lookahead. Keep small to
+  // limit extra search cost. Default 1.
+  int sacrifice_lookahead = 1;
   int sacrifice_lookahead_time_multiplier = 200;
   int sacrifice_lookahead_aggressiveness = 150;
 
@@ -352,6 +354,15 @@ uint64_t hash_to_idx(uint64_t hash) {
   return (uint128_t(hash) * uint128_t(TT_size)) >> 64;
 }
 
+// Safe snapshot helper: returns current TT size while holding data_mutex and
+// ensuring we won't observe a resizing in progress. Use this for diagnostics
+// or read-only sampling where a tiny mutex hold is acceptable.
+inline uint64_t safe_TT_size() {
+  std::lock_guard<std::mutex> lg(thread_data.data_mutex);
+  if (TT_resizing.load(std::memory_order_acquire)) return 0;
+  return TT.size();
+}
+
 // Safe prefetch helper: some call sites used __builtin_prefetch(&TT[idx])
 // without synchronization which can race with TT.assign() and cause
 // SEGVs under ASAN. Use this helper to prefetch the bucket under the
@@ -371,8 +382,8 @@ int entry_quality(TTEntry &entry, int searches) {
   return entry.depth - age_diff * 8;
 }
 
-TTEntry &probe_entry(uint64_t hash, bool &hit, uint8_t searches,
-                     std::vector<TTBucket> &TT) {
+TTEntry probe_entry(uint64_t hash, bool &hit, uint8_t searches,
+                    std::vector<TTBucket> &TT) {
   // Double-snapshot approach: capture TT.data() and TT.size() twice and only
   // access TT if both snapshots match. This avoids dereferencing a vector
   // that was reallocated concurrently (which would cause a SEGV). It's a

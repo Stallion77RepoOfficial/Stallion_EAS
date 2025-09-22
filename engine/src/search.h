@@ -640,7 +640,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
   uint8_t saved_phase = thread_info.phase;
 
   bool tt_hit;
-  TTEntry &entry = probe_entry(hash, tt_hit, thread_info.searches, TT);
+  TTEntry entry = probe_entry(hash, tt_hit, thread_info.searches, TT);
 
   int entry_type = EntryTypes::None;
   int tt_static_eval = ScoreNone;
@@ -909,7 +909,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   bool tt_hit;
-  TTEntry &entry = probe_entry(hash, tt_hit, thread_info.searches, TT);
+  TTEntry entry = probe_entry(hash, tt_hit, thread_info.searches, TT);
 
   int entry_type = EntryTypes::None, tt_static_eval = ScoreNone,
       tt_score = ScoreNone, tt_move = MoveNone;
@@ -1101,17 +1101,16 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   int best_score = ScoreNone, moves_played = 0; // Generate and score moves
   bool is_capture = false, skip = false;
   
-  // Materyal feda analizi (SEE tabanlı)
-  // İlk iki katmanda (ply < 2) ve sacrifice_lookahead > 0 ise potansiyel fedaları değerlendir.
-  // Tetikleme ply sınırı artık doğrudan sacrifice_lookahead değeri (0..6) ile aynı
-  // LookAhead = N  => ilk N ply (0..N-1) içinde feda analizi aktif
-  // (LookAhead=0 kapalı, 1 sadece kök, 2 kök+1, ...)
-  if (thread_info.search_ply < thread_info.sacrifice_lookahead && thread_info.sacrifice_lookahead > 0 && !in_check) {
+  // Material sacrifice analysis (SEE-based).
+  // If sacrifice_lookahead > 0, evaluate potential sacrifices. Range is now
+  // 0..1: 0 disables the feature, 1 enables a single-ply lookahead.
+  // Behavior: LookAhead = 1 means analysis at root (one-ply horizon); 0 = off.
+  if (thread_info.sacrifice_lookahead > 0 && thread_info.search_ply < thread_info.sacrifice_lookahead && !in_check) {
     std::array<Move, ListSize> moves;
     uint64_t checkers_local = attacks_square(position, get_king_pos(position, color), color ^ 1);
     int nmoves_local = movegen(position, moves.data(), checkers_local, Generate::GenAll);
-  // Statik lookahead sınırı: doğrudan kullanıcı ayarı (0..6)
-  int lookahead_cap = std::clamp(thread_info.sacrifice_lookahead, 0, 6);
+  // Static lookahead cap: clamp to 0..1
+  int lookahead_cap = std::clamp(thread_info.sacrifice_lookahead, 0, 1);
 
     for (int i = 0; i < nmoves_local; i++) {
       Move m = moves[i];

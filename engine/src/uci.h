@@ -269,7 +269,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
              "option name MiddlegameAggressiveness type spin default 150 min 50 max 150\n"
              "option name LateMiddlegameAggressiveness type spin default 150 min 50 max 150\n"
              "option name EndgameAggressiveness type spin default 150 min 50 max 150\n"
-             "option name SacrificeLookAhead type spin default 3 min 0 max 6\n"
+             "option name SacrificeLookAhead type spin default 1 min 0 max 1\n"
              "option name SacrificeLookAheadTimeMultiplier type spin default 200 min 50 max 200\n"
              "option name SacrificeLookAheadAggressiveness type spin default 150 min 50 max 150\n"
              "option name MaxMoveTime type spin default 0 min 0 max 10000\n"
@@ -423,7 +423,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       else if (optName == "EndgameAggressiveness") {
         bool ok=false; int v = parse_int(valueStr, ok); if (!ok) continue; v = std::clamp(v, 50, 150); thread_info.endgame_aggressiveness = v / 100.0f; }
       else if (optName == "SacrificeLookAhead") {
-        bool ok=false; int v = parse_int(valueStr, ok); if (!ok) continue; v = std::clamp(v, 0, 6); thread_info.sacrifice_lookahead = v; }
+        bool ok=false; int v = parse_int(valueStr, ok); if (!ok) continue; v = std::clamp(v, 0, 1); thread_info.sacrifice_lookahead = v; }
       else if (optName == "SacrificeLookAheadTimeMultiplier") {
         bool ok=false; int v = parse_int(valueStr, ok); if (!ok) continue; v = std::clamp(v, 50, 200); thread_info.sacrifice_lookahead_time_multiplier = v; }
       else if (optName == "SacrificeLookAheadAggressiveness") {
@@ -893,16 +893,22 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
 
     else if (command == "hashfull") {
       int filled = 0;
-      int sample_size = std::min(static_cast<int>(TT_size), 1000);
-      for (int i = 0; i < sample_size; i++) {
-        for (auto& entry : TT[i].entries) {
-          if (entry.score != 0 || entry.get_type() != EntryTypes::None) {
-            filled++;
-            break;
+      int sample_size = static_cast<int>(std::min<uint64_t>(safe_TT_size(), 1000));
+      if (sample_size <= 0) sample_size = 0;
+      // Acquire mutex while sampling TT to avoid races with resize/new_game
+      {
+        std::lock_guard<std::mutex> lg(thread_data.data_mutex);
+        for (int i = 0; i < sample_size; i++) {
+          for (auto& entry : TT[i].entries) {
+            if (entry.score != 0 || entry.get_type() != EntryTypes::None) {
+              filled++;
+              break;
+            }
           }
         }
       }
-  safe_printf("info hashfull %d\n", (filled * 1000) / sample_size);
+      if (sample_size == 0) sample_size = 1; // avoid div by zero
+      safe_printf("info hashfull %d\n", (filled * 1000) / sample_size);
     }
   }
 

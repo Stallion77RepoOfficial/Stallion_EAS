@@ -48,21 +48,24 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
     for (int i = 0; i < picker.captures.len; i++) {
       Move move = picker.captures.moves[i];
 
+      int from = extract_from(move), to = extract_to(move);
+      if (!is_valid_square(from) || !is_valid_square(to)) continue;
+
       if (extract_promo(move) == Promos::Queen) {
         picker.captures.scores[i] = QueenPromoScore;
       }
 
       else {
-        int from_piece = position.board[extract_from(move)],
-            to_piece = position.board[extract_to(move)];
+        int from_piece = position.board[from],
+            to_piece = position.board[to];
 
         picker.captures.scores[i] = GoodCaptureBaseScore +
                                     SeeValues[get_piece_type(to_piece)] * 100 -
                                     SeeValues[get_piece_type(from_piece)] / 100;
 
-        int piece = position.board[extract_from(move)], to = extract_to(move);
+        int piece = position.board[from], to_sq = to;
 
-        picker.captures.scores[i] += thread_info.CapHistScores[piece][to];
+        picker.captures.scores[i] += thread_info.CapHistScores[piece][to_sq];
       }
     }
 
@@ -97,21 +100,44 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
     int ply4last = MoveNone;
     int ply4piece = Pieces::Blank;
 
+    // Defensive: ensure the history pointer is valid and that we have enough
+    // plies recorded before dereferencing previous entries. If history is
+    // missing or misaligned, skip these heuristics rather than crashing.
+    // Use index-based, bounds-checked access into the global game_hist to
+    // avoid creating invalid pointers via arithmetic on picker.ss. Pointer
+    // subtraction can produce a non-null but invalid pointer if the base was
+    // misaligned; indexing into thread_info.game_hist with explicit bounds is
+    // safer.
     if (thread_info.game_ply >= 1) {
-      their_last = extract_to((picker.ss - 1)->played_move);
-      their_piece = (picker.ss - 1)->piece_moved;
+      int idx = thread_info.game_ply - 1;
+      if (idx >= 0 && idx < GameSize) {
+        GameHistory &h1 = thread_info.game_hist[idx];
+        their_last = extract_to(h1.played_move);
+        their_piece = h1.piece_moved;
+      }
     }
     if (thread_info.game_ply >= 2) {
-      our_last = extract_to((picker.ss - 2)->played_move);
-      our_piece = (picker.ss - 2)->piece_moved;
+      int idx = thread_info.game_ply - 2;
+      if (idx >= 0 && idx < GameSize) {
+        GameHistory &h2 = thread_info.game_hist[idx];
+        our_last = extract_to(h2.played_move);
+        our_piece = h2.piece_moved;
+      }
     }
     if (thread_info.game_ply >= 4) {
-      ply4last = extract_to((picker.ss - 4)->played_move);
-      ply4piece = (picker.ss - 4)->piece_moved;
+      int idx = thread_info.game_ply - 4;
+      if (idx >= 0 && idx < GameSize) {
+        GameHistory &h4 = thread_info.game_hist[idx];
+        ply4last = extract_to(h4.played_move);
+        ply4piece = h4.piece_moved;
+      }
     }
 
     for (int i = 0; i < picker.quiets.len; i++) {
       Move move = picker.quiets.moves[i];
+
+      int from = extract_from(move), to = extract_to(move);
+      if (!is_valid_square(from) || !is_valid_square(to)) continue;
 
       if (move == thread_info.KillerMoves[thread_info.search_ply]) {
         // Killer move score
@@ -120,7 +146,7 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
 
       else {
 
-        int piece = position.board[extract_from(move)], to = extract_to(move);
+        int piece = position.board[from];
         picker.quiets.scores[i] = thread_info.HistoryScores[piece][to];
 
         if (their_last != MoveNone) {

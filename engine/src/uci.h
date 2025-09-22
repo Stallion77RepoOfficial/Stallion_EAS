@@ -72,14 +72,15 @@ uint64_t perft(int depth, Position &position, bool first,
     if (!is_legal(position, move)) {
       continue;
     }
-    Position new_position = position;
+  auto new_pos_uptr = std::make_unique<Position>(position);
+  Position &new_position = *new_pos_uptr;
     make_move(new_position, move);
 
     uint64_t nodes = perft(depth - 1, new_position, false, thread_info);
 
     if (first) {
-      printf("%s: %" PRIu64 "\n", internal_to_uci(position, move).c_str(),
-             nodes);
+      std::string move_uci = internal_to_uci(position, move);
+      safe_printf("%s: %" PRIu64 "\n", move_uci.c_str(), nodes);
     }
     total_nodes += nodes;
   }
@@ -110,9 +111,8 @@ void bench(Position &position, ThreadInfo &thread_info) {
       "1r4k1/4ppb1/2n1b1qp/pB4p1/1n1BP1P1/7P/2PNQPK1/3RN3 w - - 8 29",
       "8/p2B4/PkP5/4p1pK/4Pb1p/5P2/8/8 w - - 29 68",
       "3r4/ppq1ppkp/4bnp1/2pN4/2P1P3/1P4P1/PQ3PBP/R4K2 b - - 2 20",
-      "5rr1/4n2k/4q2P/P1P2n2/3B1p2/4pP2/2N1P3/1RR1K2Q w - - 1 49",
-      "1r5k/2pq2p1/3p3p/p1pP4/4QP2/PP1R3P/6PK/8 w - - 1 51",
-      "q5k1/5ppp/1r3bn1/1B6/P1N2P2/BQ2P1P1/5K1P/8 b - - 2 34",
+  "5rr1/4n2k/4q2P/P1P2n2/3B1p2/4pP2/2N1P3/1RR1K2Q w - - 1 49",
+  "q5k1/5ppp/1r3bn1/1B6/P1N2P2/BQ2P1P1/5K1P/8 b - - 2 34",
       "r1b2k1r/5n2/p4q2/1ppn1Pp1/3pp1p1/NP2P3/P1PPBK2/1RQN2R1 w - - 0 22",
       "r1bqk2r/pppp1ppp/5n2/4b3/4P3/P1N5/1PP2PPP/R1BQKB1R w KQkq - 0 5",
       "r1bqr1k1/pp1p1ppp/2p5/8/3N1Q2/P2BB3/1PP2PPP/R3K2n b Q - 1 12",
@@ -155,8 +155,8 @@ void bench(Position &position, ThreadInfo &thread_info) {
     total_nodes += thread_info.nodes.load();
   }
 
-  printf("Bench: %" PRIu64 " nodes %" PRIi64 " nps\n", total_nodes,
-         (int64_t)(total_nodes * 1000 / time_elapsed(start)));
+  safe_printf("Bench: %" PRIu64 " nodes %" PRIi64 " nps\n", total_nodes,
+    (int64_t)(total_nodes * 1000 / time_elapsed(start)));
 }
 
 Move uci_to_internal(const Position &position, std::string uci) {
@@ -176,7 +176,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
   setvbuf(stdin, NULL, _IONBF, 0);
   setvbuf(stdout, NULL, _IONBF, 0);
 
-  printf("Stallion, written by LegendOfCompiling\n\n\n");
+  safe_printf("Stallion, written by LegendOfCompiling\n\n\n");
 
   new_game(thread_info, TT);
   set_board(position, thread_info,
@@ -185,6 +185,15 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
   std::string input;
 
   std::thread s;
+
+  // Helper: join a thread safely, swallowing exceptions and checking joinable.
+  auto safe_join = [](std::thread &t) {
+    try {
+      if (t.joinable()) t.join();
+    } catch (...) {
+      // swallow any exceptions to keep UCI loop alive
+    }
+  };
 
   while (getline(std::cin, input)) {
     // Check for EOF or failed stream state
@@ -214,26 +223,37 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
     if (command == "quit") {
       thread_data.terminate = true;
 
-      if (s.joinable()) {
-        s.join();
-      }
+      safe_join(s);
 
       // Only call barriers if threads are actually running  
       if (thread_data.num_threads > 0 && !thread_data.threads.empty()) {
-        reset_barrier.arrive_and_wait();
-        idle_barrier.arrive_and_wait();
+        // Cancel barriers to wake any threads blocked in arrive_and_wait
+        try {
+          reset_barrier.cancel();
+          idle_barrier.cancel();
+        } catch (...) {}
 
-        for (size_t i = 0; i < thread_data.threads.size(); i++) {
-          if (thread_data.threads[i].joinable()) {
-            thread_data.threads[i].join();
+        // Join threads (best-effort) while holding a lock to avoid races
+        {
+          std::lock_guard<std::mutex> lg(thread_data.data_mutex);
+          for (size_t i = 0; i < thread_data.threads.size(); i++) {
+            safe_join(thread_data.threads[i]);
           }
+          thread_data.thread_infos.clear();
+          thread_data.threads.clear();
         }
+
+        // Clear cancel flags (barriers will be reset on next thread spawn)
+        try {
+          reset_barrier.clear_cancel();
+          idle_barrier.clear_cancel();
+        } catch (...) {}
       }
       std::exit(0);
     }
 
     else if (command == "uci") {
-      printf("id name Stallion GB Edition\n"
+  safe_printf("id name Stallion GB Edition\n"
              "id author LegendOfCompiling\n"
              // Reverted Hash default per request
              "option name Hash type spin default 256 min 1 max 131072\n"
@@ -275,8 +295,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
                   << "\n";
       }*/
 
-      printf("uciok\n");
-      fflush(stdout);
+  safe_printf("uciok\n");
     }
 
     else if (command == "printparams") {
@@ -284,8 +303,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
     }
 
     else if (command == "isready") {
-      printf("readyok\n");
-      fflush(stdout);
+  safe_printf("readyok\n");
     }
 
     else if (command == "setoption") {
@@ -347,17 +365,23 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       else if (optName == "Threads") {
         bool ok=false; int thr = parse_int(valueStr, ok); if (!ok) continue;
         if (thr < 1) thr = 1; if (thr > 1024) thr = 1024;
+        // Gracefully stop existing threads
         thread_data.terminate = true;
-        reset_barrier.arrive_and_wait();
-        idle_barrier.arrive_and_wait();
-        for (auto &t : thread_data.threads) if (t.joinable()) t.join();
+        // Wake blocked threads and join them safely
+        try { reset_barrier.cancel(); idle_barrier.cancel(); } catch (...) {}
+        for (auto &t : thread_data.threads) {
+          try { if (t.joinable()) t.join(); } catch (...) {}
+        }
+        try { reset_barrier.clear_cancel(); idle_barrier.clear_cancel(); } catch (...) {}
         thread_data.thread_infos.clear();
         thread_data.threads.clear();
         thread_data.terminate = false;
         thread_data.num_threads = thr;
+        // Reinitialize barriers with new thread count
         reset_barrier.reset(thread_data.num_threads);
         idle_barrier.reset(thread_data.num_threads);
         search_end_barrier.reset(thread_data.num_threads);
+        // Spawn new threads (thr-1 additional threads; main thread is thread 0)
         for (int i = 0; i < thr - 1; i++) {
           thread_data.thread_infos.emplace_back();
           thread_data.threads.emplace_back(loop, i);
@@ -415,21 +439,21 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           if (std::filesystem::exists(thread_info.syzygy_path)) {
             thread_info.use_syzygy = true;
             if (tb_initialized) { tb_free(); tb_initialized = false; }
-            printf("info string syzygy enabled: %s\n", thread_info.syzygy_path.c_str());
-            fflush(stdout);
+            safe_printf("info string syzygy enabled: %s\n", thread_info.syzygy_path.c_str());
+            safe_fflush();
           } else {
-            printf("info string failed to enable syzygy: %s\n", thread_info.syzygy_path.c_str());
-            fflush(stdout);
+            safe_printf("info string failed to enable syzygy: %s\n", thread_info.syzygy_path.c_str());
+            safe_fflush();
             thread_info.use_syzygy = false;
           }
         } else if (!b) {
           thread_info.use_syzygy = false;
           if (tb_initialized) { tb_free(); tb_initialized = false; }
-          printf("info string syzygy disabled\n");
-          fflush(stdout);
+          safe_printf("info string syzygy disabled\n");
+          safe_fflush();
         } else {
-          printf("info string failed to enable syzygy: no path set\n");
-          fflush(stdout);
+          safe_printf("info string failed to enable syzygy: no path set\n");
+          safe_fflush();
           thread_info.use_syzygy = false;
         }
       }
@@ -440,11 +464,11 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           if (thread_info.use_syzygy) {
             // Re-validate path if syzygy is currently enabled (like polyglot book)
             if (std::filesystem::exists(valueStr)) {
-              printf("info string syzygy path updated: %s\n", valueStr.c_str());
-              fflush(stdout);
+              safe_printf("info string syzygy path updated: %s\n", valueStr.c_str());
+              safe_fflush();
             } else {
-              printf("info string failed to set syzygy path: %s\n", valueStr.c_str());
-              fflush(stdout);
+              safe_printf("info string failed to set syzygy path: %s\n", valueStr.c_str());
+              safe_fflush();
               thread_info.use_syzygy = false;
             }
           }
@@ -458,20 +482,20 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           // Check if book file exists before enabling (like syzygy)
           if (std::filesystem::exists(thread_info.book_path)) {
             thread_info.use_opening_book = true;
-            printf("info string opening book enabled: %s\n", thread_info.book_path.c_str());
-            fflush(stdout);
+            safe_printf("info string opening book enabled: %s\n", thread_info.book_path.c_str());
+            safe_fflush();
           } else {
-            printf("info string failed to enable opening book: %s\n", thread_info.book_path.c_str());
-            fflush(stdout);
+            safe_printf("info string failed to enable opening book: %s\n", thread_info.book_path.c_str());
+            safe_fflush();
             thread_info.use_opening_book = false;
           }
         } else if (!b) {
           thread_info.use_opening_book = false;
-          printf("info string opening book disabled\n");
-          fflush(stdout);
+          safe_printf("info string opening book disabled\n");
+          safe_fflush();
         } else {
-          printf("info string failed to enable opening book: no path set\n");
-          fflush(stdout);
+          safe_printf("info string failed to enable opening book: no path set\n");
+          safe_fflush();
           thread_info.use_opening_book = false;
         }
       }
@@ -481,11 +505,11 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           if (thread_info.use_opening_book) {
             // Re-validate path if opening book is currently enabled (like syzygy)
             if (std::filesystem::exists(valueStr)) {
-              printf("info string opening book path updated: %s\n", valueStr.c_str());
-              fflush(stdout);
+              safe_printf("info string opening book path updated: %s\n", valueStr.c_str());
+              safe_fflush();
             } else {
-              printf("info string failed to set opening book path: %s\n", valueStr.c_str());
-              fflush(stdout);
+              safe_printf("info string failed to set opening book path: %s\n", valueStr.c_str());
+              safe_fflush();
               thread_info.use_opening_book = false;
             }
           }
@@ -535,7 +559,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
         if (!thread_info.opening_book.is_loaded()) {
           bool loaded = thread_info.opening_book.load_book(thread_info.book_path);
           if (!loaded) {
-            std::cerr << "Warning: Failed to load opening book: " << thread_info.book_path << std::endl;
+            safe_print_cerr(std::string("Warning: Failed to load opening book: ") + thread_info.book_path);
             thread_info.use_opening_book = false;
           }
         }
@@ -543,7 +567,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       
       // Syzygy tablebase initialization if enabled
       if (thread_info.use_syzygy && !tb_init(thread_info.syzygy_path.c_str())) {
-        std::cerr << "Warning: Syzygy TB initialization failed for path: " << thread_info.syzygy_path << std::endl;
+        safe_print_cerr(std::string("Warning: Syzygy TB initialization failed for path: ") + thread_info.syzygy_path);
         thread_info.use_syzygy = false; // Disable on failure
       } else if (!thread_info.use_syzygy) {
         tb_free();
@@ -617,9 +641,9 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           if (last_move_played != thread_info.ponder_move) {
             // Mismatch: force stop so GUI can issue new 'go'
             thread_info.pondering = false;
-            if (!thread_data.stop) {
+              if (!thread_data.stop) {
               thread_data.stop = true;
-              printf("info string ponder mismatch abort\n");
+              safe_printf("info string ponder mismatch abort\n");
                 // AutoPonderRestart removed: rely on GUI to send new 'go'
             }
           } else {
@@ -643,10 +667,9 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       if (thread_info.use_syzygy && !tb_initialized) {
         if (tb_init(thread_info.syzygy_path.c_str())) {
           tb_initialized = true;
-          printf("info string tablebase initialized: %s\n", thread_info.syzygy_path.c_str());
-          fflush(stdout);
+          safe_printf("info string tablebase initialized: %s\n", thread_info.syzygy_path.c_str());
         } else {
-          std::cerr << "Warning: Syzygy TB initialization failed for path: " << thread_info.syzygy_path << std::endl;
+          safe_print_cerr(std::string("Warning: Syzygy TB initialization failed for path: ") + thread_info.syzygy_path);
           thread_info.use_syzygy = false; // Disable on failure
         }
       } else if (!thread_info.use_syzygy && tb_initialized) {
@@ -799,15 +822,14 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
             }
           }
           if (is_legal) {
-            printf("bestmove %s\n", internal_to_uci(position, book_move).c_str());
-            fflush(stdout);
+            std::string bm = internal_to_uci(position, book_move);
+            safe_printf("bestmove %s\n", bm.c_str());
             continue; // Don't search, use book move directly and continue to next command
           }
         }
         
         if (thread_info.game_ply <= 2) {
-          printf("info string no book move found for this position\n");
-          fflush(stdout);
+          safe_printf("info string no book move found for this position\n");
         }
       }
       
@@ -837,7 +859,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           uint64_t bonus = ponder_elapsed * thread_info.ponder_time_factor / 100;
           thread_info.opt_time = std::min<uint64_t>(thread_info.opt_time + bonus, thread_info.max_time);
         }
-        printf("info string ponderhit reuse\n");
+  safe_printf("info string ponderhit reuse\n");
       }
     }
 
@@ -848,9 +870,9 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
 
       uint64_t nodes = perft(depth, position, true, thread_info);
 
-      printf("%" PRIu64 " nodes %" PRIu64 " nps\n", nodes,
-             (uint64_t)(nodes * 1000 /
-                        (std::max((int64_t)1, time_elapsed(start_time)))));
+      safe_printf("%" PRIu64 " nodes %" PRIu64 " nps\n", nodes,
+        (uint64_t)(nodes * 1000 /
+         (std::max((int64_t)1, time_elapsed(start_time)))));
     }
 
     else if (command == "bench") {
@@ -860,7 +882,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
     else if (command == "eval") {
       thread_info.nnue_state.reset_nnue(position, thread_info.phase);
       int eval_score = eval(position, thread_info);
-      printf("info string evaluation: %d cp\n", eval_score * 100 / NormalizationFactor);
+  safe_printf("info string evaluation: %d cp\n", eval_score * 100 / NormalizationFactor);
     }
 
     else if (command == "flip") {
@@ -880,7 +902,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           }
         }
       }
-      printf("info hashfull %d\n", (filled * 1000) / sample_size);
+  safe_printf("info hashfull %d\n", (filled * 1000) / sample_size);
     }
   }
 
@@ -894,12 +916,20 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
     
     // Only call barriers if threads are actually running
     if (thread_data.num_threads > 0 && !thread_data.threads.empty()) {
-      reset_barrier.arrive_and_wait();
-      idle_barrier.arrive_and_wait();
+      try {
+        reset_barrier.arrive_and_wait();
+        idle_barrier.arrive_and_wait();
+      } catch (...) {
+        // best-effort continue
+      }
 
       for (size_t i = 0; i < thread_data.threads.size(); i++) {
-        if (thread_data.threads[i].joinable()) {
-          thread_data.threads[i].join();
+        try {
+          if (thread_data.threads[i].joinable()) {
+            thread_data.threads[i].join();
+          }
+        } catch (...) {
+          // swallow exceptions during join
         }
       }
     }

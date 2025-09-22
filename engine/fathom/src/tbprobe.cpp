@@ -39,6 +39,12 @@ SOFTWARE.
 #include <stdbool.h>
 #endif
 #include "tbprobe.h"
+// Forward declarations for engine's thread-safe printing helpers.
+// We intentionally avoid including engine headers here to keep fathom's
+// standalone buildability. These functions are defined in the engine
+// translation unit and must be linked in when building the combined binary.
+void safe_printf(const char *fmt, ...);
+void safe_fflush();
 
 #define TB_PIECES 7
 #define TB_HASHBITS  (TB_PIECES < 7 ?  11 : 12)
@@ -687,8 +693,8 @@ static bool test_tb(const char *str, const char *suffix)
     size_t size = file_size(fd);
     close_tb(fd);
     if ((size & 63) != 16) {
-      fprintf(stderr, "Incomplete tablebase file %s.%s\n", str, suffix);
-      printf("info string Incomplete tablebase file %s.%s\n", str, suffix);
+  fprintf(stderr, "Incomplete tablebase file %s.%s\n", str, suffix);
+  safe_printf("info string Incomplete tablebase file %s.%s\n", str, suffix);
       fd = FD_ERR;
     }
   }
@@ -992,9 +998,9 @@ bool tb_init(const char *path)
 
 finished:
   /* TBD - assumes UCI
-  printf("info string Found %d WDL, %d DTM and %d DTZ tablebase files.\n",
+  safe_printf("info string Found %d WDL, %d DTM and %d DTZ tablebase files.\n",
       numWdl, numDtm, numDtz);
-  fflush(stdout);
+  safe_fflush();
   */
   // Set TB_LARGEST, for backward compatibility with pre-7-man Fathom
   TB_LARGEST = (unsigned)TB_MaxCardinality;

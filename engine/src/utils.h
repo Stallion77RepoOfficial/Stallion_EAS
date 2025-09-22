@@ -15,6 +15,7 @@
 #include <iostream>
 #include <cctype>
 #include "poly_random.h"
+#include <cstdarg>
 
 using std::array;
 
@@ -252,23 +253,64 @@ struct ThreadData {
 
 ThreadData thread_data;
 
+// Global safe printing helpers: use a single static mutex to serialize
+// all stdout/stderr output across threads. This avoids races between
+// std::iostreams and C stdio that can cause crashes under ASAN.
+inline std::mutex &get_print_mutex() {
+  static std::mutex print_mutex;
+  return print_mutex;
+}
+
+inline void safe_printf(const char *fmt, ...) {
+  std::lock_guard<std::mutex> lg(get_print_mutex());
+  va_list ap;
+  va_start(ap, fmt);
+  vprintf(fmt, ap);
+  va_end(ap);
+  fflush(stdout);
+}
+
+inline void safe_print_cerr(const std::string &s) {
+  std::lock_guard<std::mutex> lg(get_print_mutex());
+  std::cerr << s << std::endl;
+}
+
+// Thread-safe fflush wrapper uses the same print mutex to avoid races
+inline void safe_fflush() {
+  std::lock_guard<std::mutex> lg(get_print_mutex());
+  fflush(stdout);
+}
+
 uint64_t TT_size = (1 << 20);
 std::vector<TTBucket> TT(TT_size);
+// Guard flag: indicates TT is being resized/reassigned. When true, probes
+// should fall back to a thread-local bucket to avoid dereferencing a
+// potentially-reallocated vector pointer.
+std::atomic<bool> TT_resizing{false};
 
 void new_game(ThreadInfo &thread_info, std::vector<TTBucket> &TT) {
   // Reset TT and other thread_info values for a new game
 
-  thread_info.game_ply = 0; // Fixed: start from 0 for proper book consultation
-  thread_info.thread_id = 0;
-  thread_info.HistoryScores.fill({});
-  thread_info.ContHistScores.fill({});
-  thread_info.CapHistScores.fill({});
-  thread_info.PawnCorrHist.fill({});
-  thread_info.NonPawnCorrHist.fill({});
-  thread_info.game_hist.fill({});
-  thread_info.nodes.store(0);
-  TT.assign(TT_size, TTBucket{});
-  thread_info.searches = 0;
+  // Hold data mutex while reinitializing shared structures to avoid races
+  // with running search threads that might probe/insert into the TT.
+  {
+    std::lock_guard<std::mutex> lg(thread_data.data_mutex);
+    thread_info.game_ply = 0; // Fixed: start from 0 for proper book consultation
+    thread_info.thread_id = 0;
+    thread_info.HistoryScores.fill({});
+    thread_info.ContHistScores.fill({});
+    thread_info.CapHistScores.fill({});
+    thread_info.PawnCorrHist.fill({});
+    thread_info.NonPawnCorrHist.fill({});
+    thread_info.game_hist.fill({});
+    thread_info.nodes.store(0);
+    // Mark resizing so concurrent probes fall back to a safe thread-local
+    // bucket instead of attempting to dereference a moved vector pointer.
+    TT_resizing.store(true);
+    TT.assign(TT_size, TTBucket{});
+    TT_resizing.store(false);
+    thread_info.searches = 0;
+  }
 }
 
 uint32_t get_hash_low_bits(uint64_t hash) {
@@ -297,12 +339,31 @@ int32_t score_from_tt(int32_t score, int32_t ply) {
 
 void resize_TT(int size) {
   std::lock_guard<std::mutex> lock(thread_data.data_mutex);
+  // Mark TT as resizing so concurrent probe_entry calls will fall back to
+  // a thread-local bucket instead of attempting to dereference the
+  // vector while it is being reallocated.
+  TT_resizing.store(true, std::memory_order_release);
   TT_size = static_cast<uint64_t>(size) * 1024 * 1024 / sizeof(TTBucket);
   TT.assign(TT_size, TTBucket{});
+  TT_resizing.store(false, std::memory_order_release);
 }
 
 uint64_t hash_to_idx(uint64_t hash) {
   return (uint128_t(hash) * uint128_t(TT_size)) >> 64;
+}
+
+// Safe prefetch helper: some call sites used __builtin_prefetch(&TT[idx])
+// without synchronization which can race with TT.assign() and cause
+// SEGVs under ASAN. Use this helper to prefetch the bucket under the
+// TT data mutex (or skip prefetch if resizing is in progress).
+inline void safe_TT_prefetch(uint64_t hash) {
+  if (TT_resizing.load(std::memory_order_acquire)) return;
+  std::lock_guard<std::mutex> lg(thread_data.data_mutex);
+  if (TT.size() == 0) return;
+  uint64_t size = TT.size();
+  uint64_t idx = (uint128_t(hash) * uint128_t(size)) >> 64;
+  if (idx >= size) return;
+  __builtin_prefetch(&TT[static_cast<size_t>(idx)], 0, 1);
 }
 
 int entry_quality(TTEntry &entry, int searches) {
@@ -312,9 +373,50 @@ int entry_quality(TTEntry &entry, int searches) {
 
 TTEntry &probe_entry(uint64_t hash, bool &hit, uint8_t searches,
                      std::vector<TTBucket> &TT) {
-  // TODO: Add synchronization (e.g. mutex or lock striping) for thread-safe TT access
+  // Double-snapshot approach: capture TT.data() and TT.size() twice and only
+  // access TT if both snapshots match. This avoids dereferencing a vector
+  // that was reallocated concurrently (which would cause a SEGV). It's a
+  // lightweight mitigation; true thread-safety requires lock striping or
+  // other synchronization (TODO).
+  // If a resize/new_game is in progress, avoid probing the shared TT and
+  // instead return a thread-local fallback to prevent use-after-free.
+  // Lightweight path: if a resize is in progress, use a thread-local fallback.
+  if (TT_resizing.load(std::memory_order_acquire)) {
+    static thread_local TTBucket fallback_bucket_inline;
+    hit = false;
+    fallback_bucket_inline.entries[0].age_bound = (searches << 2) | fallback_bucket_inline.entries[0].get_type();
+    return fallback_bucket_inline.entries[0];
+  }
+
+  // To prevent TOCTOU/in-flight reallocation races observed under heavy
+  // concurrent stress (ASAN SEGVs), take the global TT data mutex while
+  // probing. resize_TT / new_game already hold this mutex when they modify
+  // the TT, so holding it here guarantees the vector won't be reallocated
+  // while we're accessing its contents.
+  std::lock_guard<std::mutex> lg(thread_data.data_mutex);
+
+  void *data_ptr = TT.data();
+  uint64_t size = TT.size();
+  if (size == 0 || data_ptr == nullptr) {
+    static thread_local TTBucket fallback_bucket;
+    hit = false;
+    fallback_bucket.entries[0].age_bound = (searches << 2) | fallback_bucket.entries[0].get_type();
+    return fallback_bucket.entries[0];
+  }
+
   uint32_t hash_key = get_hash_low_bits(hash);
-  auto &bucket = TT[hash_to_idx(hash)];
+  uint64_t idx = (uint128_t(hash) * uint128_t(size)) >> 64;
+
+  if (idx >= size) {
+    static thread_local TTBucket fallback_bucket2;
+    hit = false;
+    fallback_bucket2.entries[0].age_bound = (searches << 2) | fallback_bucket2.entries[0].get_type();
+    return fallback_bucket2.entries[0];
+  }
+
+  // Safe to index because we hold the mutex.
+  TTBucket *buckets = reinterpret_cast<TTBucket *>(data_ptr);
+  auto &bucket = buckets[idx];
   __builtin_prefetch(&bucket, 0, 1);
   auto &entries = bucket.entries;
 
@@ -348,21 +450,72 @@ void insert_entry(
     TTEntry &entry, uint64_t hash, int depth, Move best_move,
     int32_t static_eval, int32_t score, uint8_t bound_type,
     uint8_t searches) { // Inserts an entry into the transposition table.
-  // TODO: Add synchronization (e.g. mutex or lock striping) for thread-safe TT access
+  // Make TT writes safe by acquiring the global TT data mutex and writing
+  // directly into the shared TT vector at the computed bucket index. This
+  // avoids writing into an address that a caller may hold by reference if a
+  // concurrent resize happens between probe and insert.
+  std::lock_guard<std::mutex> lg(thread_data.data_mutex);
+
   uint32_t hash_key = get_hash_low_bits(hash);
 
-  if (best_move != MoveNone || hash_key != entry.position_key) {
-    entry.best_move = best_move;
-  }
-
-  if (entry.position_key == hash_key && (bound_type != EntryTypes::Exact) &&
-      entry.depth > depth + 4) {
+  // If TT is not available, write into a thread-local fallback and return.
+  if (TT.size() == 0 || TT.data() == nullptr) {
+    static thread_local TTBucket fallback_bucket;
+    TTEntry &fe = fallback_bucket.entries[0];
+    if (best_move != MoveNone || hash_key != fe.position_key) fe.best_move = best_move;
+    if (fe.position_key == hash_key && (bound_type != EntryTypes::Exact) && fe.depth > depth + 4) return;
+    fe.position_key = hash_key;
+    fe.depth = static_cast<uint8_t>(depth);
+    fe.static_eval = static_eval;
+    fe.score = score;
+    fe.age_bound = (searches << 2) | bound_type;
     return;
   }
 
-  entry.position_key = hash_key, entry.depth = static_cast<uint8_t>(depth),
-  entry.static_eval = static_eval, entry.score = score,
-  entry.age_bound = (searches << 2) | bound_type;
+  // Compute bucket index with current TT size (we hold the mutex so this is stable).
+  uint64_t size = TT.size();
+  uint64_t idx = (uint128_t(hash) * uint128_t(size)) >> 64;
+  if (idx >= size) idx = idx % size;
+
+  TTBucket *buckets = TT.data();
+  auto &bucket = buckets[idx];
+  auto &entries = bucket.entries;
+
+  // First try to find an empty slot or a matching key to overwrite.
+  for (int i = 0; i < BucketEntries; i++) {
+    bool empty = entries[i].score == 0 && entries[i].get_type() == EntryTypes::None;
+    if (empty || entries[i].position_key == hash_key) {
+      TTEntry &e = entries[i];
+      if (best_move != MoveNone || hash_key != e.position_key) e.best_move = best_move;
+      if (e.position_key == hash_key && (bound_type != EntryTypes::Exact) && e.depth > depth + 4) return;
+      e.position_key = hash_key;
+      e.depth = static_cast<uint8_t>(depth);
+      e.static_eval = static_eval;
+      e.score = score;
+      e.age_bound = (searches << 2) | bound_type;
+      return;
+    }
+  }
+
+  // No empty slot or exact key found: pick worst-quality entry to replace.
+  TTEntry *worst = &entries[0];
+  int worst_q = entry_quality(*worst, searches);
+  for (int i = 1; i < BucketEntries; i++) {
+    int q = entry_quality(entries[i], searches);
+    if (q < worst_q) {
+      worst = &entries[i];
+      worst_q = q;
+    }
+  }
+
+  // Overwrite worst entry.
+  TTEntry &we = *worst;
+  we.position_key = hash_key;
+  we.depth = static_cast<uint8_t>(depth);
+  we.static_eval = static_eval;
+  we.score = score;
+  we.age_bound = (searches << 2) | bound_type;
+  if (best_move != MoveNone) we.best_move = best_move;
 }
 
 void calculate(Position &position) { // Calculates the zobrist key of
@@ -433,8 +586,11 @@ public:
     if (current > 0) {
       const auto phase = m_phase.load(std::memory_order_relaxed);
       wait_signal.wait(lock, [this, phase] {
-        return (phase - m_phase.load(std::memory_order_acquire)) < 0;
+        // Wake up either when phase advanced or when canceled
+        return (phase - m_phase.load(std::memory_order_acquire)) < 0 || m_cancel.load(std::memory_order_acquire);
       });
+      // If canceled, return early to allow shutdown/resizing to proceed
+      if (m_cancel.load(std::memory_order_acquire)) return;
     } else {
       const auto total = m_total.load(std::memory_order_acquire);
       m_current.store(total, std::memory_order_release);
@@ -445,10 +601,24 @@ public:
     }
   }
 
+  // Cancel any waiting threads so arrive_and_wait returns early.
+  auto cancel() {
+    m_cancel.store(true, std::memory_order_release);
+    wait_signal.notify_all();
+  }
+
+  // Clear cancel flag after threads have been joined and barrier state reset.
+  auto clear_cancel() {
+    m_cancel.store(false, std::memory_order_release);
+  }
+
 private:
   std::atomic<int64_t> m_total{};
   std::atomic<int64_t> m_current{};
   std::atomic<int64_t> m_phase{};
+
+  // Cancellation flag: when set, waiting threads should wake early.
+  std::atomic<bool> m_cancel{};
 
   std::mutex wait_mutex{};
   std::condition_variable wait_signal{};
@@ -474,7 +644,7 @@ bool OpeningBook::load_book(const std::string& path) {
     if (ext != ".bin" && ext != ".bok" && ext != "book") {
       // Accept common .bin; .book is also treated as polyglot in some ecosystems.
       // For other formats, convert to Polyglot.
-      std::cerr << "Unsupported opening book format: " << path << " (supported: .bin/.book)\n";
+  safe_print_cerr(std::string("Unsupported opening book format: ") + path + std::string(" (supported: .bin/.book)"));
       book_loaded = false;
       return false;
     }

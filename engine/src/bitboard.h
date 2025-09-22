@@ -5,6 +5,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
+#include <thread>
+
+// Forward declaration so ensure_bbs_initialized can call init_bbs()
+void init_bbs();
 
 enum Square : int { // a1 = 0. a8 = 7, etc. thus a1 is the LSB and h8 is the
                     // MSB.
@@ -100,6 +105,35 @@ MultiArray<uint64_t, 2, 64> PawnAttacks;
 std::array<uint64_t, 64> KingAttacks;
 std::array<uint64_t, 64> KnightAttacks;
 
+// Initialization guards for attack tables. Some crash logs showed
+// use-before-init or races where attack helper arrays were accessed
+// before `init_bbs()` completed. We add a lightweight, reentrancy-safe
+// guard: the first thread to call ensure_bbs_initialized() will run
+// init_bbs(); concurrent threads will wait until initialization
+// completes. If init_bbs() itself calls attack helpers, the thread-
+// local flag prevents deadlock/recursion.
+static std::atomic<bool> BBS_INITIALIZED{false};
+static std::atomic<bool> BBS_INITIALIZING{false};
+static thread_local bool BBS_INIT_IN_THIS_THREAD = false;
+
+inline void ensure_bbs_initialized() {
+  if (BBS_INITIALIZED.load(std::memory_order_acquire)) return;
+  if (BBS_INIT_IN_THIS_THREAD) return; // allow reentrant calls from init_bbs()
+
+  bool expected = false;
+  if (BBS_INITIALIZING.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    // we are the initializer
+    BBS_INIT_IN_THIS_THREAD = true;
+    init_bbs();
+    BBS_INITIALIZED.store(true, std::memory_order_release);
+    BBS_INIT_IN_THIS_THREAD = false;
+    BBS_INITIALIZING.store(false, std::memory_order_release);
+  } else {
+    // another thread is initializing; wait for completion
+    while (!BBS_INITIALIZED.load(std::memory_order_acquire)) std::this_thread::yield();
+  }
+}
+
 constexpr std::array<uint64_t, 64> BishopMagics = {
     0x2020420401002200, 0x05210A020A002118, 0x1110040454C00484,
     0x1008095104080000, 0xC409104004000000, 0x0002901048080200,
@@ -149,23 +183,27 @@ constexpr std::array<uint64_t, 64> RookMagics = {
 
 inline uint64_t KNIGHT_ATK_SAFE(int sq) {
   if (!is_valid_square(sq)) return 0ULL;
+  ensure_bbs_initialized();
   return KnightAttacks[static_cast<size_t>(sq)];
 }
 
 inline uint64_t KING_ATK_SAFE(int sq) {
   if (!is_valid_square(sq)) return 0ULL;
+  ensure_bbs_initialized();
   return KingAttacks[static_cast<size_t>(sq)];
 }
 
 inline uint64_t PAWN_ATK_SAFE(int color, int sq) {
   if (!is_valid_square(sq)) return 0ULL;
   int c = color & 1;
+  ensure_bbs_initialized();
   return PawnAttacks[static_cast<size_t>(c)][static_cast<size_t>(sq)];
 }
 
 inline uint64_t BISHOP_ATK_SAFE(int sq, uint64_t occ) {
   if (!is_valid_square(sq)) return 0ULL;
   size_t idx_sq = static_cast<size_t>(sq);
+  ensure_bbs_initialized();
   uint64_t mask = BishopMasks[idx_sq];
   uint64_t index = ((occ & mask) * BishopMagics[idx_sq]) >> 55;
   size_t attack_index = static_cast<size_t>(index);
@@ -176,6 +214,7 @@ inline uint64_t BISHOP_ATK_SAFE(int sq, uint64_t occ) {
 inline uint64_t ROOK_ATK_SAFE(int sq, uint64_t occ) {
   if (!is_valid_square(sq)) return 0ULL;
   size_t idx_sq = static_cast<size_t>(sq);
+  ensure_bbs_initialized();
   uint64_t mask = RookMasks[idx_sq];
   uint64_t index = ((occ & mask) * RookMagics[idx_sq]) >> 52;
   size_t attack_index = static_cast<size_t>(index);
@@ -202,13 +241,13 @@ int pop_lsb(uint64_t &bb) {
 uint64_t get_lsb_bb(uint64_t bb) { return bb & int64_t(-bb); }
 
 void print_bb(uint64_t bb) {
-  printf("\n");
+  safe_printf("\n");
   for (int rank = 7; rank >= 0; rank--) {
     for (int file = 0; file < 8; file++) {
       int sq = file + (rank << 3);
-      printf("%i ", bool(bb & (1ull << sq)));
+      safe_printf("%i ", bool(bb & (1ull << sq)));
     }
-    printf("\n");
+    safe_printf("\n");
   }
 }
 
@@ -447,8 +486,8 @@ void generate_bb(std::string fen, Position &pos) {
         index = PieceTypes::King;
         break;
       default:
-        printf("Unexpected error occured parsing FEN!\n");
-        printf("%s %c\n", fen.c_str(), c);
+  safe_printf("Unexpected error occured parsing FEN!\n");
+  safe_printf("%s %c\n", fen.c_str(), c);
         exit(1);
       }
 
@@ -481,28 +520,28 @@ void update_bb(Position &pos, int from_piece, int from, int to_piece, int to,
 }
 
 void print_bbs(const Position &pos) {
-  printf("Pawn bitboard:\n");
+  safe_printf("Pawn bitboard:\n");
   print_bb(pos.pieces_bb[PieceTypes::Pawn]);
 
-  printf("Knight bitboard:\n");
+  safe_printf("Knight bitboard:\n");
   print_bb(pos.pieces_bb[PieceTypes::Knight]);
 
-  printf("Bishop bitboard:\n");
+  safe_printf("Bishop bitboard:\n");
   print_bb(pos.pieces_bb[PieceTypes::Bishop]);
 
-  printf("Rook bitboard:\n");
+  safe_printf("Rook bitboard:\n");
   print_bb(pos.pieces_bb[PieceTypes::Rook]);
 
-  printf("Queen bitboard:\n");
+  safe_printf("Queen bitboard:\n");
   print_bb(pos.pieces_bb[PieceTypes::Queen]);
 
-  printf("King bitboard:\n");
+  safe_printf("King bitboard:\n");
   print_bb(pos.pieces_bb[PieceTypes::King]);
 
-  printf("White Piece bitboard:\n");
+  safe_printf("White Piece bitboard:\n");
   print_bb(pos.colors_bb[Colors::White]);
 
-  printf("Black Piece bitboard:\n");
+  safe_printf("Black Piece bitboard:\n");
   print_bb(pos.colors_bb[Colors::Black]);
 }
 

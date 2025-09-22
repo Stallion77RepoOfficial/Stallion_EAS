@@ -262,24 +262,24 @@ int main()
 {
 
 #if BYTE_ORDER == LITTLE_ENDIAN
-printf("little endian\n");
+  safe_printf("little endian\n");
 #endif
 
 #if BYTE_ORDER == BIG_ENDIAN
-printf("big endian\n");
+  safe_printf("big endian\n");
 #endif
 
-printf("bswap16(%04x) %04x\n", 0xf0e0, bswap16(0xf0e0));
-printf("htobe16(%04x) %04x\n", 0xf0e0, htobe16(0xf0e0));
-printf("htole16(%04x) %04x\n", 0xf0e0, htole16(0xf0e0));
+  safe_printf("bswap16(%04x) %04x\n", 0xf0e0, bswap16(0xf0e0));
+  safe_printf("htobe16(%04x) %04x\n", 0xf0e0, htobe16(0xf0e0));
+  safe_printf("htole16(%04x) %04x\n", 0xf0e0, htole16(0xf0e0));
 
-printf("bswap32(%08x) %08x\n", 0xf0e0d0c0, bswap32(0xf0e0d0c0));
-printf("htobe32(%08x) %08x\n", 0xf0e0d0c0, htobe32(0xf0e0d0c0));
-printf("htole32(%08x) %08x\n", 0xf0e0d0c0, htole32(0xf0e0d0c0));
+  safe_printf("bswap32(%08x) %08x\n", 0xf0e0d0c0, bswap32(0xf0e0d0c0));
+  safe_printf("htobe32(%08x) %08x\n", 0xf0e0d0c0, htobe32(0xf0e0d0c0));
+  safe_printf("htole32(%08x) %08x\n", 0xf0e0d0c0, htole32(0xf0e0d0c0));
 
-printf("bswap64(%016llx) %016llx\n", 0xf0e0d0c0b0a09080ULL, bswap64(0xf0e0d0c0b0a09080ULL));
-printf("htobe64(%016llx) %016llx\n", 0xf0e0d0c0b0a09080ULL, htobe64(0xf0e0d0c0b0a09080ULL));
-printf("htole64(%016llx) %016llx\n", 0xf0e0d0c0b0a09080ULL, htole64(0xf0e0d0c0b0a09080ULL));
+  safe_printf("bswap64(%016llx) %016llx\n", 0xf0e0d0c0b0a09080ULL, bswap64(0xf0e0d0c0b0a09080ULL));
+  safe_printf("htobe64(%016llx) %016llx\n", 0xf0e0d0c0b0a09080ULL, htobe64(0xf0e0d0c0b0a09080ULL));
+  safe_printf("htole64(%016llx) %016llx\n", 0xf0e0d0c0b0a09080ULL, htole64(0xf0e0d0c0b0a09080ULL));
 }
 
 */

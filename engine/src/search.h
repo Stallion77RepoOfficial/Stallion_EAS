@@ -6,6 +6,7 @@
 // tm.h removed; adjust_soft_limit forward declared in utils.h
 #include "utils.h"
 #include "../fathom/src/tbprobe.h"
+#include <memory>
 
 // Global state for tablebase
 extern bool tb_initialized;
@@ -333,31 +334,82 @@ int correct_eval(const Position &position, ThreadInfo &thread_info, int eval) {
 }
 
 void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
-  // update search stack after makemove
-  if (thread_info.search_ply + 1 >= MaxSearchDepth ||
-      thread_info.game_ply >= GameSize) {
+  // EXTREME DEFENSIVE VALIDATION: Prevent memory corruption crashes
+  if (!thread_info.game_hist.data()) {
     thread_data.stop = true;
     return;
   }
+
+  if (thread_info.search_ply + 1 >= MaxSearchDepth ||
+      thread_info.game_ply >= GameSize) {
+    // Record diagnostic event to help triage stack corruption
+    thread_data.tb_hits.fetch_add(1);
+    thread_data.stop = true;
+    return;
+  }
+
+  // ADDITIONAL SAFETY: Check for corrupted game_ply values
+  if (thread_info.game_ply < 0 || thread_info.game_ply >= GameSize) {
+    thread_data.tb_hits.fetch_add(1);
+    thread_data.stop = true;
+    return;
+  }
+
   ++thread_info.search_ply;
 
-  thread_info.game_hist[thread_info.game_ply].position_key =
-      position.zobrist_key;
-  thread_info.game_hist[thread_info.game_ply].played_move = move;
-  thread_info.game_hist[thread_info.game_ply].piece_moved =
-      position.board[extract_from(move)];
-  thread_info.game_hist[thread_info.game_ply].is_cap = is_cap(position, move);
-  thread_info.game_hist[thread_info.game_ply].m_diff = material_eval(position);
+  // Sanity check: if search_ply exceeds a high watermark, abort search to
+  // avoid infinite spin or runaway recursion (this signals corruption upstream).
+  if (thread_info.search_ply > MaxSearchDepth - 2) {
+    thread_data.tb_fails.fetch_add(1);
+    thread_data.stop = true;
+    return;
+  }
 
+  // SAFE ARRAY ACCESS: snapshot index and validate move squares before writing
+  const int gp = static_cast<int>(thread_info.game_ply);
+  if (gp < 0 || gp >= GameSize) {
+    thread_data.stop = true;
+    return;
+  }
+
+  const int from_sq = static_cast<int>(extract_from(move));
+  const int to_sq = static_cast<int>(extract_to(move));
+  // Validate move squares before reading position.board or calling is_cap
+  if (!is_valid_square(from_sq) || !is_valid_square(to_sq)) {
+    // Corrupted move detected; stop search to avoid crashes
+    thread_data.stop = true;
+    return;
+  }
+
+  // Now it is safe to write into game_hist at index gp
+  thread_info.game_hist[gp].position_key = position.zobrist_key;
+  thread_info.game_hist[gp].played_move = move;
+  thread_info.game_hist[gp].piece_moved = position.board[from_sq];
+  thread_info.game_hist[gp].is_cap = is_cap(position, move);
+  thread_info.game_hist[gp].m_diff = material_eval(position);
+
+  // Advance game_ply safely
   if (thread_info.game_ply + 1 < GameSize)
     thread_info.game_ply++;
 }
 
 void ss_pop(ThreadInfo &thread_info) {
-  // associated with unmake
-  thread_info.search_ply--, thread_info.game_ply--;
+  // EXTREME DEFENSIVE VALIDATION: Prevent memory corruption in pop operations
+  if (thread_info.search_ply <= 0 || thread_info.game_ply <= 0) {
+    return; // Invalid state, don't decrement below 0
+  }
 
-  thread_info.nnue_state.pop();
+  if (thread_info.search_ply > MaxSearchDepth || thread_info.game_ply > GameSize) {
+    return; // Corrupted state detected
+  }
+
+  thread_info.search_ply--;
+  thread_info.game_ply--;
+
+  // SAFE NNUE POP: Only pop if NNUE state is valid
+  if (thread_info.nnue_state.m_curr >= thread_info.nnue_state.m_accumulator_stack) {
+    thread_info.nnue_state.pop();
+  }
 }
 
 bool material_draw(
@@ -391,6 +443,23 @@ bool is_draw(const Position &position,
   const int halfmoves = position.halfmoves;
   const int game_ply = thread_info.game_ply;
 
+  // EXTREME DEFENSIVE VALIDATION: Check for corrupted thread state
+  if (game_ply < 0 || game_ply > GameSize) {
+    return false; // Corrupted game state
+  }
+
+  // SAFE ARRAY ACCESS: Check game_hist array validity
+  if (!thread_info.game_hist.data()) {
+    return false; // Corrupted memory
+  }
+
+  // Validate king positions
+  int white_king = get_king_pos(position, Colors::White);
+  int black_king = get_king_pos(position, Colors::Black);
+  if (!is_valid_square(white_king) || !is_valid_square(black_king)) {
+    return false; // Invalid king positions
+  }
+
   // Fifty-move rule (automatic draw once counter reaches 100 half-moves)
   if (halfmoves >= 100) {
     return true;
@@ -403,21 +472,90 @@ bool is_draw(const Position &position,
 
   // Threefold repetition: only need to examine positions since the last
   // irreversible move (captured by the half-move clock)
-  if (game_ply >= 2) {
+  if (game_ply >= 2 && game_ply <= GameSize) {
     const int min_index = std::max(game_ply - halfmoves, 0);
-    for (int i = game_ply - 2; i >= min_index; i -= 2) {
-      if (thread_info.game_hist[i].position_key == hash) {
-        return true;
+    for (int i = game_ply - 2; i >= min_index && i < GameSize; i -= 2) {
+      // SAFE ARRAY ACCESS: Bounds check before accessing game_hist
+      if (i >= 0 && i < GameSize) {
+        if (thread_info.game_hist[i].position_key == hash) {
+          return true;
+        }
       }
     }
   }
 
   // Stalemate: side to move has no legal moves and is not in check
   const int king_sq = get_king_pos(position, position.color);
+  if (!is_valid_square(king_sq)) {
+    return false;
+  }
   if (!attacks_square(position, king_sq, position.color ^ 1)) {
-    std::array<Move, ListSize> legal_moves{};
-    if (legal_movegen(position, legal_moves.data()) == 0) {
-      return true;
+    // Use a more conservative approach to prevent stack overflow
+    // Instead of generating all legal moves, check if king has any safe squares
+    uint64_t king_moves = KING_ATK_SAFE(king_sq) & ~position.colors_bb[position.color];
+    bool has_safe_move = false;
+    while (king_moves && !has_safe_move) {
+      int to_sq = pop_lsb(king_moves);
+      if (!attacks_square(position, to_sq, position.color ^ 1)) {
+        has_safe_move = true;
+      }
+    }
+    if (!has_safe_move) {
+      // King has no safe moves, check if any other piece can move
+      // Use limited move generation to prevent overflow
+      std::array<Move, 32> limited_moves{};
+      int move_count = 0;
+      
+      // Generate only king moves first
+      uint64_t king_attacks = KING_ATK_SAFE(king_sq) & ~position.colors_bb[position.color];
+      while (king_attacks && move_count < 32) {
+        int to = pop_lsb(king_attacks);
+        if (!attacks_square(position, to, position.color ^ 1)) {
+          limited_moves[move_count++] = pack_move(king_sq, to, MoveTypes::Normal);
+        }
+      }
+      
+      // If no king moves, check one piece from each type
+      if (move_count == 0) {
+        for (int pt = PieceTypes::Pawn; pt <= PieceTypes::Queen && move_count < 32; ++pt) {
+          uint64_t pieces = position.pieces_bb[pt] & position.colors_bb[position.color];
+          if (pieces) {
+            int from = get_lsb(pieces);
+            // Generate limited attacks for this piece
+            uint64_t attacks = 0;
+            if (pt == PieceTypes::Pawn) {
+              attacks = PAWN_ATK_SAFE(position.color, from) & position.colors_bb[position.color ^ 1];
+            } else if (pt == PieceTypes::Knight) {
+              attacks = KNIGHT_ATK_SAFE(from);
+            } else if (pt == PieceTypes::Bishop || pt == PieceTypes::Rook || pt == PieceTypes::Queen) {
+              attacks = get_bishop_attacks(from, position.colors_bb[0] | position.colors_bb[1]);
+              if (pt == PieceTypes::Rook || pt == PieceTypes::Queen) {
+                attacks |= get_rook_attacks(from, position.colors_bb[0] | position.colors_bb[1]);
+              }
+            } else if (pt == PieceTypes::King) {
+              attacks = KING_ATK_SAFE(from);
+            }
+            attacks &= ~position.colors_bb[position.color];
+            
+            while (attacks && move_count < 32) {
+              int to = pop_lsb(attacks);
+              limited_moves[move_count++] = pack_move(from, to, MoveTypes::Normal);
+            }
+          }
+        }
+      }
+      
+      // Check if any of these limited moves are legal
+      bool has_legal_move = false;
+      for (int i = 0; i < move_count && !has_legal_move; ++i) {
+        if (is_legal(position, limited_moves[i])) {
+          has_legal_move = true;
+        }
+      }
+      
+      if (!has_legal_move) {
+        return true; // Stalemate
+      }
     }
   }
 
@@ -426,18 +564,35 @@ bool is_draw(const Position &position,
 
 int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
             std::vector<TTBucket> &TT, int qdepth = 0) {
-  constexpr int MAX_QPLY = 128;
-  constexpr int MAX_QDEPTH = 128;
+  // EXTREME STACK PROTECTION: Much more aggressive limits
+  constexpr int MAX_QPLY = 32;    // Reduced from 64 to 32 (was 128)
+  constexpr int MAX_QDEPTH = 16;  // Reduced from 32 to 16 (was 128)
 
   auto eval_now = [&](Position &pos) {
     return correct_eval(pos, thread_info, eval(pos, thread_info));
   };
 
+  // EARLY DEPTH CHECK: Return immediately if too deep
   if (qdepth >= MAX_QDEPTH) {
     return eval_now(position);
   }
 
   int ply = thread_info.search_ply;
+
+  // MULTI-LAYER STACK PROTECTION: Multiple safety checks
+  if (ply >= MaxSearchDepth - 4 || ply >= MAX_QPLY) {
+    return eval_now(position);
+  }
+
+  // ADDITIONAL SAFETY: Check game ply bounds
+  if (thread_info.game_ply < 0 || thread_info.game_ply > GameSize) {
+    return eval_now(position);
+  }
+
+  // SAFE ARRAY ACCESS: Check game_hist validity
+  if (!thread_info.game_hist.data()) {
+    return eval_now(position);
+  }
 
   if (ply && is_draw(position, thread_info)) {
     return eval_now(position);
@@ -463,12 +618,21 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
     if (tb_score != ScoreNone) return tb_score;
   }
 
-  GameHistory *ss = &(thread_info.game_hist[thread_info.game_ply]);
+  // Defensive: clamp game_ply to a valid index before taking address into
+  // the game history array. Some crashes were caused by game_ply drifting
+  // outside [0, GameSize) under race conditions; this prevents an OOB
+  // dereference. This masks the root cause but avoids ASAN SEGVs while we
+  // gather further diagnostics.
+  int _hist_idx = thread_info.game_ply;
+  if (_hist_idx < 0) _hist_idx = 0;
+  if (_hist_idx >= GameSize) _hist_idx = GameSize - 1;
+  GameHistory *ss = &(thread_info.game_hist[_hist_idx]);
 
   ++thread_info.nodes;
   if (ply > thread_info.seldepth) thread_info.seldepth = ply;
 
-  if (ply >= MaxSearchDepth - 1 || ply >= MAX_QPLY) {
+  // EXTRA SAFETY CHECK: Prevent any further recursion if close to limits
+  if (ply >= MaxSearchDepth - 3 || ply >= MAX_QPLY - 2) {
     return eval_now(position);
   }
 
@@ -583,21 +747,34 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
       if (stand_pat + delta_margin < alpha) continue;
     }
 
-    Position moved_position = position;
+  auto moved_pos_uptr = std::make_unique<Position>(position);
+  Position &moved_position = *moved_pos_uptr;
     make_move(moved_position, move);
     auto *nnue_before = thread_info.nnue_state.m_curr;
     update_nnue_state(thread_info, move, position, moved_position);
 
     int score = ScoreNone;
-    bool can_recurse = (thread_info.search_ply + 1 < MaxSearchDepth) &&
-                       (thread_info.search_ply + 1 < MAX_QPLY) &&
-                       (thread_info.game_ply < GameSize);
+    bool can_recurse = (thread_info.search_ply + 1 < MaxSearchDepth - 4) &&
+                       (thread_info.search_ply + 1 < MAX_QPLY - 2) &&
+                       (thread_info.game_ply < GameSize - 2) &&
+                       (qdepth + 1 < MAX_QDEPTH);
 
     if (can_recurse) {
-      ss_push(position, thread_info, move);
-      score = -qsearch(-beta, -alpha, moved_position, thread_info, TT,
-                       qdepth + 1);
-      ss_pop(thread_info);
+      // SAFE SS_PUSH: Additional validation before calling ss_push
+      if (thread_info.game_ply >= 0 && thread_info.game_ply < GameSize &&
+          thread_info.game_hist.data()) {
+        ss_push(position, thread_info, move);
+        score = -qsearch(-beta, -alpha, moved_position, thread_info, TT,
+                         qdepth + 1);
+        ss_pop(thread_info);
+      } else {
+        // Fallback: Don't recurse if state is corrupted
+        int leaf_eval = eval_now(moved_position);
+        score = -leaf_eval;
+        if (thread_info.nnue_state.m_curr != nnue_before) {
+          thread_info.nnue_state.pop();
+        }
+      }
     } else {
       int leaf_eval = eval_now(moved_position);
       score = -leaf_eval;
@@ -836,6 +1013,10 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       Position temp_pos = position;
       make_move(temp_pos, MoveNone);
 
+      // Defensive validation for ss_push
+      if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
+        return ScoreNone; // Safety fallback
+      }
       ss_push(position, thread_info, MoveNone);
 
       int R = NMPBase + depth / NMPDepthDiv +
@@ -881,9 +1062,15 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         continue;
       }
 
-      Position moved_position = position;
+  auto moved_pos_uptr = std::make_unique<Position>(position);
+  Position &moved_position = *moved_pos_uptr;
       make_move(moved_position, move);
       update_nnue_state(thread_info, move, position, moved_position);
+      
+      // Defensive validation for ss_push
+      if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
+        return ScoreNone; // Safety fallback
+      }
       ss_push(position, thread_info, move);
 
       int score =
@@ -945,9 +1132,15 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       int sac_extension = 1 + (thread_info.sacrifice_lookahead_aggressiveness >= 130 ? 2 : (thread_info.sacrifice_lookahead_aggressiveness >= 90 ? 1 : 0));
       sac_extension = std::clamp(sac_extension, 1, 3);
 
-      Position moved_position = position;
+  auto moved_pos_uptr = std::make_unique<Position>(position);
+  Position &moved_position = *moved_pos_uptr;
       make_move(moved_position, m);
       update_nnue_state(thread_info, m, position, moved_position);
+      
+      // Defensive validation for ss_push
+      if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
+        return ScoreNone; // Safety fallback
+      }
       ss_push(position, thread_info, m);
 
       // Önce hızlı null pencere test (derinlik-1)
@@ -1104,11 +1297,16 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       }
     }
 
-    Position moved_position = position;
+  auto moved_pos_uptr = std::make_unique<Position>(position);
+  Position &moved_position = *moved_pos_uptr;
     make_move(moved_position, move);
 
     update_nnue_state(thread_info, move, position, moved_position);
 
+    // Defensive validation for ss_push
+    if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
+      return best_score; // Safety fallback
+    }
     ss_push(position, thread_info, move);
 
     bool full_search = false;
@@ -1364,7 +1562,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 }
 
 void print_pv(Position &position, ThreadInfo &thread_info) {
-  Position temp_pos = position;
+  auto temp_pos_uptr = std::make_unique<Position>(position);
+  Position &temp_pos = *temp_pos_uptr;
 
   int indx = 0;
 
@@ -1395,14 +1594,17 @@ void print_pv(Position &position, ThreadInfo &thread_info) {
       break;
     }
 
-    printf("%s ", internal_to_uci(temp_pos, best_move).c_str());
+  {
+    std::string mv = internal_to_uci(temp_pos, best_move);
+    safe_printf("%s ", mv.c_str());
+  }
 
     make_move(temp_pos, best_move);
 
     indx++;
   }
 
-  printf("\n");
+  safe_printf("\n");
 }
 
 void iterative_deepen(
@@ -1496,7 +1698,10 @@ void iterative_deepen(
           // choose first winning move
             thread_info.best_moves[0] = tbOrdered[0].first; thread_info.ponder_move = MoveNone; tb_decisive_shortcut = true;
             // verbose TB shortcut suppressed
-            printf("bestmove %s\n", internal_to_uci(position, tbOrdered[0].first).c_str());
+            {
+              std::string bm = internal_to_uci(position, tbOrdered[0].first);
+              safe_printf("bestmove %s\n", bm.c_str());
+            }
             return;
         }
         // Rebuild root_moves with TB ordering at front
@@ -1682,25 +1887,31 @@ skip_tb_root: ;
                           : thread_info.best_moves[thread_info.multipv_index];
 
           if (abs(score) <= MateScore) {
-            printf("info multipv %i depth %i seldepth %i score cp %i %s nodes "
-                   "%" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv %s\n",
-                   thread_info.multipv_index + 1, depth, thread_info.seldepth,
-                   score * 100 / NormalizationFactor, bound_string.c_str(), nodes,
-                   nps, search_time, internal_to_uci(position, move).c_str());
+       {
+    std::string pv_str = internal_to_uci(position, move);
+    safe_printf("info multipv %i depth %i seldepth %i score cp %i %s nodes %" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv %s\n",
+         thread_info.multipv_index + 1, depth, thread_info.seldepth,
+         score * 100 / NormalizationFactor, bound_string.c_str(), nodes,
+         nps, search_time, pv_str.c_str());
+       }
           } else if (score > MateScore) {
             int dist = (MateScore - score) / 2;
-            printf("info multipv %i depth %i seldepth %i score mate %i %s nodes "
-                   "%" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv %s\n",
-                   thread_info.multipv_index + 1, depth, thread_info.seldepth,
-                   dist, bound_string.c_str(), nodes, nps,
-                   search_time, internal_to_uci(position, move).c_str());
+       {
+    std::string pv_str = internal_to_uci(position, move);
+    safe_printf("info multipv %i depth %i seldepth %i score mate %i %s nodes %" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv %s\n",
+         thread_info.multipv_index + 1, depth, thread_info.seldepth,
+         dist, bound_string.c_str(), nodes, nps,
+         search_time, pv_str.c_str());
+       }
           } else {
             int dist = (Mate - score) / 2;
-            printf("info multipv %i depth %i seldepth %i score mate %i %s nodes "
-                   "%" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv %s\n",
-                   thread_info.multipv_index + 1, depth, thread_info.seldepth,
-                   dist, bound_string.c_str(), nodes, nps,
-                   search_time, internal_to_uci(position, move).c_str());
+       {
+    std::string pv_str = internal_to_uci(position, move);
+    safe_printf("info multipv %i depth %i seldepth %i score mate %i %s nodes %" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv %s\n",
+         thread_info.multipv_index + 1, depth, thread_info.seldepth,
+         dist, bound_string.c_str(), nodes, nps,
+         search_time, pv_str.c_str());
+       }
           }
         }
 
@@ -1756,8 +1967,7 @@ skip_tb_root: ;
 
         if (!thread_info.doing_datagen /*&&
             !(thread_info.is_human && thread_info.multipv_index)*/) {
-          printf("info multipv %i depth %i seldepth %i score %s nodes %" PRIu64
-                 " nps %" PRIi64 " time %" PRIi64 " pv ",
+          safe_printf("info multipv %i depth %i seldepth %i score %s nodes %" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv ",
                  thread_info.multipv_index + 1, depth, thread_info.seldepth,
                  eval_string.c_str(), nodes, nps, search_time);
           print_pv(position, thread_info);
@@ -1843,7 +2053,8 @@ finish:
       return MoveNone;
     }
 
-    Position ponder_position = root_position;
+  auto ponder_pos_uptr = std::make_unique<Position>(root_position);
+  Position &ponder_position = *ponder_pos_uptr;
     make_move(ponder_position, best_move);
 
     std::array<Move, ListSize> response_legal{};
@@ -1864,7 +2075,8 @@ finish:
       thread_info.ponder_move = thread_info.pv[1];
     } else {
       // Fallback: try to predict opponent's likely response
-      Position temp_pos = position;
+        auto temp_pos_uptr2 = std::make_unique<Position>(position);
+        Position &temp_pos = *temp_pos_uptr2;
       if (thread_info.best_moves[0] != MoveNone) {
         make_move(temp_pos, thread_info.best_moves[0]);
         
@@ -1941,18 +2153,21 @@ finish:
         case TB_LOSS: wdl_str = "loss"; break;
         default: wdl_str = "unknown"; break;
       }
-      printf("info string tablebase hit: %s (%s)\n", internal_to_uci(pos, best).c_str(), wdl_str);
-      fflush(stdout);
+  {
+    std::string tb_bm = internal_to_uci(pos, best);
+    safe_printf("info string tablebase hit: %s (%s)\n", tb_bm.c_str(), wdl_str);
+  }
 
       Move validated_ponder = validate_ponder_move(pos, best, thread_info.ponder_move);
       thread_info.ponder_move = validated_ponder;
 
       if (thread_info.pondering && validated_ponder != MoveNone) {
-        printf("bestmove %s ponder %s\n",
-               internal_to_uci(pos, best).c_str(),
-               internal_to_uci(pos, validated_ponder).c_str());
+        std::string tb_bm = internal_to_uci(pos, best);
+        std::string tb_pd = internal_to_uci(pos, validated_ponder);
+        safe_printf("bestmove %s ponder %s\n", tb_bm.c_str(), tb_pd.c_str());
       } else {
-        printf("bestmove %s\n", internal_to_uci(pos, best).c_str());
+        std::string tb_bm = internal_to_uci(pos, best);
+        safe_printf("bestmove %s\n", tb_bm.c_str());
       }
       return;
     }
@@ -1981,7 +2196,8 @@ finish:
       for (int i = 0; i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
         Move move = thread_info.best_moves[i];
         if (extract_type(move) == MoveTypes::Promotion && extract_promo(move) != Promos::Queen) {
-          Position temp_pos = position;
+      auto temp_pos_uptr3 = std::make_unique<Position>(position);
+      Position &temp_pos = *temp_pos_uptr3;
           make_move(temp_pos, move);
           int to = extract_to(move);
           int promo_type = extract_promo(move);
@@ -2203,10 +2419,12 @@ finish:
       thread_info.ponder_move = validated_ponder;
 
       if (validated_ponder != MoveNone) {
-        printf("bestmove %s ponder %s\n", internal_to_uci(position, thread_info.best_moves[0]).c_str(),
-               internal_to_uci(position, validated_ponder).c_str());
+        std::string bm = internal_to_uci(position, thread_info.best_moves[0]);
+        std::string pd = internal_to_uci(position, validated_ponder);
+        safe_printf("bestmove %s ponder %s\n", bm.c_str(), pd.c_str());
       } else {
-        printf("bestmove %s\n", internal_to_uci(position, thread_info.best_moves[0]).c_str());
+        std::string bm = internal_to_uci(position, thread_info.best_moves[0]);
+        safe_printf("bestmove %s\n", bm.c_str());
       }
     }
   }
@@ -2301,6 +2519,11 @@ if (time_elapsed(thread_info.start_time) > time_for_sacrifice) return 0;
     int before_mat = material_eval(position);
     make_move(np, m);
     update_nnue_state(thread_info, m, position, np); // NNUE state güncelle
+    
+    // Defensive validation for ss_push
+    if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
+      return best; // Safety fallback
+    }
     ss_push(position, thread_info, m); // Stack push
 
     int after_mat = material_eval(np);

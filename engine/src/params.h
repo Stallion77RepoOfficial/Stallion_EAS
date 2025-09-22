@@ -65,9 +65,9 @@ TUNE_PARAM(BmFactor1, 152, 100, 200);
 
 void print_params_for_ob() {
   for (auto &param : params) {
-    std::cout << param.name << ", int, " << param.value << ", " << param.min
-              << ", " << param.max << ", "
-              << std::max(0.5, (param.max - param.min) / 20.0) << ", 0.002\n";
+    safe_printf("%s, int, %d, %d, %d, %f, 0.002\n",
+                param.name.c_str(), param.value, param.min, param.max,
+                std::max(0.5, (param.max - param.min) / 20.0));
   }
 }
 

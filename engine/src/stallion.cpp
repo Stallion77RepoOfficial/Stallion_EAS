@@ -36,7 +36,7 @@ std::optional<int> handle_cli_mode(const std::vector<std::string_view>& args,
 
     if (mode == "perft") {
         if (args.size() <= 2) {
-            std::cerr << "Error: perft mode requires a depth argument\n";
+        safe_print_cerr(std::string("Error: perft mode requires a depth argument"));
             return 1;
         }
 
@@ -47,13 +47,13 @@ std::optional<int> handle_cli_mode(const std::vector<std::string_view>& args,
             perft(depth, position, true, thread_info);
             return 0;
         } catch (const std::exception&) {
-            std::cerr << "Error: invalid depth '" << args[2] << "' for perft\n";
+            safe_print_cerr(std::string("Error: invalid depth '") + std::string(args[2]) + "' for perft");
             return 1;
         }
     }
 
     if (mode == "debug") {
-        std::cout << "[DEBUG MODE] Not implemented yet.\n";
+    safe_printf("[DEBUG MODE] Not implemented yet.\n");
         return 0;
     }
 

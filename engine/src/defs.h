@@ -4,6 +4,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <random>
+#include <string>
 
 namespace Colors {
 constexpr uint8_t White = 0;
@@ -196,6 +197,12 @@ namespace Random {
 uint8_t flip_sq(uint8_t sq) { return sq ^ 56; }
 uint8_t get_color(uint8_t piece) { return piece & 1; }
 inline bool is_valid_square(int sq) { return sq >= 0 && sq < 64; }
+
+// Forward declarations for safe printing helpers (implemented in utils.h).
+// Many headers include defs.h; expose these prototypes so they can call
+// safe_printf / safe_print_cerr without requiring utils.h include order.
+void safe_printf(const char *fmt, ...);
+void safe_print_cerr(const std::string &s);
 
 Move pack_move(uint8_t from, uint8_t to, int8_t type) {
   return ((from & 63) << 10) + ((to & 63) << 4) + (type & 3);

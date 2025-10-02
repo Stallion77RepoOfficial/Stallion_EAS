@@ -13,7 +13,7 @@ constexpr size_t REGISTER_SIZE = 16;
 constexpr size_t REGISTER_SIZE = 0;
 #endif
 
-// Dummy fallback struct
+ 
 struct DummyVec { int dummy = 0; };
 
 auto inline int16_load(auto data) {

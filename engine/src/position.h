@@ -5,7 +5,7 @@
 #include <cstring>
 #include <sstream>
 
-// Forward declarations
+ 
 struct Position;
 struct ThreadInfo;
 
@@ -23,14 +23,14 @@ int16_t total_mat(const Position &position) {
 
 std::string
 internal_to_uci(const Position &position,
-                Move move) { // Converts an internal move into a uci move.
+                Move move) {  
 
   int from = extract_from(move), to = extract_to(move),
       promo = extract_promo(move);
 
-  // Validate squares to prevent string SEGV
+   
   if (!is_valid_square(from) || !is_valid_square(to)) {
-    return "0000"; // Return safe default for invalid moves
+    return "0000";  
   }
 
   if (extract_type(move) == MoveTypes::Castling && !thread_data.is_frc) {
@@ -61,7 +61,7 @@ int get_king_pos(const Position &position, int color) {
 }
 
 void print_board(
-    Position position) { // Prints the board. Very helpful for debugging.
+    Position position) {  
   for (int i = 56; i >= 0; i++) {
   safe_printf("+---+---+---+---+---+---+---+---+\n");
     for (int n = i; n != i + 8; n++) {
@@ -119,7 +119,7 @@ void print_board(
 }
 
 void set_board(Position &position, ThreadInfo &thread_info,
-               std::string f) { // Sets the board to a given fen.
+               std::string f) {  
   position = Position{};
 
   generate_bb(f, position);
@@ -128,14 +128,14 @@ void set_board(Position &position, ThreadInfo &thread_info,
   std::string fen_pos;
   fen >> fen_pos;
 
-  // Robust FEN parser: iterate rank (7..0) and file (0..7) and fill board.
+   
   int rank = 7;
   int file = 0;
   for (size_t idx = 0; idx < fen_pos.size(); ++idx) {
     char c = fen_pos[idx];
     if (c == '/') {
       if (file != 8) {
-        // malformed FEN: not enough squares on rank; abort safely
+         
         return;
       }
       --rank;
@@ -148,14 +148,14 @@ void set_board(Position &position, ThreadInfo &thread_info,
       int skip = c - '0';
       file += skip;
       if (file > 8) {
-        // malformed
+         
         return;
       }
       continue;
     }
 
     if (file >= 8 || rank < 0) {
-      // malformed or out-of-bounds
+       
       return;
     }
 
@@ -216,7 +216,7 @@ void set_board(Position &position, ThreadInfo &thread_info,
 
   std::string color;
   fen >> color;
-  if (color[0] == 'w') { // Set color
+  if (color[0] == 'w') {  
     position.color = Colors::White;
   } else {
     position.color = Colors::Black;
@@ -231,7 +231,7 @@ void set_board(Position &position, ThreadInfo &thread_info,
     }
   }
 
-  for (char right : castling_rights) { // Set castling rights
+  for (char right : castling_rights) {  
     if (right == '-') {
       break;
     }
@@ -244,18 +244,15 @@ void set_board(Position &position, ThreadInfo &thread_info,
     int base = 56 * color;
     int king_pos = get_king_pos(position, color);
 
-    // Enhanced FRC/Chess960 support:
-    // 1. Shredder-FEN notation (AHah) - file letter indicates rook position
-    // 2. Standard KQkq notation - infer from board position
-    
+     
     if (right >= 'a' && right <= 'h') {
-      // Shredder-FEN: explicit file notation (e.g., 'e' for e1/e8 rook)
+       
       square = (right - 'a') + base;
     } else if (right == 'k') {
-      // Kingside castling
+       
       if (thread_data.is_frc) {
-        // FRC: find kingside rook (right of king)
-        square = base + 7; // default h-file
+         
+        square = base + 7;  
         for (int i = king_pos + 1; i < base + 8; i++) {
           if (position.board[i] == Pieces::WRook + color) {
             square = i;
@@ -263,13 +260,13 @@ void set_board(Position &position, ThreadInfo &thread_info,
           }
         }
       } else {
-        square = base + 7; // Standard chess h-file
+        square = base + 7;  
       }
     } else if (right == 'q') {
-      // Queenside castling
+       
       if (thread_data.is_frc) {
-        // FRC: find queenside rook (left of king)
-        square = base; // default a-file
+         
+        square = base;  
         for (int i = king_pos - 1; i >= base; i--) {
           if (position.board[i] == Pieces::WRook + color) {
             square = i;
@@ -277,21 +274,21 @@ void set_board(Position &position, ThreadInfo &thread_info,
           }
         }
       } else {
-        square = base; // Standard chess a-file
+        square = base;  
       }
     } else {
-      // Unknown notation, skip
+       
       continue;
     }
 
-    // Validate square before setting
+     
     if (!is_valid_square(square)) continue;
     
     int side = square > king_pos ? Sides::Kingside : Sides::Queenside;
     position.castling_squares[color][side] = square;
   }
 
-  std::string ep_square; // Set en passant square
+  std::string ep_square;  
   fen >> ep_square;
   if (ep_square[0] == '-') {
     position.ep_square = SquareNone;
@@ -441,16 +438,13 @@ std::string export_fen(const Position &position,
 
 uint64_t
 attacks_square(const Position &position, int sq,
-               int color) { // Do we attack the square at position "sq"?
+               int color) {  
 
-  // Basic input validation: square must be valid and color must be 0 or 1.
+   
   if (!is_valid_square(sq)) return 0ULL;
   if (color != Colors::White && color != Colors::Black) return 0ULL;
 
-  // Compute occupancy from the stored bitboards and sanitize masks used by
-  // sliding attack generators. This makes sure callers that pass an
-  // inconsistent 'position' or an external occ mask can't cause OOB shifts
-  // or undefined behavior in the attack tables.
+   
   uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
                      position.pieces_bb[PieceTypes::Queen];
   uint64_t rooks = position.pieces_bb[PieceTypes::Rook] |
@@ -458,9 +452,7 @@ attacks_square(const Position &position, int sq,
   uint64_t occ = position.colors_bb[Colors::White] |
                  position.colors_bb[Colors::Black];
 
-  // Defensive: ensure occ is consistent with piece bitboards (mask off any
-  // bits that don't correspond to pieces). This avoids passing a corrupt
-  // occupancy to the attack generators.
+   
   uint64_t combined_pieces = 0ULL;
   for (int pt = PieceTypes::Pawn; pt <= PieceTypes::King; ++pt)
     combined_pieces |= position.pieces_bb[pt];
@@ -478,13 +470,12 @@ attacks_square(const Position &position, int sq,
 
 uint64_t
 attacks_square(const Position &position, int sq, int color,
-               uint64_t occ) { // Do we attack the square at position "sq"?
+               uint64_t occ) {  
 
   if (!is_valid_square(sq)) return 0ULL;
   if (color != Colors::White && color != Colors::Black) return 0ULL;
 
-  // Sanitize provided occ against the board's actual piece bitboards to
-  // avoid passing wildly incorrect occupancy masks to the attack helpers.
+   
   uint64_t combined_pieces = 0ULL;
   for (int pt = PieceTypes::Pawn; pt <= PieceTypes::King; ++pt)
     combined_pieces |= position.pieces_bb[pt];
@@ -505,14 +496,12 @@ attacks_square(const Position &position, int sq, int color,
   return attackers & position.colors_bb[color] & occ;
 }
 
-// Does anyone attack the square
+ 
 uint64_t attacks_square(const Position &position, int sq, uint64_t occ) {
 
   if (!is_valid_square(sq)) return 0ULL;
 
-  // Sanitize occ against actual pieces on the board. If occ becomes 0 the
-  // sliding attack helpers will see an empty board and won't index out of
-  // bounds.
+   
   uint64_t combined_pieces = 0ULL;
   for (int pt = PieceTypes::Pawn; pt <= PieceTypes::King; ++pt)
     combined_pieces |= position.pieces_bb[pt];
@@ -535,7 +524,7 @@ uint64_t attacks_square(const Position &position, int sq, uint64_t occ) {
 
 uint64_t
 br_attacks_square(const Position &position, int sq, int color,
-                  uint64_t occ) { // Do we attack the square at position "sq"?
+                  uint64_t occ) {  
 
   if (!is_valid_square(sq)) return 0ULL;
 
@@ -572,7 +561,7 @@ bool is_cap(const Position &position, Move &move) {
 }
 
 void update_nnue_state(ThreadInfo &thread_info, Move move,
-                       const Position &position, const Position &moved_position) { // Updates the nnue state
+                       const Position &position, const Position &moved_position) {  
 
   int from = extract_from(move), to = extract_to(move);
   int from_piece = position.board[from];
@@ -584,7 +573,7 @@ void update_nnue_state(ThreadInfo &thread_info, Move move,
 
   int phase = thread_info.phase;
 
-  if (extract_type(move) == MoveTypes::Promotion) { // Grab promos
+  if (extract_type(move) == MoveTypes::Promotion) {  
     to_piece = (extract_promo(move) + 2) * 2 + color;
   }
 
@@ -593,7 +582,7 @@ void update_nnue_state(ThreadInfo &thread_info, Move move,
   if (position.board[to]) {
     captured_piece = position.board[to], captured_square = to;
   }
-  // en passant
+   
   else if (extract_type(move) == MoveTypes::EnPassant) {
     captured_square = to + (color ? Directions::North : Directions::South);
     if (is_valid_square(captured_square)) {
@@ -605,7 +594,7 @@ void update_nnue_state(ThreadInfo &thread_info, Move move,
   }
 
   if (extract_type(move) ==
-      MoveTypes::Castling) { // update the rook that moved if we castled
+      MoveTypes::Castling) {  
 
     int indx = color ? 56 : 0;
     int side = to > from;
@@ -625,23 +614,23 @@ void update_nnue_state(ThreadInfo &thread_info, Move move,
   }
 
   else if (captured_piece) {
-    // EXTREME VALIDATION: Check all parameters before NNUE call
+     
     if (from_piece == Pieces::Blank || to_piece == Pieces::Blank) {
-      return; // Invalid pieces
+      return;  
     }
     if (!is_valid_square(from) || !is_valid_square(to) || !is_valid_square(captured_square)) {
-      return; // Invalid squares
+      return;  
     }
     if (captured_piece == Pieces::Blank) {
-      return; // Invalid captured piece
+      return;  
     }
     if (phase < PhaseTypes::Opening || phase > PhaseTypes::Sacrifice) {
-      phase = PhaseTypes::MiddleGame; // Default to safe phase
+      phase = PhaseTypes::MiddleGame;  
     }
 
-    // MEMORY CORRUPTION CHECK: Ensure NNUE state is valid
+     
     if (thread_info.nnue_state.m_curr >= &thread_info.nnue_state.m_accumulator_stack[MaxSearchDepth - 1]) {
-      return; // NNUE stack overflow prevention
+      return;  
     }
 
     thread_info.nnue_state.add_sub_sub(from_piece, from, to_piece, to,
@@ -654,10 +643,10 @@ void update_nnue_state(ThreadInfo &thread_info, Move move,
   }
 }
 
-void make_move(Position &position, Move move) { // Perform a move on the board.
-  // EXTREME POSITION VALIDATION: Check position integrity before any move
+void make_move(Position &position, Move move) {  
+   
   if (!position_integrity_check(position)) {
-    return; // Corrupted position detected
+    return;  
   }
 
   position.halfmoves++;
@@ -675,13 +664,13 @@ void make_move(Position &position, Move move) { // Perform a move on the board.
 
   int from = extract_from(move), to = extract_to(move);
   if (!is_valid_square(from) || !is_valid_square(to)) {
-    return; // Invalid move, do nothing
+    return;  
   }
 
-  // PIECE VALIDATION: Ensure pieces exist and are valid
+   
   int from_piece = position.board[from];
   if (from_piece == Pieces::Blank || get_color(from_piece) != position.color) {
-    return; // Invalid piece or wrong color
+    return;  
   }
 
   uint64_t temp_hash = position.zobrist_key;
@@ -699,7 +688,7 @@ void make_move(Position &position, Move move) { // Perform a move on the board.
 
   int king_pos = get_king_pos(position, color);
   if (!is_valid_square(king_pos)) {
-    return; // Invalid king position
+    return;  
   }
   int side = to > king_pos;
 
@@ -707,9 +696,9 @@ void make_move(Position &position, Move move) { // Perform a move on the board.
     to = base_rank + 2 + (side)*4;
   }
 
-  // update material counts and 50 move rules for a capture
+   
   else if (position.board[to]) {
-    // Update hash key for the piece that was taken
+     
     position.halfmoves = 0;
     position.material_count[position.board[to] - 2]--;
     captured_piece = position.board[to], captured_square = to;
@@ -727,7 +716,7 @@ void make_move(Position &position, Move move) { // Perform a move on the board.
     }
 
   }
-  // en passant
+   
   else if (extract_type(move) == MoveTypes::EnPassant) {
     position.material_count[opp_color]--;
     captured_square = to + (color ? Directions::North : Directions::South);
@@ -737,37 +726,35 @@ void make_move(Position &position, Move move) { // Perform a move on the board.
                                               captured_square)];
     temp_pawns ^= zobrist_keys[get_zobrist_key(position.board[captured_square],
                                                captured_square)];
-    // Update hash key for the piece that was taken
-    // (not covered above)
+     
+     
     position.board[captured_square] = Pieces::Blank;
   }
 
-  // Move the piece
-
+   
   position.board[from] = Pieces::Blank;
   position.board[to] = from_piece;
 
   int to_piece = position.board[to];
 
-  // handle promotions and double pawn pushes
-
+   
   if (from_type == PieceTypes::Pawn) {
     position.halfmoves = 0;
 
-    // promotions
+     
     if (extract_type(move) == MoveTypes::Promotion) {
       to_piece = extract_promo(move) * 2 + 4 + color;
       position.board[to] = to_piece;
       position.material_count[color]--, position.material_count[to_piece - 2]++;
     }
 
-    // double pawn push
+     
     else if (to == from + Directions::North * 2 ||
              to == from + Directions::South * 2) {
       ep_square = (to + from) / 2;
     }
   }
-  // handle king moves and castling
+   
 
   else if (from_type == PieceTypes::King) {
 
@@ -800,7 +787,7 @@ void make_move(Position &position, Move move) { // Perform a move on the board.
       }
     }
 
-    // If the king moves, castling rights are gone.
+     
     if (position.castling_squares[color][Sides::Queenside] != SquareNone) {
       temp_hash ^= zobrist_keys[castling_index + color * 2 + Sides::Queenside];
       position.castling_squares[color][Sides::Queenside] = SquareNone;
@@ -812,9 +799,7 @@ void make_move(Position &position, Move move) { // Perform a move on the board.
     }
   }
 
-  // If we've moved a piece from our starting rook squares, set castling on that
-  // side to false, because if it's not a rook it means either the rook left
-  // that square or the king left its original square.
+   
   if (from == position.castling_squares[color][Sides::Queenside] ||
       from == position.castling_squares[color][Sides::Kingside]) {
 
@@ -825,10 +810,8 @@ void make_move(Position &position, Move move) { // Perform a move on the board.
       temp_hash ^= zobrist_keys[castling_index + color * 2 + side];
     }
   }
-  // If we've moved a piece onto one of the opponent's starting rook square, set
-  // their castling to false, because either we just captured it, the rook
-  // already moved, or the opposing king moved.
-
+   
+   
   if (to == position.castling_squares[opp_color][Sides::Queenside] ||
       to == position.castling_squares[opp_color][Sides::Kingside]) {
 
@@ -867,16 +850,15 @@ void make_move(Position &position, Move move) { // Perform a move on the board.
   position.color ^= 1;
 
   if ((position.ep_square == SquareNone) ^
-      (ep_square == SquareNone)) { // has the position's ability to perform en
-                                   // passant been changed?
+      (ep_square == SquareNone)) {  
+                                    
     temp_hash ^= zobrist_keys[ep_index];
   }
   position.ep_square = ep_square;
   position.zobrist_key = temp_hash;
   position.pawn_key = temp_pawns;
 
-  // Replace raw prefetch with safe_TT_prefetch to avoid racing with
-  // concurrent TT.assign()/resize which caused ASAN SEGVs previously.
+   
   safe_TT_prefetch(temp_hash);
 }
 
@@ -949,7 +931,7 @@ bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
   }
 
   if (checkers) {
-  // Single check: move must block the line or capture the checker square.
+   
   int checker_sq = get_lsb(checkers);
   uint64_t single_check_filter = BetweenBBs[get_king_pos(position, color)][checker_sq] | (1ULL << checker_sq);
   if (!(single_check_filter & (1ULL << to))) return false;
@@ -989,7 +971,7 @@ bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
 }
 
 bool is_legal(const Position &position,
-              Move move) { // Perform a move on the board.
+              Move move) {  
   uint64_t occupied =
       position.colors_bb[Colors::White] | position.colors_bb[Colors::Black];
   int from = extract_from(move), to = extract_to(move), color = position.color,
@@ -1001,8 +983,7 @@ bool is_legal(const Position &position,
 
   int from_piece = position.board[from];
 
-  // Defensive: ensure piece value at 'from' is valid to avoid crashes from
-  // memory corruption or invalid indices.
+   
   if (from_piece < Pieces::Blank || from_piece > Pieces::BKing) {
     return false;
   }
@@ -1019,7 +1000,7 @@ bool is_legal(const Position &position,
 
   int king_pos = get_king_pos(position, color);
 
-  // en passant
+   
   if (extract_type(move) == MoveTypes::EnPassant) {
     int cap_square = to + (color ? Directions::North : Directions::South);
     if (!is_valid_square(cap_square)) {
@@ -1041,30 +1022,29 @@ bool is_legal(const Position &position,
 }
 
 bool position_integrity_check(const Position &position) {
-  // EXTREME VALIDATION: Check all position components for corruption
+   
 
-  // 1. Check board array bounds and piece validity
   for (int sq = 0; sq < 64; sq++) {
     int piece = position.board[sq];
     if (piece < Pieces::Blank || piece > Pieces::BKing) {
-      return false; // Invalid piece type
+      return false;  
     }
     if (piece != Pieces::Blank && !is_valid_square(sq)) {
-      return false; // Piece on invalid square
+      return false;  
     }
   }
 
-  // 2. Check king positions
+   
   int white_king = get_king_pos(position, Colors::White);
   int black_king = get_king_pos(position, Colors::Black);
   if (!is_valid_square(white_king) || !is_valid_square(black_king)) {
-    return false; // Invalid king positions
+    return false;  
   }
   if (white_king == black_king) {
-    return false; // Kings on same square
+    return false;  
   }
 
-  // 3. Check piece counts (should not exceed maximum possible)
+   
   int white_pieces = 0, black_pieces = 0;
   for (int sq = 0; sq < 64; sq++) {
     int piece = position.board[sq];
@@ -1074,33 +1054,33 @@ bool position_integrity_check(const Position &position) {
     }
   }
   if (white_pieces > 16 || black_pieces > 16) {
-    return false; // Too many pieces
+    return false;  
   }
 
-  // 4. Check en passant square validity
+   
   if (position.ep_square != SquareNone && !is_valid_square(position.ep_square)) {
-    return false; // Invalid en passant square
+    return false;  
   }
 
-  // 5. Check castling rights validity
+   
   for (int color = 0; color < 2; color++) {
     for (int side = 0; side < 2; side++) {
       int square = position.castling_squares[color][side];
       if (square != SquareNone && !is_valid_square(square)) {
-        return false; // Invalid castling square
+        return false;  
       }
     }
   }
 
-  // 6. Check color validity
+   
   if (position.color != Colors::White && position.color != Colors::Black) {
-    return false; // Invalid color
+    return false;  
   }
 
-  // 7. Check halfmove clock validity
+   
   if (position.halfmoves < 0 || position.halfmoves > 100) {
-    return false; // Invalid halfmove clock
+    return false;  
   }
 
-  return true; // Position appears valid
+  return true;  
 }

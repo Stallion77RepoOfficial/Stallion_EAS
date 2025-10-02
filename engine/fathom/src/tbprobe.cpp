@@ -1,26 +1,4 @@
-/*
-Copyright (c) 2013-2018 Ronald de Man
-Copyright (c) 2015 basil00
-Modifications Copyright (c) 2016-2023 by Jon Dart
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-*/
+ 
 
 #include <assert.h>
 #ifdef __cplusplus
@@ -39,10 +17,8 @@ SOFTWARE.
 #include <stdbool.h>
 #endif
 #include "tbprobe.h"
-// Forward declarations for engine's thread-safe printing helpers.
-// We intentionally avoid including engine headers here to keep fathom's
-// standalone buildability. These functions are defined in the engine
-// translation unit and must be linked in when building the combined binary.
+ 
+ 
 void safe_printf(const char *fmt, ...);
 void safe_fflush();
 
@@ -73,16 +49,14 @@ typedef size_t map_t;
 typedef HANDLE map_t;
 #endif
 
-// This must be after the inclusion of Windows headers, because otherwise
-// std::byte conflicts with "byte" in rpcndr.h . The error occurs if C++
-// standard is at lest 17, as std::byte was introduced in C++17.
+ 
 #ifdef __cplusplus
 using namespace std;
 #endif
 
 #define DECOMP64
 
-// Threading support
+ 
 #ifndef TB_NO_THREADS
 #if defined(__cplusplus) && (__cplusplus >= 201103L)
 
@@ -109,15 +83,15 @@ using namespace std;
 #endif
 
 #endif
-#else /* TB_NO_THREADS */
+#else  
 #define LOCK_T          int
-#define LOCK_INIT(x)    /* NOP */
-#define LOCK_DESTROY(x) /* NOP */
-#define LOCK(x)         /* NOP */
-#define UNLOCK(x)       /* NOP */
+#define LOCK_INIT(x)     
+#define LOCK_DESTROY(x)  
+#define LOCK(x)          
+#define UNLOCK(x)        
 #endif
 
-// population count implementation
+ 
 #undef TB_SOFTWARE_POP_COUNT
 
 #if defined(TB_CUSTOM_POP_COUNT)
@@ -131,7 +105,7 @@ using namespace std;
 #include <nmmintrin.h>
 #define popcount(x)             (int)_mm_popcnt_u64((x))
 #else
-// try to use a builtin
+ 
 #if defined (__has_builtin)
 #if __has_builtin(__builtin_popcountll)
 #define popcount(x) __builtin_popcountll((x))
@@ -144,9 +118,8 @@ using namespace std;
 #endif
 
 #ifdef TB_SOFTWARE_POP_COUNT
-// Not a recognized compiler/architecture that has popcount, and
-// no builtin available: fall back to a software popcount. This one
-// is still reasonably fast.
+ 
+ 
 static inline unsigned tb_software_popcount(uint64_t x)
 {
     x = x - ((x >> 1) & 0x5555555555555555ull);
@@ -157,7 +130,7 @@ static inline unsigned tb_software_popcount(uint64_t x)
 #define popcount(x) tb_software_popcount(x)
 #endif
 
-// LSB (least-significant bit) implementation
+ 
 #ifdef TB_CUSTOM_LSB
 #define lsb(b) TB_CUSTOM_LSB(b)
 #else
@@ -185,7 +158,7 @@ static inline unsigned lsb(uint64_t b) {
 #endif
 }
 #else
-/* not a compiler/architecture with recognized builtins */
+ 
 static uint32_t get_bit32(uint64_t x) {
   return (uint32_t)(((int32_t)(x))&-((int32_t)(x)));
 }
@@ -207,12 +180,7 @@ static unsigned lsb(uint64_t b) {
 
 #if _BYTE_ORDER == _BIG_ENDIAN
 
-/* (unused)
-static uint64_t from_le_u64(uint64_t input) {
-  return bswap64(input);
-}
-*/
-
+ 
 static uint32_t from_le_u32(uint32_t input) {
   return bswap32(input);
 }
@@ -229,19 +197,10 @@ static uint32_t from_be_u32(uint32_t x) {
   return x;
 }
 
-/* (unused)
-  static uint16_t from_be_u16(uint16_t x) {
-  return x;
- }*/
-
+ 
 #else
 
-/* (unused)
-static uint64_t from_le_u64(uint64_t x) {
-  return x;
-}
-*/
-
+ 
 static uint32_t from_le_u32(uint32_t x) {
   return x;
 }
@@ -258,12 +217,7 @@ static uint32_t from_be_u32(uint32_t input) {
   return bswap32(input);
 }
 
-/* (unused)
-static uint16_t from_be_u16(const uint16_t input) {
-  return bswap16(input);
-}
-*/
-
+ 
 #endif
 
 inline static uint32_t read_le_u32(void *p)
@@ -325,9 +279,7 @@ static FD open_tb(const char *str, const char *suffix)
     wchar_t ucode_name[4096];
     size_t len;
     mbstowcs_s(&len, ucode_name, 4096, file, _TRUNCATE);
-    /* use FILE_FLAG_RANDOM_ACCESS because we are likely to access this file
-       randomly, so prefetch is not helpful. See
-       https://github.com/official-stockfish/Stockfish/pull/1829 */
+     
     fd = CreateFile(ucode_name, GENERIC_READ, FILE_SHARE_READ, NULL,
 			  OPEN_EXISTING, FILE_FLAG_RANDOM_ACCESS, NULL);
 #else
@@ -369,9 +321,7 @@ static void *map_file(FD fd, map_t *mapping)
     return NULL;
   }
 #ifdef POSIX_MADV_RANDOM
-  /* Advise the kernel that we are likely to access this data
-     region randomly, so prefetch is not helpful. See
-     https://github.com/official-stockfish/Stockfish/pull/1829 */
+   
   posix_madvise(data, statbuf.st_size, POSIX_MADV_RANDOM);
 #endif
 #else
@@ -417,7 +367,7 @@ static void unmap_file(void *data, map_t mapping)
 
 int TB_MaxCardinality = 0, TB_MaxCardinalityDTM = 0;
 unsigned TB_LARGEST = 0;
-//extern int TB_CardinalityDTM;
+ 
 
 static const char *tbSuffix[] = { ".rtbw", ".rtbm", ".rtbz" };
 static uint32_t tbMagic[] = { 0x5d23e871, 0x88ac504b, 0xa50c66d7 };
@@ -425,7 +375,7 @@ static uint32_t tbMagic[] = { 0x5d23e871, 0x88ac504b, 0xa50c66d7 };
 enum { WDL, DTM, DTZ };
 enum { PIECE_ENC, FILE_ENC, RANK_ENC };
 
-// Attack and move generation code
+ 
 #include "tbchess.cpp"
 
 struct PairsData {
@@ -469,7 +419,7 @@ struct BaseEntry {
 
 struct PieceEntry {
   struct BaseEntry be;
-  struct EncInfo ei[5]; // 2 + 2 + 1
+  struct EncInfo ei[5];  
   uint16_t *dtmMap;
   uint16_t dtmMapIdx[2][2];
   void *dtzMap;
@@ -479,7 +429,7 @@ struct PieceEntry {
 
 struct PawnEntry {
   struct BaseEntry be;
-  struct EncInfo ei[24]; // 4 * 2 + 6 * 2 + 4
+  struct EncInfo ei[24];  
   uint16_t *dtmMap;
   uint16_t dtmMapIdx[6][2][2];
   void *dtzMap;
@@ -502,8 +452,7 @@ static struct TbHashEntry tbHash[1 << TB_HASHBITS];
 
 static void init_indices(void);
 
-// Forward declarations. These functions without the tb_
-// prefix take a pos structure as input.
+ 
 static int probe_wdl(Pos *pos, int *success);
 static int probe_dtz(Pos *pos, int *success);
 static int root_probe_wdl(const Pos *pos, bool useRule50, struct TbRootMoves *rm);
@@ -668,9 +617,7 @@ int tb_probe_root_wdl(
     return root_probe_wdl(&pos, useRule50, results);
 }
 
-// Given a position, produce a text string of the form KQPvKRP, where
-// "KQP" represents the white pieces if flip == false and the black pieces
-// if flip == true.
+ 
 static void prt_str(const Pos *pos, char *str, bool flip)
 {
   int color = flip ? BLACK : WHITE;
@@ -843,7 +790,7 @@ bool tb_init(const char *path)
     initialized = 1;
   }
 
-  // if pathString is set, we need to clean up first.
+   
   if (pathString) {
     free(pathString);
     free(paths);
@@ -861,7 +808,7 @@ bool tb_init(const char *path)
 
   TB_LARGEST = 0;
 
-  // if path is an empty string or equals "<empty>", we are done.
+   
   const char *p = path;
   if (strlen(p) == 0 || !strcmp(p, "<empty>")) {
     return true;
@@ -938,7 +885,7 @@ bool tb_init(const char *path)
         init_tb(str);
       }
 
-  // 6- and 7-piece TBs make sense only with a 64-bit address space
+   
   if (sizeof(size_t) < 8 || TB_PIECES < 6)
     goto finished;
 
@@ -997,12 +944,8 @@ bool tb_init(const char *path)
           }
 
 finished:
-  /* TBD - assumes UCI
-  safe_printf("info string Found %d WDL, %d DTM and %d DTZ tablebase files.\n",
-      numWdl, numDtm, numDtz);
-  safe_fflush();
-  */
-  // Set TB_LARGEST, for backward compatibility with pre-7-man Fathom
+   
+   
   TB_LARGEST = (unsigned)TB_MaxCardinality;
   if ((unsigned)TB_MaxCardinalityDTM > TB_LARGEST) {
     TB_LARGEST = TB_MaxCardinalityDTM;
@@ -1206,7 +1149,7 @@ static void init_indices(void)
 {
   int i, j, k;
 
-  // Binomial[k][n] = Bin(n, k)
+   
   for (i = 0; i < 7; i++)
     for (j = 0; j < 64; j++) {
       size_t f = 1;
@@ -1306,7 +1249,7 @@ size_t encode(int *p, struct EncInfo *ei, struct BaseEntry *be,
       idx += Binomial[k-i][PawnTwist[enc-1][p[i]]];
     idx *= ei->factor[0];
 
-    // Pawns of other color
+     
     if (be->pawns[1]) {
       int t = k + be->pawns[1];
       for (int i = k; i < t; i++)
@@ -1360,7 +1303,7 @@ static size_t encode_pawn_r(int *p, struct EncInfo *ei, struct BaseEntry *be)
   return encode(p, ei, be, RANK_ENC);
 }
 
-// Count number of placements of k like pieces on n squares
+ 
 static size_t subfactor(size_t k, size_t n)
 {
   size_t f = n;
@@ -1659,7 +1602,7 @@ static uint8_t *decompress_pairs(struct PairsData *d, size_t idx)
   uint64_t code = from_be_u64(*(uint64_t *)ptr);
 
   ptr += 2;
-  bitCnt = 0; // number of "empty bits" in code
+  bitCnt = 0;  
   for (;;) {
     int l = m;
     while (code < base[l]) l++;
@@ -1679,7 +1622,7 @@ static uint8_t *decompress_pairs(struct PairsData *d, size_t idx)
   uint32_t next = 0;
   uint32_t data = *ptr++;
   uint32_t code = from_be_u32(data);
-  bitCnt = 0; // number of bits in next
+  bitCnt = 0;  
   for (;;) {
     int l = m;
     while (code < base[l]) l++;
@@ -1716,10 +1659,7 @@ static uint8_t *decompress_pairs(struct PairsData *d, size_t idx)
   return &symPat[3 * sym];
 }
 
-// p[i] is to contain the square 0-63 (A1-H8) for a piece of type
-// pc[i] ^ flip, where 1 = white pawn, ..., 14 = black king and pc ^ flip
-// flips between white and black if flip == true.
-// Pieces of the same type are guaranteed to be consecutive.
+ 
 inline static int fill_squares(const Pos *pos, uint8_t *pc, bool flip, int mirror, int *p,
     int i)
 {
@@ -1737,11 +1677,10 @@ inline static int fill_squares(const Pos *pos, uint8_t *pc, bool flip, int mirro
 
 int probe_table(const Pos *pos, int s, int *success, const int type)
 {
-  // Obtain the position's material-signature key
+   
   uint64_t key = calc_key(pos,false);
 
-  // Test for KvK
-  // Note: Cfish has key == 2ULL for KvK but we have 0
+   
   if (type == WDL && key == 0ULL)
     return 0;
 
@@ -1759,14 +1698,14 @@ int probe_table(const Pos *pos, int s, int *success, const int type)
     return 0;
   }
 
-  // Use double-checked locking to reduce locking overhead
+   
   if (!atomic_load_explicit(&be->ready[type], memory_order_acquire)) {
     LOCK(tbMutex);
     if (!atomic_load_explicit(&be->ready[type], memory_order_relaxed)) {
       char str[16];
       prt_str(pos, str, be->key != key);
       if (!init_table(be, str, type)) {
-        tbHash[hashIdx].ptr = NULL; // mark as deleted
+        tbHash[hashIdx].ptr = NULL;  
         *success = 0;
         UNLOCK(tbMutex);
         return 0;
@@ -1793,7 +1732,7 @@ int probe_table(const Pos *pos, int s, int *success, const int type)
   int p[TB_PIECES];
   size_t idx;
   int t = 0;
-  uint8_t flags = 0; // initialize to fix GCC warning
+  uint8_t flags = 0;  
 
   if (!be->hasPawns) {
     if (type == DTZ) {
@@ -1870,15 +1809,15 @@ static int probe_dtz_table(const Pos *pos, int wdl, int *success)
   return probe_table(pos, wdl, success, DTZ);
 }
 
-// probe_ab() is not called for positions with en passant captures.
+ 
 static int probe_ab(const Pos *pos, int alpha, int beta, int *success)
 {
   assert(pos->ep == 0);
 
   TbMove moves0[TB_MAX_CAPTURES];
   TbMove *m = moves0;
-  // Generate (at least) all legal captures including (under)promotions.
-  // It is OK to generate more, as long as they are filtered out below.
+   
+   
   TbMove *end = gen_captures(pos, m);
   for (; m < end; m++) {
     Pos pos1;
@@ -1886,7 +1825,7 @@ static int probe_ab(const Pos *pos, int alpha, int beta, int *success)
     if (!is_capture(pos, move))
       continue;
     if (!do_move(&pos1, pos, move))
-      continue; // illegal move
+      continue;  
     int v = -probe_ab(&pos1, -beta, -alpha, success);
     if (*success == 0) return 0;
     if (v > alpha) {
@@ -1901,42 +1840,25 @@ static int probe_ab(const Pos *pos, int alpha, int beta, int *success)
   return alpha >= v ? alpha : v;
 }
 
-// Probe the WDL table for a particular position.
-//
-// If *success != 0, the probe was successful.
-//
-// If *success == 2, the position has a winning capture, or the position
-// is a cursed win and has a cursed winning capture, or the position
-// has an ep capture as only best move.
-// This is used in probe_dtz().
-//
-// The return value is from the point of view of the side to move:
-// -2 : loss
-// -1 : loss, but draw under 50-move rule
-//  0 : draw
-//  1 : win, but draw under 50-move rule
-//  2 : win
+ 
 int probe_wdl(Pos *pos, int *success)
 {
   *success = 1;
 
-  // Generate (at least) all legal captures including (under)promotions.
+   
   TbMove moves0[TB_MAX_CAPTURES];
   TbMove *m = moves0;
   TbMove *end = gen_captures(pos, m);
   int bestCap = -3, bestEp = -3;
 
-  // We do capture resolution, letting bestCap keep track of the best
-  // capture without ep rights and letting bestEp keep track of still
-  // better ep captures if they exist.
-
+   
   for (; m < end; m++) {
     Pos pos1;
     TbMove move = *m;
     if (!is_capture(pos, move))
       continue;
     if (!do_move(&pos1, pos, move))
-      continue; // illegal move
+      continue;  
     int v = -probe_ab(&pos1, -2, -bestCap, success);
     if (*success == 0) return 0;
     if (v > bestCap) {
@@ -1954,52 +1876,45 @@ int probe_wdl(Pos *pos, int *success)
   int v = probe_wdl_table(pos, success);
   if (*success == 0) return 0;
 
-  // Now max(v, bestCap) is the WDL value of the position without ep rights.
-  // If the position without ep rights is not stalemate or no ep captures
-  // exist, then the value of the position is max(v, bestCap, bestEp).
-  // If the position without ep rights is stalemate and bestEp > -3,
-  // then the value of the position is bestEp (and we will have v == 0).
-
+   
   if (bestEp > bestCap) {
-    if (bestEp > v) { // ep capture (possibly cursed losing) is best.
+    if (bestEp > v) {  
       *success = 2;
       return bestEp;
     }
     bestCap = bestEp;
   }
 
-  // Now max(v, bestCap) is the WDL value of the position unless
-  // the position without ep rights is stalemate and bestEp > -3.
-
+   
   if (bestCap >= v) {
-    // No need to test for the stalemate case here: either there are
-    // non-ep captures, or bestCap == bestEp >= v anyway.
+     
+     
     *success = 1 + (bestCap > 0);
     return bestCap;
   }
 
-  // Now handle the stalemate case.
+   
   if (bestEp > -3 && v == 0) {
     TbMove moves[TB_MAX_MOVES];
     TbMove *end2 = gen_moves(pos, moves);
-    // Check for stalemate in the position with ep captures.
+     
     for (m = moves; m < end2; m++) {
       if (!is_en_passant(pos,*m) && legal_move(pos, *m)) break;
     }
     if (m == end2 && !is_check(pos)) {
-      // stalemate score from tb (w/o e.p.), but an en-passant capture
-      // is possible.
+       
+       
       *success = 2;
       return bestEp;
     }
   }
-  // Stalemate / en passant not an issue, so v is the correct value.
+   
 
   return v;
 }
 
 #if 0
-// This will not be called for positions with en passant captures
+ 
 static Value probe_dtm_dc(const Pos *pos, int won, int *success)
 {
   assert(ep_square() == 0);
@@ -2009,7 +1924,7 @@ static Value probe_dtm_dc(const Pos *pos, int won, int *success)
   TbMove moves0[TB_MAX_CAPTURES];
   TbMove *end, *m = moves0;
 
-  // Generate at least all legal captures including (under)promotions
+   
   end = gen_captures(pos, m);
   Pos pos1;
   for (; m < end; m++) {
@@ -2037,14 +1952,13 @@ static Value probe_dtm_dc(const Pos *pos, int won, int *success)
 
 static Value probe_dtm_win(const Pos *pos, int *success);
 
-// Probe a position known to lose by probing the DTM table and looking
-// at captures.
+ 
 static Value probe_dtm_loss(const Pos *pos, int *success)
 {
   Value v, best = -TB_VALUE_INFINITE, numEp = 0;
 
   TbMove moves0[TB_MAX_CAPTURES];
-  // Generate at least all legal captures including (under)promotions
+   
   TbMove *end, *m = moves0;
   end = gen_captures(pos, m);
 
@@ -2064,8 +1978,7 @@ static Value probe_dtm_loss(const Pos *pos, int *success)
       return 0;
   }
 
-  // If there are en passant captures, the position without ep rights
-  // may be a stalemate. If it is, we must avoid probing the DTM table.
+   
   if (numEp != 0 && gen_legal(pos, m) == m + numEp)
     return best;
 
@@ -2077,16 +1990,16 @@ static Value probe_dtm_win(const Pos *pos, int *success)
 {
   Value v, best = -TB_VALUE_INFINITE;
 
-  // Generate all moves
+   
   TbMove moves0[TB_MAX_CAPTURES];
   TbMove *m = moves0;
   TbMove *end = gen_moves(pos, m);
-  // Perform a 1-ply search
+   
   Pos pos1;
   for (; m < end; m++) {
     TbMove move = *m;
     if (do_move(&pos1, pos, move)) {
-      // not legal
+       
       continue;
     }
     if ((pos1.ep > 0  ? probe_wdl(&pos1, success)
@@ -2115,7 +2028,7 @@ Value TB_probe_dtm(const Pos *pos, int wdl, int *success)
 }
 
 #if 0
-// To be called only for non-drawn positions.
+ 
 Value TB_probe_dtm2(const Pos *pos, int wdl, int *success)
 {
   assert(wdl != 0);
@@ -2126,12 +2039,11 @@ Value TB_probe_dtm2(const Pos *pos, int wdl, int *success)
   TbMove moves0[TB_MAX_CAPTURES];
   TbMove *end, *m = moves0;
 
-  // Generate at least all legal captures including (under)promotions
+   
   end = gen_captures(pos, m);
   Pos pos0 = *pos;
 
-  // Resolve captures, letting bestCap keep track of the best non-ep
-  // capture and letting bestEp keep track of the best ep capture.
+   
   Pos pos1;
   for (; m < end; m++) {
     TbMove move = *m;
@@ -2153,8 +2065,7 @@ Value TB_probe_dtm2(const Pos *pos, int wdl, int *success)
       return 0;
   }
 
-  // If there are en passant captures, we have to determine the WDL value
-  // for the position without ep rights if it might be different.
+   
   if (bestEp > -TB_VALUE_INFINITE && (bestEp < 0 || bestCap < 0)) {
     assert(ep_square() != 0);
     uint8_t s = pos->st->epSquare;
@@ -2176,43 +2087,16 @@ Value TB_probe_dtm2(const Pos *pos, int wdl, int *success)
 
 static int WdlToDtz[] = { -1, -101, 0, 101, 1 };
 
-// Probe the DTZ table for a particular position.
-// If *success != 0, the probe was successful.
-// The return value is from the point of view of the side to move:
-//         n < -100 : loss, but draw under 50-move rule
-// -100 <= n < -1   : loss in n ply (assuming 50-move counter == 0)
-//         0        : draw
-//     1 < n <= 100 : win in n ply (assuming 50-move counter == 0)
-//   100 < n        : win, but draw under 50-move rule
-//
-// If the position mate, -1 is returned instead of 0.
-//
-// The return value n can be off by 1: a return value -n can mean a loss
-// in n+1 ply and a return value +n can mean a win in n+1 ply. This
-// cannot happen for tables with positions exactly on the "edge" of
-// the 50-move rule.
-//
-// This means that if dtz > 0 is returned, the position is certainly
-// a win if dtz + 50-move-counter <= 99. Care must be taken that the engine
-// picks moves that preserve dtz + 50-move-counter <= 99.
-//
-// If n = 100 immediately after a capture or pawn move, then the position
-// is also certainly a win, and during the whole phase until the next
-// capture or pawn move, the inequality to be preserved is
-// dtz + 50-movecounter <= 100.
-//
-// In short, if a move is available resulting in dtz + 50-move-counter <= 99,
-// then do not accept moves leading to dtz + 50-move-counter == 100.
-//
+ 
 int probe_dtz(Pos *pos, int *success)
 {
   int wdl = probe_wdl(pos, success);
   if (*success == 0) return 0;
 
-  // If draw, then dtz = 0.
+   
   if (wdl == 0) return 0;
 
-  // Check for winning capture or en passant capture as only best move.
+   
   if (*success == 2)
     return WdlToDtz[wdl + 2];
 
@@ -2220,11 +2104,10 @@ int probe_dtz(Pos *pos, int *success)
   TbMove *m = moves, *end = NULL;
   Pos pos1;
 
-  // If winning, check for a winning pawn move.
+   
   if (wdl > 0) {
-    // Generate at least all legal non-capturing pawn moves
-    // including non-capturing promotions.
-    // (The following call in fact generates all moves.)
+     
+     
     end = gen_legal(pos, moves);
 
     for (m = moves; m < end; m++) {
@@ -2232,7 +2115,7 @@ int probe_dtz(Pos *pos, int *success)
       if (type_of_piece_moved(pos,move) != PAWN || is_capture(pos, move))
          continue;
       if (!do_move(&pos1, pos, move))
-         continue; // not legal
+         continue;  
       int v = -probe_wdl(&pos1, success);
       if (*success == 0) return 0;
       if (v == wdl) {
@@ -2242,42 +2125,36 @@ int probe_dtz(Pos *pos, int *success)
     }
   }
 
-  // If we are here, we know that the best move is not an ep capture.
-  // In other words, the value of wdl corresponds to the WDL value of
-  // the position without ep rights. It is therefore safe to probe the
-  // DTZ table with the current value of wdl.
-
+   
   int dtz = probe_dtz_table(pos, wdl, success);
   if (*success >= 0)
     return WdlToDtz[wdl + 2] + ((wdl > 0) ? dtz : -dtz);
 
-  // *success < 0 means we need to probe DTZ for the other side to move.
+   
   int best;
   if (wdl > 0) {
     best = INT32_MAX;
   } else {
-    // If (cursed) loss, the worst case is a losing capture or pawn move
-    // as the "best" move, leading to dtz of -1 or -101.
-    // In case of mate, this will cause -1 to be returned.
+     
+     
     best = WdlToDtz[wdl + 2];
-    // If wdl < 0, we still have to generate all moves.
+     
     end = gen_moves(pos, m);
   }
   assert(end != NULL);
 
   for (m = moves; m < end; m++) {
     TbMove move = *m;
-    // We can skip pawn moves and captures.
-    // If wdl > 0, we already caught them. If wdl < 0, the initial value
-    // of best already takes account of them.
+     
+     
     if (is_capture(pos, move) || type_of_piece_moved(pos, move) == PAWN)
       continue;
     if (!do_move(&pos1, pos, move)) {
-      // move was not legal
+       
       continue;
     }
     int v = -probe_dtz(&pos1, success);
-    // Check for the case of mate in 1
+     
     if (v == 1 && is_mate(&pos1))
       best = 1;
     else if (wdl > 0) {
@@ -2292,20 +2169,18 @@ int probe_dtz(Pos *pos, int *success)
   return best;
 }
 
-// Use the DTZ tables to rank and score all root moves in the list.
-// A return value of 0 means that not all probes were successful.
+ 
 static int root_probe_dtz(const Pos *pos, bool hasRepeated, bool useRule50, struct TbRootMoves *rm)
 {
   int v, success;
 
-  // Obtain 50-move counter for the root position.
+   
   int cnt50 = pos->rule50;
 
-  // The border between draw and win lies at rank 1 or rank 900, depending
-  // on whether the 50-move rule is used.
+   
   int bound = useRule50 ? 900 : 1;
 
-  // Probe, rank and score each move.
+   
   TbMove rootMoves[TB_MAX_MOVES];
   TbMove * end = gen_legal(pos,rootMoves);
   rm->size = (unsigned)(end-rootMoves);
@@ -2315,38 +2190,32 @@ static int root_probe_dtz(const Pos *pos, bool hasRepeated, bool useRule50, stru
     m->move = rootMoves[i];
     do_move(&pos1, pos, m->move);
 
-    // Calculate dtz for the current move counting from the root position.
+     
     if (pos1.rule50 == 0) {
-      // If the move resets the 50-move counter, dtz is -101/-1/0/1/101.
+       
       v = -probe_wdl(&pos1, &success);
       assert(v < 3);
       v = WdlToDtz[v + 2];
     } else {
-      // Otherwise, take dtz for the new position and correct by 1 ply.
+       
       v = -probe_dtz(&pos1, &success);
       if (v > 0) v++;
       else if (v < 0) v--;
     }
-    // Make sure that a mating move gets value 1.
+     
     if (v == 2 && is_mate(&pos1)) {
       v = 1;
     }
 
     if (!success) return 0;
 
-    // Better moves are ranked higher. Guaranteed wins are ranked equally.
-    // Losing moves are ranked equally unless a 50-move draw is in sight.
-    // Note that moves ranked 900 have dtz + cnt50 == 100, which in rare
-    // cases may be insufficient to win as dtz may be one off (see the
-    // comments before TB_probe_dtz()).
+     
     int r =  v > 0 ? (v + cnt50 <= 99 && !hasRepeated ? 1000 : 1000 - (v + cnt50))
            : v < 0 ? (-v * 2 + cnt50 < 100 ? -1000 : -1000 + (-v + cnt50))
            : 0;
     m->tbRank = r;
 
-    // Determine the score to be displayed for this move. Assign at least
-    // 1 cp to cursed wins and let it grow to 49 cp as the position gets
-    // closer to a real win.
+     
     m->tbScore =  r >= bound ? TB_VALUE_MATE - TB_MAX_MATE_PLY - 1
                 : r >  0     ? max( 3, r - 800) * TB_VALUE_PAWN / 200
                 : r == 0     ? TB_VALUE_DRAW
@@ -2356,9 +2225,7 @@ static int root_probe_dtz(const Pos *pos, bool hasRepeated, bool useRule50, stru
   return 1;
 }
 
-// Use the WDL tables to rank all root moves in the list.
-// This is a fallback for the case that some or all DTZ tables are missing.
-// A return value of 0 means that not all probes were successful.
+ 
 int root_probe_wdl(const Pos *pos, bool useRule50, struct TbRootMoves *rm)
 {
   static int WdlToRank[] = { -1000, -899, 0, 899, 1000 };
@@ -2372,7 +2239,7 @@ int root_probe_wdl(const Pos *pos, bool useRule50, struct TbRootMoves *rm)
 
   int v, success;
 
-  // Probe, rank and score each move.
+   
   TbMove moves[TB_MAX_MOVES];
   TbMove *end = gen_legal(pos,moves);
   rm->size = (unsigned)(end-moves);
@@ -2392,9 +2259,7 @@ int root_probe_wdl(const Pos *pos, bool useRule50, struct TbRootMoves *rm)
   return 1;
 }
 
-// Use the DTM tables to find mate scores.
-// Either DTZ or WDL must have been probed successfully earlier.
-// A return value of 0 means that not all probes were successful.
+ 
 #if defined(__cplusplus) && __cplusplus >= 201703L
 [[maybe_unused]]
 #endif
@@ -2403,19 +2268,19 @@ int root_probe_dtm(const Pos *pos, struct TbRootMoves *rm)
   int success;
   Value tmpScore[TB_MAX_MOVES];
 
-  // Probe each move.
+   
   for (unsigned i = 0; i < rm->size; i++) {
     Pos pos1;
     struct TbRootMove *m = &rm->moves[i];
 
-    // Use tbScore to find out if the position is won or lost.
+     
     int wdl =  m->tbScore >  TB_VALUE_PAWN ?  2
              : m->tbScore < -TB_VALUE_PAWN ? -2 : 0;
 
     if (wdl == 0)
       tmpScore[i] = 0;
     else {
-      // Probe and adjust mate score by 1 ply.
+       
       do_move(&pos1, pos, m->pv[0]);
       Value v = -TB_probe_dtm(&pos1, -wdl, &success);
       tmpScore[i] = wdl > 0 ? v - 1 : v + 1;
@@ -2424,23 +2289,20 @@ int root_probe_dtm(const Pos *pos, struct TbRootMoves *rm)
     }
   }
 
-  // All probes were successful. Now adjust TB scores and ranks.
+   
   for (unsigned i = 0; i < rm->size; i++) {
     struct TbRootMove *m = &rm->moves[i];
 
     m->tbScore = tmpScore[i];
 
-    // Let rank correspond to mate score, except for critical moves
-    // ranked 900, which we rank below all other mates for safety.
-    // By ranking mates above 1000 or below -1000, we let the search
-    // know it need not search those moves.
+     
     m->tbRank = m->tbRank == 900 ? 1001 : m->tbScore;
   }
 
   return 1;
 }
 
-// Use the DTM tables to complete a PV with mate score.
+ 
 #if defined(__cplusplus) && __cplusplus >= 201703L
 [[maybe_unused]]
 #endif
@@ -2454,7 +2316,7 @@ void tb_expand_mate(Pos *pos, struct TbRootMove *move, Value moveScore, unsigned
     return;
 
   Pos root = *pos;
-  // First get to the end of the incomplete PV.
+   
   for (unsigned i = 0; i < move->pvSize; i++) {
     v = v > 0 ? -v - 1 : -v + 1;
     wdl = -wdl;
@@ -2462,7 +2324,7 @@ void tb_expand_mate(Pos *pos, struct TbRootMove *move, Value moveScore, unsigned
     do_move(pos, &pos0, move->pv[i]);
   }
 
-  // Now try to expand until the actual mate.
+   
   if (popcount(pos->white | pos->black) <= cardinalityDTM) {
     while (v != -TB_VALUE_MATE && move->pvSize < TB_MAX_PLY) {
       v = v > 0 ? -v - 1 : -v + 1;
@@ -2474,7 +2336,7 @@ void tb_expand_mate(Pos *pos, struct TbRootMove *move, Value moveScore, unsigned
         Pos pos1;
         do_move(&pos1, pos, *m);
         if (wdl < 0)
-          chk = probe_wdl(&pos1, &success); // verify that move wins
+          chk = probe_wdl(&pos1, &success);  
         w =  success && (wdl > 0 || chk < 0)
            ? TB_probe_dtm(&pos1, wdl, &success)
            : 0;
@@ -2487,7 +2349,7 @@ void tb_expand_mate(Pos *pos, struct TbRootMove *move, Value moveScore, unsigned
       do_move(pos, &pos0, *m);
     }
   }
-  // Get back to the root position.
+   
   *pos = root;
 }
 
@@ -2496,7 +2358,7 @@ static const int wdl_to_dtz[] =
     -1, -101, 0, 101, 1
 };
 
-// This supports the original Fathom root probe API
+ 
 static uint16_t probe_root(Pos *pos, int *score, unsigned *results)
 {
     int success;
@@ -2520,7 +2382,7 @@ static uint16_t probe_root(Pos *pos, int *score, unsigned *results)
             continue;
         }
         int v = 0;
-        //        print_move(pos,moves[i]);
+         
         if (dtz > 0 && is_mate(&pos1))
             v = 1;
         else
@@ -2560,8 +2422,8 @@ static uint16_t probe_root(Pos *pos, int *score, unsigned *results)
     if (score != NULL)
         *score = dtz;
 
-    // Now be a bit smart about filtering out moves.
-    if (dtz > 0)        // winning (or 50-move rule draw)
+     
+    if (dtz > 0)         
     {
         int best = BEST_NONE;
         uint16_t best_move = 0;
@@ -2578,7 +2440,7 @@ static uint16_t probe_root(Pos *pos, int *score, unsigned *results)
         }
         return (best == BEST_NONE? 0: best_move);
     }
-    else if (dtz < 0)   // losing (or 50-move rule draw)
+    else if (dtz < 0)    
     {
         int best = 0;
         uint16_t best_move = 0;
@@ -2595,14 +2457,13 @@ static uint16_t probe_root(Pos *pos, int *score, unsigned *results)
         }
         return (best == 0? MOVE_CHECKMATE: best_move);
     }
-    else                // drawing
+    else                 
     {
-        // Check for stalemate:
+         
         if (num_draw == 0)
             return MOVE_STALEMATE;
 
-        // Select a "random" move that preserves the draw.
-        // Uses calc_key as the PRNG.
+         
         size_t count = calc_key(pos, !pos->turn) % num_draw;
         for (unsigned i = 0; i < len; i++)
         {
@@ -2667,4 +2528,4 @@ uint64_t tb_pawn_attacks(unsigned sq, bool color)
     return pawn_attacks(sq, color);
 }
 
-#endif      /* TB_NO_HELPER_API */
+#endif       

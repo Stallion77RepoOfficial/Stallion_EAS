@@ -7,7 +7,7 @@ constexpr uint8_t Captures = 2;
 constexpr uint8_t GenQuiets = 3;
 constexpr uint8_t Quiets = 4;
 constexpr uint8_t BadCaptures = 5;
-}; // namespace Stages
+};  
 
 struct MovePicker {
   int see_threshold;
@@ -100,14 +100,7 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
     int ply4last = MoveNone;
     int ply4piece = Pieces::Blank;
 
-    // Defensive: ensure the history pointer is valid and that we have enough
-    // plies recorded before dereferencing previous entries. If history is
-    // missing or misaligned, skip these heuristics rather than crashing.
-    // Use index-based, bounds-checked access into the global game_hist to
-    // avoid creating invalid pointers via arithmetic on picker.ss. Pointer
-    // subtraction can produce a non-null but invalid pointer if the base was
-    // misaligned; indexing into thread_info.game_hist with explicit bounds is
-    // safer.
+     
     if (thread_info.game_ply >= 1) {
       int idx = thread_info.game_ply - 1;
       if (idx >= 0 && idx < GameSize) {
@@ -140,7 +133,7 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
       if (!is_valid_square(from) || !is_valid_square(to)) continue;
 
       if (move == thread_info.KillerMoves[thread_info.search_ply]) {
-        // Killer move score
+         
         picker.quiets.scores[i] = KillerMoveScore;
       }
 

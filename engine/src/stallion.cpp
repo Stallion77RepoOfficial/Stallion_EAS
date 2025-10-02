@@ -1,4 +1,4 @@
-// Summary: Simplified CLI argument handling and factored mode dispatch for clarity.
+ 
 #include "search.h"
 #include "uci.h"
 #include <iostream>
@@ -57,22 +57,17 @@ std::optional<int> handle_cli_mode(const std::vector<std::string_view>& args,
         }
     }
 
-    if (mode == "debug") {
-    safe_printf("[DEBUG MODE] Not implemented yet.\n");
-        return 0;
-    }
-
     return std::nullopt;
 }
 
-}  // namespace
+}   
 
 int main(int argc, char* argv[]) {
     Position position;
     auto thread_info = std::make_unique<ThreadInfo>();
     init_LMR();
     init_bbs();
-    // Ensure transposition table matches UCI default Hash=256 on startup
+     
     resize_TT(256);
 
     const auto args = collect_args(argc, argv);

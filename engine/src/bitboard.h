@@ -8,11 +8,11 @@
 #include <atomic>
 #include <thread>
 
-// Forward declaration so ensure_bbs_initialized can call init_bbs()
+ 
 void init_bbs();
 
-enum Square : int { // a1 = 0. a8 = 7, etc. thus a1 is the LSB and h8 is the
-                    // MSB.
+enum Square : int {  
+                     
   a1,
   b1,
   c1,
@@ -105,31 +105,25 @@ MultiArray<uint64_t, 2, 64> PawnAttacks;
 std::array<uint64_t, 64> KingAttacks;
 std::array<uint64_t, 64> KnightAttacks;
 
-// Initialization guards for attack tables. Some crash logs showed
-// use-before-init or races where attack helper arrays were accessed
-// before `init_bbs()` completed. We add a lightweight, reentrancy-safe
-// guard: the first thread to call ensure_bbs_initialized() will run
-// init_bbs(); concurrent threads will wait until initialization
-// completes. If init_bbs() itself calls attack helpers, the thread-
-// local flag prevents deadlock/recursion.
+ 
 static std::atomic<bool> BBS_INITIALIZED{false};
 static std::atomic<bool> BBS_INITIALIZING{false};
 static thread_local bool BBS_INIT_IN_THIS_THREAD = false;
 
 inline void ensure_bbs_initialized() {
   if (BBS_INITIALIZED.load(std::memory_order_acquire)) return;
-  if (BBS_INIT_IN_THIS_THREAD) return; // allow reentrant calls from init_bbs()
+  if (BBS_INIT_IN_THIS_THREAD) return;  
 
   bool expected = false;
   if (BBS_INITIALIZING.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-    // we are the initializer
+     
     BBS_INIT_IN_THIS_THREAD = true;
     init_bbs();
     BBS_INITIALIZED.store(true, std::memory_order_release);
     BBS_INIT_IN_THIS_THREAD = false;
     BBS_INITIALIZING.store(false, std::memory_order_release);
   } else {
-    // another thread is initializing; wait for completion
+     
     while (!BBS_INITIALIZED.load(std::memory_order_acquire)) std::this_thread::yield();
   }
 }
@@ -460,8 +454,8 @@ void generate_bb(std::string fen, Position &pos) {
     if (c == ' ') {
       break;
     } else if (c == '/') {
-      sq -= 8; // drop rank
-      sq -= 8; // reset at file a
+      sq -= 8;  
+      sq -= 8;  
     } else if (isdigit(c)) {
       sq += Directions::East * (c - '0');
     } else {

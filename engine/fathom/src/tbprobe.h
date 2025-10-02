@@ -1,25 +1,4 @@
-/*
- * tbprobe.h
- * (C) 2015 basil, all rights reserved,
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+ 
 
 #ifndef TBPROBE_H
 #define TBPROBE_H
@@ -54,9 +33,7 @@ typedef uint8_t bool;
 #endif
 #endif
 
-/*
- * Internal definitions.  Do not call these functions directly.
- */
+ 
 extern bool tb_init_impl(const char *_path);
 extern unsigned tb_probe_wdl_impl(
     uint64_t _white,
@@ -83,23 +60,20 @@ extern unsigned tb_probe_root_impl(
     bool     _turn,
     unsigned *_results);
 
-/****************************************************************************/
-/* MAIN API                                                                 */
-/****************************************************************************/
-
+ 
 #define TB_MAX_MOVES                (192+1)
 #define TB_MAX_CAPTURES             64
 #define TB_MAX_PLY                  256
-#define TB_CASTLING_K               0x1     /* White king-side. */
-#define TB_CASTLING_Q               0x2     /* White queen-side. */
-#define TB_CASTLING_k               0x4     /* Black king-side. */
-#define TB_CASTLING_q               0x8     /* Black queen-side. */
+#define TB_CASTLING_K               0x1      
+#define TB_CASTLING_Q               0x2      
+#define TB_CASTLING_k               0x4      
+#define TB_CASTLING_q               0x8      
 
-#define TB_LOSS                     0       /* LOSS */
-#define TB_BLESSED_LOSS             1       /* LOSS but 50-move draw */
-#define TB_DRAW                     2       /* DRAW */
-#define TB_CURSED_WIN               3       /* WIN but 50-move draw  */
-#define TB_WIN                      4       /* WIN  */
+#define TB_LOSS                     0        
+#define TB_BLESSED_LOSS             1        
+#define TB_DRAW                     2        
+#define TB_CURSED_WIN               3        
+#define TB_WIN                      4        
 
 #define TB_PROMOTES_NONE            0
 #define TB_PROMOTES_QUEEN           1
@@ -156,54 +130,16 @@ extern unsigned tb_probe_root_impl(
 #define TB_RESULT_STALEMATE         TB_SET_WDL(0, TB_DRAW)
 #define TB_RESULT_FAILED            0xFFFFFFFF
 
-/*
- * The tablebase can be probed for any position where #pieces <= TB_LARGEST.
- */
+ 
 extern unsigned TB_LARGEST;
 
-/*
- * Initialize the tablebase.
- *
- * PARAMETERS:
- * - path:
- *   The tablebase PATH string.
- *
- * RETURN:
- * - true=succes, false=failed.  The TB_LARGEST global will also be
- *   initialized.  If no tablebase files are found, then `true' is returned
- *   and TB_LARGEST is set to zero.
- */
+ 
 bool tb_init(const char *_path);
 
-/*
- * Free any resources allocated by tb_init
- */
+ 
 void tb_free(void);
 
-/*
- * Probe the Win-Draw-Loss (WDL) table.
- *
- * PARAMETERS:
- * - white, black, kings, queens, rooks, bishops, knights, pawns:
- *   The current position (bitboards).
- * - rule50:
- *   The 50-move half-move clock.
- * - castling:
- *   Castling rights.  Set to zero if no castling is possible.
- * - ep:
- *   The en passant square (if exists).  Set to zero if there is no en passant
- *   square.
- * - turn:
- *   true=white, false=black
- *
- * RETURN:
- * - One of {TB_LOSS, TB_BLESSED_LOSS, TB_DRAW, TB_CURSED_WIN, TB_WIN}.
- *   Otherwise returns TB_RESULT_FAILED if the probe failed.
- *
- * NOTES:
- * - Engines should use this function during search.
- * - This function is thread safe assuming TB_NO_THREADS is disabled.
- */
+ 
 static inline unsigned tb_probe_wdl(
     uint64_t _white,
     uint64_t _black,
@@ -226,51 +162,7 @@ static inline unsigned tb_probe_wdl(
         _bishops, _knights, _pawns, _ep, _turn);
 }
 
-/*
- * Probe the Distance-To-Zero (DTZ) table.
- *
- * PARAMETERS:
- * - white, black, kings, queens, rooks, bishops, knights, pawns:
- *   The current position (bitboards).
- * - rule50:
- *   The 50-move half-move clock.
- * - castling:
- *   Castling rights.  Set to zero if no castling is possible.
- * - ep:
- *   The en passant square (if exists).  Set to zero if there is no en passant
- *   square.
- * - turn:
- *   true=white, false=black
- * - results (OPTIONAL):
- *   Alternative results, one for each possible legal move.  The passed array
- *   must be TB_MAX_MOVES in size.
- *   If alternative results are not desired then set results=NULL.
- *
- * RETURN:
- * - A TB_RESULT value comprising:
- *   1) The WDL value (TB_GET_WDL)
- *   2) The suggested move (TB_GET_FROM, TB_GET_TO, TB_GET_PROMOTES, TB_GET_EP)
- *   3) The DTZ value (TB_GET_DTZ)
- *   The suggested move is guaranteed to preserved the WDL value.
- *
- *   Otherwise:
- *   1) TB_RESULT_STALEMATE is returned if the position is in stalemate.
- *   2) TB_RESULT_CHECKMATE is returned if the position is in checkmate.
- *   3) TB_RESULT_FAILED is returned if the probe failed.
- *
- *   If results!=NULL, then a TB_RESULT for each legal move will be generated
- *   and stored in the results array.  The results array will be terminated
- *   by TB_RESULT_FAILED.
- *
- * NOTES:
- * - Engines can use this function to probe at the root.  This function should
- *   not be used during search.
- * - DTZ tablebases can suggest unnatural moves, especially for losing
- *   positions.  Engines may prefer to traditional search combined with WDL
- *   move filtering using the alternative results array.
- * - This function is NOT thread safe.  For engines this function should only
- *   be called once at the root per search.
- */
+ 
 static inline unsigned tb_probe_root(
     uint64_t _white,
     uint64_t _black,
@@ -313,17 +205,7 @@ struct TbRootMoves {
   struct TbRootMove moves[TB_MAX_MOVES];
 };
 
-/*
- * Use the DTZ tables to rank and score all root moves.
- * INPUT: as for tb_probe_root
- * OUTPUT: TbRootMoves structure is filled in. This contains
- * an array of TbRootMove structures.
- * Each structure instance contains a rank, a score, and a
- * predicted principal variation.
- * RETURN VALUE:
- *   non-zero if ok, 0 means not all probes were successful
- *
- */
+ 
 int tb_probe_root_dtz(
     uint64_t _white,
     uint64_t _black,
@@ -341,18 +223,7 @@ int tb_probe_root_dtz(
     bool useRule50,
     struct TbRootMoves *_results);
 
-/*
-// Use the WDL tables to rank and score all root moves.
-// This is a fallback for the case that some or all DTZ tables are missing.
- * INPUT: as for tb_probe_root
- * OUTPUT: TbRootMoves structure is filled in. This contains
- * an array of TbRootMove structures.
- * Each structure instance contains a rank, a score, and a
- * predicted principal variation.
- * RETURN VALUE:
- *   non-zero if ok, 0 means not all probes were successful
- *
- */
+ 
 int tb_probe_root_wdl(uint64_t _white,
     uint64_t _black,
     uint64_t _kings,
@@ -368,16 +239,7 @@ int tb_probe_root_wdl(uint64_t _white,
     bool useRule50,
     struct TbRootMoves *_results);
 
-/****************************************************************************/
-/* HELPER API                                                               */
-/****************************************************************************/
-
-/*
- * The HELPER API provides some useful additional functions.  It is optional
- * and can be disabled by defining TB_NO_HELPER_API.  Engines should disable
- * the HELPER API.
- */
-
+ 
 #ifndef TB_NO_HELPER_API
 
 extern unsigned tb_pop_count(uint64_t _bb);

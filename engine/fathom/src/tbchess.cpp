@@ -1,25 +1,4 @@
-/*
-Copyright (c) 2015 basil00
-Modifications Copyright (c) 2016-2020 by Jon Dart
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-*/
+ 
 
 #include "tbprobe.h"
 #include <stdint.h>
@@ -27,7 +6,7 @@ SOFTWARE.
 #include <assert.h>
 #include <cstddef>
 
-// Provide popcount, lsb, poplsb macros for tbchess
+ 
 #ifndef popcount
 #define popcount(x) __builtin_popcountll(x)
 #endif
@@ -83,7 +62,7 @@ SOFTWARE.
 #define BEST_NONE               0xFFFF
 #define SCORE_ILLEGAL           0x7FFF
 
-// Note: WHITE, BLACK values are reverse of Stockfish
+ 
 #ifdef __cplusplus
 namespace {
 enum Color { BLACK, WHITE };
@@ -148,7 +127,7 @@ static inline uint64_t pieces_by_type(const Pos *pos, Color c, PieceType p) {
 
 static const char piece_to_char[] = " PNBRQK  pnbrqk";
   
-// map upper-case characters to piece types
+ 
 static PieceType char_to_piece_type(char c) {
     for (int i = PAWN; i <= KING; i++)
        if (c == piece_to_char[i]) {
@@ -164,8 +143,8 @@ static PieceType char_to_piece_type(char c) {
 
 #ifdef TB_KING_ATTACKS
 #define king_attacks(s)         TB_KING_ATTACKS(s)
-#define king_attacks_init()     /* NOP */
-#else       /* TB_KING_ATTACKS */
+#define king_attacks_init()      
+#else        
 
 static uint64_t king_attacks_table[64];
 
@@ -198,12 +177,12 @@ static void king_attacks_init(void)
     }
 }
 
-#endif      /* TB_KING_ATTACKS */
+#endif       
 
 #ifdef TB_KNIGHT_ATTACKS
 #define knight_attacks(s)       TB_KNIGHT_ATTACKS(s)
-#define knight_attacks_init()   /* NOP */
-#else       /* TB_KNIGHT_ATTACKS */
+#define knight_attacks_init()    
+#else        
 
 static uint64_t knight_attacks_table[64];
 
@@ -244,12 +223,12 @@ static void knight_attacks_init(void)
     }
 }
 
-#endif      /* TB_KNIGHT_ATTACKS */
+#endif       
 
 #ifdef TB_BISHOP_ATTACKS
 #define bishop_attacks(s, occ)  TB_BISHOP_ATTACKS(s, occ)
-#define bishop_attacks_init()   /* NOP */
-#else       /* TB_BISHOP_ATTACKS */
+#define bishop_attacks_init()    
+#else        
 
 static uint64_t diag_attacks_table[64][64];
 static uint64_t anti_attacks_table[64][64];
@@ -402,12 +381,12 @@ static void bishop_attacks_init(void)
     }
 }
 
-#endif      /* TB_BISHOP_ATTACKS */
+#endif       
 
 #ifdef TB_ROOK_ATTACKS
 #define rook_attacks(s, occ)    TB_ROOK_ATTACKS(s, occ)
-#define rook_attacks_init()     /* NOP */
-#else       /* TB_ROOK_ATTACKS */
+#define rook_attacks_init()      
+#else        
 
 static uint64_t rank_attacks_table[64][64];
 static uint64_t file_attacks_table[64][64];
@@ -518,19 +497,19 @@ static void rook_attacks_init(void)
     }
 }
 
-#endif      /* TB_ROOK_ATTACKS */
+#endif       
 
 #ifdef TB_QUEEN_ATTACKS
 #define queen_attacks(s, occ)   TB_QUEEN_ATTACKS(s, occ)
-#else       /* TB_QUEEN_ATTACKS */
+#else        
 #define queen_attacks(s, occ)   \
     (rook_attacks((s), (occ)) | bishop_attacks((s), (occ)))
-#endif      /* TB_QUEEN_ATTACKS */
+#endif       
 
 #ifdef TB_PAWN_ATTACKS
 #define pawn_attacks(s, c)      TB_PAWN_ATTACKS(s, c)
-#define pawn_attacks_init()     /* NOP */
-#else       /* TB_PAWN_ATTACKS */
+#define pawn_attacks_init()      
+#else        
 
 static uint64_t pawn_attacks_table[2][64];
 
@@ -565,11 +544,9 @@ static void pawn_attacks_init(void)
     }
 }
 
-#endif      /* TB_PAWN_ATTACKS */
+#endif       
 
-/*
- * Given a position, produce a 64-bit material signature key.
- */
+ 
 static uint64_t calc_key(const Pos *pos, bool mirror)
 {
     uint64_t white = pos->white, black = pos->black;
@@ -591,10 +568,7 @@ static uint64_t calc_key(const Pos *pos, bool mirror)
            popcount(black & pos->pawns)   * PRIME_BLACK_PAWN;
 }
 
-// Produce a 64-bit material key corresponding to the material combination
-// defined by pcs[16], where pcs[1], ..., pcs[6] are the number of white
-// pawns, ..., kings and pcs[9], ..., pcs[14] are the number of black
-// pawns, ..., kings.
+ 
 static uint64_t calc_key_from_pcs(int *pcs, int mirror)
 {
     mirror = (mirror? 8: 0);
@@ -610,9 +584,7 @@ static uint64_t calc_key_from_pcs(int *pcs, int mirror)
            pcs[BLACK_PAWN ^ mirror] * PRIME_BLACK_PAWN;
 }
 
-// Produce a 64-bit material key corresponding to the material combination
-// piece[0], ..., piece[num - 1], where each value corresponds to a piece
-// (1-6 for white pawn-king, 9-14 for black pawn-king).
+ 
 static uint64_t calc_key_from_pieces(uint8_t *piece, int num)
 {
     uint64_t key = 0;
@@ -666,9 +638,7 @@ static TbMove *add_move(TbMove *moves, bool promotes, unsigned from,
     return moves;
 }
 
-/*
- * Generate all captures, including all underpomotions
- */
+ 
 static TbMove *gen_captures(const Pos *pos, TbMove *moves)
 {
     uint64_t occ = pos->white | pos->black;
@@ -739,9 +709,7 @@ static TbMove *gen_captures(const Pos *pos, TbMove *moves)
     return moves;
 }
 
-/*
- * Generate all moves.
- */
+ 
 static TbMove *gen_moves(const Pos *pos, TbMove *moves)
 {
     uint64_t occ = pos->white | pos->black;
@@ -822,9 +790,7 @@ static TbMove *gen_moves(const Pos *pos, TbMove *moves)
     return moves;
 }
 
-/*
- * Test if the given move is an en passant capture.
- */
+ 
 static bool is_en_passant(const Pos *pos, TbMove move)
 {
     uint16_t from = move_from(move);
@@ -840,9 +806,6 @@ static bool is_en_passant(const Pos *pos, TbMove move)
 }
 
 
-/*
- * Test if the given move is a capture.
- */
 static bool is_capture(const Pos *pos, TbMove move)
 {
    uint16_t to   = move_to(move);
@@ -851,10 +814,6 @@ static bool is_capture(const Pos *pos, TbMove move)
 }
 
 
-/*
- * Test if the given position is legal.
- * (Pawns on backrank? Can the king be captured?)
- */
 static bool is_legal(const Pos *pos)
 {
     uint64_t occ = pos->white | pos->black;
@@ -881,9 +840,7 @@ static bool is_legal(const Pos *pos)
     return true;
 }
 
-/*
- * Test if the king is in check.
- */
+ 
 static bool is_check(const Pos *pos)
 {
     uint64_t occ = pos->white | pos->black;
@@ -907,9 +864,7 @@ static bool is_check(const Pos *pos)
     return false;
 }
 
-/*
- * Test if the position is valid.
- */
+ 
 static bool is_valid(const Pos *pos)
 {
     if (popcount(pos->kings) != 2)
@@ -980,7 +935,7 @@ static bool do_move(Pos *pos, const Pos *pos0, TbMove move)
     pos->ep = 0;
     if (promotes != TB_PROMOTES_NONE) 
     {  
-        pos->pawns &= ~board(to);       // Promotion
+        pos->pawns &= ~board(to);        
         switch (promotes)
         { 
             case TB_PROMOTES_QUEEN:
@@ -996,7 +951,7 @@ static bool do_move(Pos *pos, const Pos *pos0, TbMove move)
     }
     else if ((board(from) & pos0->pawns) != 0)
     {
-        pos->rule50 = 0;                // Pawn move
+        pos->rule50 = 0;                 
         if (rank(from) == 1 && rank(to) == 3 &&
             (pawn_attacks(from+8, true) & pos0->pawns & pos0->black) != 0)
             pos->ep = from+8;
@@ -1013,9 +968,9 @@ static bool do_move(Pos *pos, const Pos *pos0, TbMove move)
         }
     }
     else if ((board(to) & (pos0->white | pos0->black)) != 0)
-        pos->rule50 = 0;                // Capture
+        pos->rule50 = 0;                 
     else
-        pos->rule50 = pos0->rule50 + 1; // Normal move
+        pos->rule50 = pos0->rule50 + 1;  
     if (!is_legal(pos))
         return false;
     return true;
@@ -1026,9 +981,7 @@ static bool legal_move(const Pos *pos, TbMove move) {
    return do_move(&pos1, pos, move);
 }
 
-/*
- * Test if the king is in checkmate.
- */
+ 
 static bool is_mate(const Pos *pos)
 {
     if (!is_check(pos))
@@ -1045,9 +998,7 @@ static bool is_mate(const Pos *pos)
     return true;
 }
 
-/*
- * Generate all legal moves.
- */
+ 
 static TbMove *gen_legal(const Pos *pos, TbMove *moves)
 {
   TbMove pl_moves[TB_MAX_MOVES];

@@ -9,7 +9,7 @@
 namespace Colors {
 constexpr uint8_t White = 0;
 constexpr uint8_t Black = 1;
-}; // namespace Colors
+};  
 namespace Pieces {
 constexpr uint8_t Blank = 0;
 constexpr uint8_t WPawn = 2;
@@ -24,7 +24,7 @@ constexpr uint8_t WQueen = 10;
 constexpr uint8_t BQueen = 11;
 constexpr uint8_t WKing = 12;
 constexpr uint8_t BKing = 13;
-}; // namespace Pieces
+};  
 
 namespace PieceTypes {
 constexpr uint8_t PieceNone = 0;
@@ -34,14 +34,14 @@ constexpr uint8_t Bishop = 3;
 constexpr uint8_t Rook = 4;
 constexpr uint8_t Queen = 5;
 constexpr uint8_t King = 6;
-} // namespace PieceTypes
+}  
 
 namespace MoveTypes {
 constexpr int8_t Normal = 0;
 constexpr int8_t EnPassant = 1;
 constexpr int8_t Castling = 2;
 constexpr int8_t Promotion = 3;
-} // namespace MoveTypes
+}  
 
 namespace Directions {
 constexpr int8_t North = 8;
@@ -52,25 +52,25 @@ constexpr int8_t Northeast = 9;
 constexpr int8_t Southeast = -7;
 constexpr int8_t Northwest = 7;
 constexpr int8_t Southwest = -9;
-} // namespace Directions
+}  
 namespace Sides {
 constexpr int8_t Kingside = 1;
 constexpr int8_t Queenside = 0;
-} // namespace Sides
+}  
 
 namespace EntryTypes {
 constexpr uint8_t None = 0;
 constexpr uint8_t UBound = 1;
 constexpr uint8_t LBound = 2;
 constexpr uint8_t Exact = 3;
-} // namespace EntryTypes
+}  
 
 namespace Promos {
 constexpr uint8_t Knight = 0;
 constexpr uint8_t Bishop = 1;
 constexpr uint8_t Rook = 2;
 constexpr uint8_t Queen = 3;
-} // namespace Promos
+}  
 
 namespace PhaseTypes {
 constexpr uint8_t Opening = 0;
@@ -78,7 +78,7 @@ constexpr uint8_t MiddleGame = 1;
 constexpr uint8_t LateMiddleGame = 2;
 constexpr uint8_t Endgame = 3;
 constexpr uint8_t Sacrifice = 4;
-} // namespace NetTypes
+}  
 
 constexpr int get_piece_type(int x) { return x / 2; }
 
@@ -98,17 +98,14 @@ constexpr int16_t GameSize = 2000;
 constexpr int32_t Mate = -32000;
 constexpr int32_t MateScore = 32000;
 constexpr int32_t ScoreNone = -32001;
-// Syzygy mapped WDL scores (kept far from mate encoding band but dominating eval noise)
+ 
 constexpr int32_t TB_WIN_SCORE          = 20000;
 constexpr int32_t TB_CURSED_WIN_SCORE   = 18000;
 constexpr int32_t TB_DRAW_SCORE         = 0;
 constexpr int32_t TB_BLESSED_LOSS_SCORE = -18000;
 constexpr int32_t TB_LOSS_SCORE         = -20000;
 typedef uint16_t Move;
-/*The format of a move structure is:      from     to      promo
-                                         (<< 10)  (<< 2)
-                                        xxxxxxxx xxxxxxxx  xx
-                                        */
+ 
 
 constexpr Move MoveNone = 0;
 constexpr int SquareNone = 255;
@@ -120,45 +117,44 @@ struct MoveInfo {
 };
 
 struct Position {
-  uint64_t zobrist_key; // hash key
+  uint64_t zobrist_key;  
   uint64_t pawn_key;
   std::array<uint64_t, 2> non_pawn_key;
-  std::array<uint8_t, 64> board; // Stores the board itself
+  std::array<uint8_t, 64> board;  
   std::array<uint64_t, 2> colors_bb;
   std::array<uint64_t, 7> pieces_bb;
-  std::array<uint8_t, 10> material_count;     // Stores material
-  MultiArray<uint8_t, 2, 2> castling_squares; // castling rights
-  uint8_t ep_square;                          // stores ep square
-  bool color;                                 // whose side to move
+  std::array<uint8_t, 10> material_count;      
+  MultiArray<uint8_t, 2, 2> castling_squares;  
+  uint8_t ep_square;                           
+  bool color;                                  
   uint8_t halfmoves;
 };
 
 constexpr int MaxSearchDepth = 256;
 
-struct GameHistory { // keeps the state of the board at a particular point in
-                     // the game
-  uint64_t position_key = 0; // Hash key of the position at the time
-  Move played_move = MoveNone;      // The move that was played
-  uint8_t piece_moved = Pieces::Blank; // The piece that was moved (will be useful for histories
-                       // later)
-  // int16_t sacrifice_scale;
+struct GameHistory {  
+                      
+  uint64_t position_key = 0;  
+  Move played_move = MoveNone;       
+  uint8_t piece_moved = Pieces::Blank;  
+                        
+   
   bool is_cap;
   int16_t m_diff;
   int32_t static_eval;
 };
 
-// TT stuff
-
+ 
 constexpr int BucketEntries = 3;
 constexpr int MaxAge = 1 << 6;
 
 struct TTEntry {
-  uint32_t position_key; // The lower 32 bits of the hash key are stored
+  uint32_t position_key;  
   int16_t static_eval;
-  int16_t score;     // Score of the position
-  Move best_move;    // Best move in the position
-  uint8_t depth;     // Depth that the entry was searched to
-  uint8_t age_bound; // Age (upper 6 bits) and bound (lower 2 bits)
+  int16_t score;      
+  Move best_move;     
+  uint8_t depth;      
+  uint8_t age_bound;  
 
   uint8_t get_type();
 
@@ -180,7 +176,7 @@ struct RootMoveInfo {
 };
 
 constexpr std::array<int, 7> SeeValues = {
-    0, 100, 450, 450, 650, 1250, 10000}; // SEE values for different pieces
+    0, 100, 450, 450, 650, 1250, 10000};  
 
 constexpr std::array<int, 7> MaterialValues = {0,   100, 300,  300,
                                                500, 900, 10000};
@@ -192,15 +188,12 @@ namespace Random {
   inline std::uniform_int_distribution<int> dist(0, INT32_MAX);
 }
 
-// Some simple util functions for various purposes
-
+ 
 uint8_t flip_sq(uint8_t sq) { return sq ^ 56; }
 uint8_t get_color(uint8_t piece) { return piece & 1; }
 inline bool is_valid_square(int sq) { return sq >= 0 && sq < 64; }
 
-// Forward declarations for safe printing helpers (implemented in utils.h).
-// Many headers include defs.h; expose these prototypes so they can call
-// safe_printf / safe_print_cerr without requiring utils.h include order.
+ 
 void safe_printf(const char *fmt, ...);
 void safe_print_cerr(const std::string &s);
 
@@ -225,12 +218,8 @@ constexpr int32_t ep_index = 773;
 constexpr int32_t castling_index = 774;
 
 constexpr std::array<uint64_t, 778> zobrist_keys = {
-    // Zobrist hash keys taken from Willow.
-    // Their usage:
-    // 64 * piece (0-11) + sq
-    // 772 - side to move
-    // 773 - en passant possible
-    // 774 - 777 - KQkq castling rights
+     
+     
     7266447313870364031ull,  4946485549665804864ull,  16945909448695747420ull,
     16394063075524226720ull, 4873882236456199058ull,  14877448043947020171ull,
     6740343660852211943ull,  13857871200353263164ull, 5249110015610582907ull,

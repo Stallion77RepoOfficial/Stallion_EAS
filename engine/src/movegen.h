@@ -4,13 +4,13 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
-// Removed <span> for wider C++17 compatibility
+ 
 
 namespace Generate {
 uint8_t GenQuiets = 0;
 uint8_t GenCaptures = 1;
 uint8_t GenAll = 2;
-} // namespace Generate
+}  
 
 constexpr int TTMoveScore = 10000000;
 constexpr int QueenPromoScore = 5000000;
@@ -94,14 +94,14 @@ void pawn_moves(const Position &position, uint64_t check_filter,
   uint64_t cap_right_promo = shift_pawns(our_promos & ~Files[7], right) &
                              position.colors_bb[color ^ 1] & check_filter;
 
-  // Safe push wrapper to avoid buffer overflows or null pointer writes
+   
   auto safe_push = [&](Move m) {
     if (move_list && key >= 0 && key < ListSize) move_list[key++] = m;
   };
 
   while (move_promo) {
     int to = pop_lsb(move_promo);
-    // Always generate all promotion types (knight, bishop, rook, queen)
+     
     for (int i = 0; i < 4; i++) {
       safe_push(pack_move_promo(to - (dir), to, i));
     }
@@ -188,8 +188,8 @@ int movegen(const Position &position, Move *move_list,
     if (checkers & (checkers - 1)) {
       return idx;
     }
-    // Single check: restrict quiet/capture generation (except king moves already added)
-    // Allow: moving into squares between king and checker (for sliders) or capturing the checker.
+     
+     
     int checker_sq = get_lsb(checkers);
     if (!is_valid_square(checker_sq)) {
 #ifndef NDEBUG
@@ -217,7 +217,7 @@ int movegen(const Position &position, Move *move_list,
     uint64_t to = KNIGHT_ATK_SAFE(from) & targets & check_filter;
     while (to) {
       if (move_list && idx < ListSize) move_list[idx++] = pack_move(from, pop_lsb(to), MoveTypes::Normal);
-      else pop_lsb(to); // consume bit to avoid infinite loop
+      else pop_lsb(to);  
     }
   }
 
@@ -247,15 +247,12 @@ int movegen(const Position &position, Move *move_list,
 
   if (checkers ||
       gen_type ==
-          Generate::GenCaptures) { // If we're in check there's no point in
-                                   // seeing if we can castle (can be optimized)
+          Generate::GenCaptures) {  
+                                    
     return idx;
   }
-  // Requirements: the king and rook cannot have moved, all squares between them
-  // must be empty, and the king can not go through check.
-  // (It can't end up in check either, but that gets filtered just like any
-  // illegal move.)
-
+   
+   
   for (int side : {Sides::Queenside, Sides::Kingside}) {
 
     if (position.castling_squares[color][side] == SquareNone ||
@@ -310,7 +307,7 @@ int movegen(const Position &position, Move *move_list,
   return idx;
 }
 
-// Not to be used in performance critical areas
+ 
 int legal_movegen(const Position &position, Move *move_list) {
   uint64_t checkers = attacks_square(
       position, get_king_pos(position, position.color), position.color ^ 1);
@@ -331,25 +328,25 @@ bool SEE(Position &position, Move move, int threshold) {
 
   int stm = position.color, from = extract_from(move), to = extract_to(move);
 
-  // Enhanced validation to prevent SEGV crashes
+   
   if (!is_valid_square(from) || !is_valid_square(to)) return false;
 
-  // Validate position integrity - check for corrupted board data
+   
   if (from >= 64 || to >= 64 || from < 0 || to < 0) return false;
 
-  // Check if pieces exist and are valid
+   
   if (position.board[from] == Pieces::Blank || position.board[to] == Pieces::Blank) {
     if (position.board[from] == Pieces::Blank) return false;
   }
 
-  // Validate piece colors match position
+   
   int from_piece = position.board[from];
   int from_color = get_color(from_piece);
   if (from_color != position.color) return false;
 
   int gain = SeeValues[get_piece_type(position.board[to])] - threshold;
   if (gain < 0) {
-    // If taking the piece isn't good enough return
+     
     return false;
   }
 
@@ -358,8 +355,7 @@ bool SEE(Position &position, Move move, int threshold) {
     return true;
   }
 
-  // Store bishops and rooks here to more quickly determine later new revealed
-  // attackers
+   
   uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
                      position.pieces_bb[PieceTypes::Queen];
   uint64_t rooks = position.pieces_bb[PieceTypes::Rook] |
@@ -369,7 +365,7 @@ bool SEE(Position &position, Move move, int threshold) {
       (position.colors_bb[Colors::White] | position.colors_bb[Colors::Black]) -
       (1ull << from);
 
-  // Additional safety check for attacks_square
+   
   if (!is_valid_square(to)) return false;
 
   uint64_t all_attackers = attacks_square(position, to, occ);
@@ -385,13 +381,13 @@ bool SEE(Position &position, Move move, int threshold) {
       return stm != position.color;
     }
 
-    // find cheapest attacker
+     
     int attackerType = PieceTypes::PieceNone;
 
     for (int pt = PieceTypes::Pawn; pt <= PieceTypes::King; pt++) {
       uint64_t match = stm_attackers & position.pieces_bb[pt];
       if (match) {
-        // Validate the attacker square
+         
         int attacker_sq = get_lsb(match);
         if (!is_valid_square(attacker_sq)) return false;
 
@@ -402,10 +398,10 @@ bool SEE(Position &position, Move move, int threshold) {
     }
 
     if (attackerType == PieceTypes::PieceNone) {
-      return false; // Corrupted position, no valid attacker found
+      return false;  
     }
 
-    // A new slider behind might be revealed
+     
     if (attackerType == PieceTypes::Pawn ||
         attackerType == PieceTypes::Bishop ||
         attackerType == PieceTypes::Queen) {
@@ -424,10 +420,10 @@ bool SEE(Position &position, Move move, int threshold) {
   return true;
 }
 
-// Forward declaration for make_move used in evaluate_promotion_tactics
+ 
 void make_move(Position &position, Move move);
 
-// Evaluate tactical benefits of under-promotion
+ 
 int evaluate_promotion_tactics(Position &position, Move move) {
   int from = extract_from(move);
   int to = extract_to(move);
@@ -439,16 +435,16 @@ int evaluate_promotion_tactics(Position &position, Move move) {
     return 0;
   }
   
-  // Make a temporary copy of the position to simulate the promotion
+   
   auto temp_pos_uptr = std::make_unique<Position>(position);
   Position &temp_pos = *temp_pos_uptr;
   make_move(temp_pos, move);
   
-  // Knight promotion tactics
+   
   if (promo_type == Promos::Knight) {
     uint64_t knight_attacks = KNIGHT_ATK_SAFE(to);
     
-    // Check for forks
+     
     int fork_targets = 0;
     uint64_t valuable_pieces = (temp_pos.pieces_bb[PieceTypes::Queen] | 
                                temp_pos.pieces_bb[PieceTypes::Rook] |
@@ -463,12 +459,12 @@ int evaluate_promotion_tactics(Position &position, Move move) {
     }
     
     if (fork_targets >= 2) {
-      bonus += 150; // Strong fork
+      bonus += 150;  
     } else if (fork_targets == 1) {
-      bonus += 50;  // Attacking valuable piece
+      bonus += 50;   
     }
     
-    // Knight vs passed pawn endgame considerations
+     
     if (temp_pos.material_count[PieceTypes::Pawn] < 4 && 
         !temp_pos.pieces_bb[PieceTypes::Queen] && 
         !temp_pos.pieces_bb[PieceTypes::Rook]) {
@@ -476,29 +472,29 @@ int evaluate_promotion_tactics(Position &position, Move move) {
     }
   }
   
-  // Bishop promotion tactics
+   
   if (promo_type == Promos::Bishop) {
     uint64_t bishop_attacks = get_bishop_attacks(to, temp_pos.colors_bb[0] | temp_pos.colors_bb[1]);
     
-    // Check for diagonals control
+     
     uint64_t central_diagonals = 0x8040201008040201ULL | 0x0102040810204080ULL;
     if (bishop_attacks & central_diagonals) {
       bonus += 40;
     }
     
-    // Check for bishop pair
+     
     if (pop_count(temp_pos.pieces_bb[PieceTypes::Bishop] & temp_pos.colors_bb[color]) > 1) {
       bonus += 30;
     }
     
-    // Check for tactical threats
+     
     uint64_t targets = bishop_attacks & temp_pos.colors_bb[color ^ 1];
     if (pop_count(targets) > 1) {
       bonus += 35;
     }
   }
   
-  // Evaluate escape from perpetual check
+   
   if (promo_type != Promos::Queen) {
     int king_pos = get_king_pos(temp_pos, color ^ 1);
     if (attacks_square(temp_pos, king_pos, color)) {
@@ -512,13 +508,10 @@ int evaluate_promotion_tactics(Position &position, Move move) {
 void score_moves(Position &position, ThreadInfo &thread_info,
                  MoveInfo &scored_moves, Move tt_move, int len) {
 
-  // score the moves
-
+   
   int ply = thread_info.search_ply;
 
-  // Safely compute history-derived values. The original code assumed
-  // thread_info.game_ply was always large enough for indexing based on ply.
-  // Under corruption or unexpected states this could index out-of-bounds.
+   
   bool have_their = (ply >= 1) && (thread_info.game_ply > 0);
   bool have_our = (ply >= 2) && (thread_info.game_ply > 1);
 
@@ -541,43 +534,42 @@ void score_moves(Position &position, ThreadInfo &thread_info,
   for (int idx = 0; idx < len; idx++) {
     Move move = scored_moves.moves[idx];
 
-    // Validate move encoding before using it to index arrays. A corrupted
-    // move could produce indices outside [0,63] and cause ASAN SEGVs.
+     
     int from_sq = extract_from(move);
     int to_sq = extract_to(move);
     if (!is_valid_square(from_sq) || !is_valid_square(to_sq)) {
-      // Give invalid moves a very low score and skip further processing.
+       
       scored_moves.scores[idx] = -100000000;
       continue;
     }
 
     if (move == tt_move) {
       scored_moves.scores[idx] = TTMoveScore;
-      // TT move score;
+       
     }
 
     else if (extract_type(move) == MoveTypes::Promotion) {
       int promo_type = extract_promo(move);
       
-      // Base scoring for promotions
+       
       if (promo_type == Promos::Queen) {
-        // Queen promo score
+         
         scored_moves.scores[idx] = QueenPromoScore;
       } else {
-        // Underpromotions - start with a lower base score
-        int base_score = QueenPromoScore - 1000000; // Lower than queen but still very high
+         
+        int base_score = QueenPromoScore - 1000000;  
         
-        // Add tactical evaluation bonus - scales with Variety
+         
         if (thread_info.variety > 0) {
           int tactical_bonus = evaluate_promotion_tactics(position, move);
           
-          // Scale the tactical bonus based on Variety
+           
           int variety_factor = std::min<int>(150, static_cast<int>(thread_info.variety));
           tactical_bonus = (tactical_bonus * variety_factor) / 100;
           
           base_score += tactical_bonus;
           
-          // For high variety values, make underpromotions more competitive
+           
           if (variety_factor > 100) {
             base_score += (variety_factor - 100) * 500;
           }
@@ -588,7 +580,7 @@ void score_moves(Position &position, ThreadInfo &thread_info,
     }
 
     else if (is_cap(position, move)) {
-      // Capture score
+       
       int from_piece = position.board[from_sq];
       int to_piece = position.board[to_sq];
 
@@ -599,8 +591,7 @@ void score_moves(Position &position, ThreadInfo &thread_info,
 
       int piece = from_piece, to = to_sq;
 
-      // Guard array accesses into history tables by ensuring indices are in
-      // expected ranges. If out-of-range, skip adding the history bonus.
+       
       if (piece >= 0 && piece < (int)std::size(thread_info.CapHistScores) &&
           to >= 0 && to < 64) {
         scored_moves.scores[idx] += thread_info.CapHistScores[piece][to];
@@ -609,12 +600,12 @@ void score_moves(Position &position, ThreadInfo &thread_info,
     }
 
     else if (move == thread_info.KillerMoves[thread_info.search_ply]) {
-      // Killer move score
+       
       scored_moves.scores[idx] = KillerMoveScore;
     }
 
     else {
-      // Normal moves are scored using history
+       
       int piece = position.board[from_sq], to = to_sq;
       if (piece >= 0 && piece < (int)std::size(thread_info.HistoryScores) &&
           to >= 0 && to < 64) {
@@ -624,8 +615,8 @@ void score_moves(Position &position, ThreadInfo &thread_info,
       }
 
       if (ply > 0 && their_last != MoveNone) {
-        // Guard multi-dimensional historical table access; if indices are
-        // outside expected ranges, skip the contribution.
+         
+         
         if (their_piece >= 0 && their_piece < (int)std::size(thread_info.ContHistScores) &&
             their_last >= 0 && their_last < 64 && piece >= 0 && piece < (int)std::size(thread_info.ContHistScores[0][0]) &&
             to >= 0 && to < 64) {
@@ -647,7 +638,7 @@ void score_moves(Position &position, ThreadInfo &thread_info,
 
 Move get_next_move(Move *moves, int *scores, int start_idx,
                    int len) {
-  // Performs a selection sort
+   
   int best_idx = start_idx, best_score = scores[start_idx];
   for (int i = start_idx + 1; i < len; i++) {
     if (scores[i] > best_score) {

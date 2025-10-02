@@ -1,7 +1,7 @@
 #pragma once
 #include <array>
-// Removed <span> include for C++17 compatibility
-// human.h removed (weakening integrated into core search)
+ 
+ 
 #include "search.h"
 #include <iostream>
 #include <memory>
@@ -10,13 +10,10 @@
 #include <fstream>
 #include "../fathom/src/tbprobe.h"
 
-// Global state for Syzygy tablebase initialization
+ 
 bool tb_initialized = false;
 
-// Skill_Level removed; only UCI_Elo controls strength when UCI_LimitStrength=true.
-
-// Helper: compute human weakening parameters from thread_info.human_elo.
-// NOTE: Keeps original (somewhat non-monotonic) depth cap logic intact to preserve behavior.
+ 
 inline void compute_human_params(ThreadInfo &thread_info) {
   int elo = thread_info.human_elo;
   int delta = 3401 - elo; if (delta < 0) delta = 0; if (delta > 3000) delta = 3000;
@@ -26,25 +23,25 @@ inline void compute_human_params(ThreadInfo &thread_info) {
   if (thread_info.human_noise_sigma > 120) thread_info.human_noise_sigma = 120;
   int depth_cap = 0;
   if (elo < 3300) {
-    depth_cap = 8 + (elo - 1200) * 8 / 2100; // original dynamic ramp
+    depth_cap = 8 + (elo - 1200) * 8 / 2100;  
   }
-  // Original overrides (retain ordering & values though they are irregular):
+   
   if (elo <= 2000) depth_cap = 14;
-  if (elo <= 1800) depth_cap = 16; // NOTE: higher than 2000 bucket (legacy quirk)
+  if (elo <= 1800) depth_cap = 16;  
   if (elo <= 1500) depth_cap = 14;
   if (elo <= 1300) depth_cap = 12;
   thread_info.human_depth_limit = depth_cap;
 }
 
 void run_thread(Position &position, ThreadInfo &thread_info, std::thread &s) {
-  // Unified: always run normal search; human weakening applied at root move selection.
+   
   s = std::thread(search_position, std::ref(position), std::ref(thread_info), std::ref(TT));
 }
 
 uint64_t perft(int depth, Position &position, bool first,
                ThreadInfo &thread_info)
-// Performs a perft search to the desired depth,
-// displaying results for each move at the root.
+ 
+ 
 {
   uint64_t total_nodes = 0;
   uint64_t checkers = attacks_square(
@@ -52,7 +49,7 @@ uint64_t perft(int depth, Position &position, bool first,
 
   if (depth <= 1) {
     std::array<Move, ListSize> list;
-  // Avoid std::span here for wider compiler compatibility
+   
   int nmoves = legal_movegen(position, list.data());
 
     for (int i = 0; i < nmoves; i++) {
@@ -66,13 +63,13 @@ uint64_t perft(int depth, Position &position, bool first,
   init_picker(picker, position, -107, checkers, &(thread_info.game_hist[thread_info.game_ply]));
 
   while (Move move = next_move(picker, position, thread_info, MoveNone,
-                               false)) // Loop through all of the moves,
-                                       // skipping illegal ones.
+                               false))  
+                                        
   {
     if (!is_legal(position, move)) {
       continue;
     }
-    // Stack allocation instead of heap for better performance
+     
     Position new_position = position;
     make_move(new_position, move);
 
@@ -160,7 +157,7 @@ void bench(Position &position, ThreadInfo &thread_info) {
 }
 
 Move uci_to_internal(const Position &position, std::string uci) {
-  // Converts a uci move into an internal move.
+   
   std::array<Move, ListSize> list;
   int nmoves = legal_movegen(position, list.data());
 
@@ -186,22 +183,22 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
 
   std::thread s;
 
-  // Helper: join a thread safely, swallowing exceptions and checking joinable.
+   
   auto safe_join = [](std::thread &t) {
     try {
       if (t.joinable()) t.join();
     } catch (...) {
-      // swallow any exceptions to keep UCI loop alive
+       
     }
   };
 
   while (getline(std::cin, input)) {
-    // Check for EOF or failed stream state
+     
     if (std::cin.eof() || std::cin.fail()) {
       break;
     }
     
-    // Skip empty lines
+     
     if (input.empty()) {
       continue;
     }
@@ -210,7 +207,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
 
     std::string command;
 
-    input_stream >> std::skipws >> command; // write into command
+    input_stream >> std::skipws >> command;  
 
     if (command == "d") {
       input_stream.clear();
@@ -225,15 +222,15 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
 
       safe_join(s);
 
-      // Only call barriers if threads are actually running  
+       
       if (thread_data.num_threads > 0 && !thread_data.threads.empty()) {
-        // Cancel barriers to wake any threads blocked in arrive_and_wait
+         
         try {
           reset_barrier.cancel();
           idle_barrier.cancel();
         } catch (...) {}
 
-        // Join threads (best-effort) while holding a lock to avoid races
+         
         {
           std::lock_guard<std::mutex> lg(thread_data.data_mutex);
           for (size_t i = 0; i < thread_data.threads.size(); i++) {
@@ -243,7 +240,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           thread_data.threads.clear();
         }
 
-        // Clear cancel flags (barriers will be reset on next thread spawn)
+         
         try {
           reset_barrier.clear_cancel();
           idle_barrier.clear_cancel();
@@ -255,14 +252,14 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
     else if (command == "uci") {
   safe_printf("id name Stallion GB Edition\n"
              "id author LegendOfCompiling\n"
-             // Reverted Hash default per request
+              
              "option name Hash type spin default 256 min 1 max 131072\n"
              "option name Threads type spin default 1 min 1 max 1024\n"
              "option name MultiPV type spin default 1 min 1 max 256\n"
-             // Tal-style: higher Variety to encourage speculative / diverse choices
+              
              "option name Variety type spin default 150 min 0 max 150\n"
              "option name UCI_LimitStrength type check default false\n"
-             // Skill_Level removed (use UCI_Elo only)
+              
              "option name UCI_Elo type spin default 3401 min 500 max 3401\n"
              "option name UCI_Chess960 type check default false\n"
              "option name OpeningAggressiveness type spin default 150 min 50 max 150\n"
@@ -279,7 +276,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
              "option name SyzygyPath type string default \"\"\n"
              "option name MaxDepth type spin default 0 min 0 max 256\n"
              "option name MaxNodes type spin default 0 min 0 max 500000\n"
-             // Reverted UseOpeningBook default per request
+              
              "option name UseOpeningBook type check default false\n"
              "option name BookPath type string default \"\"\n"
              "option name BookDepthLimit type spin default 0 min 0 max 50\n"
@@ -289,12 +286,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
              "option name BookMinWeight type spin default 0 min 0 max 1000\n"
              "option name PonderTimeFactor type spin default 200 min 0 max 200\n");
 
-      /*for (auto &param : params) {
-        std::cout << "option name " << param.name << " type spin default "
-                  << param.value << " min " << param.min << " max " << param.max
-                  << "\n";
-      }*/
-
+       
   safe_printf("uciok\n");
     }
 
@@ -307,8 +299,8 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
     }
 
     else if (command == "setoption") {
-      // Robust UCI setoption parser
-      // Expected pattern: setoption name <Name> [value <Value...>]
+       
+       
       std::string word;
       std::string optName;
       std::string valueStr;
@@ -323,14 +315,14 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           gotName = true;
         } else if (word == "value") {
           afterValue = true;
-          // Collect the rest of the line (can include path / numbers)
+           
           std::string rest;
           std::getline(input_stream, rest);
           if (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.erase(0, rest.find_first_not_of(" \t"));
           valueStr = rest;
           break;
         } else if (!afterValue) {
-          // Some GUIs might insert tokens without explicit 'value'; treat as value start
+           
           valueStr = word;
           afterValue = true;
           std::string rest;
@@ -341,7 +333,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
         }
       }
 
-      // Fallbacks removed: invalid numeric input now leaves option unchanged (skip)
+       
       auto parse_int = [](const std::string &s, bool &ok) {
         try { int v = std::stoi(s); ok = true; return v; } catch (...) { ok = false; return 0; }
       };
@@ -354,10 +346,10 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       };
 
       if (!gotName) {
-        continue; // malformed
+        continue;  
       }
 
-      // Dispatch by option name
+       
       if (optName == "Hash") {
         bool ok=false; int mb = parse_int(valueStr, ok); if (!ok) continue;
         if (mb < 1) mb = 1; if (mb > 131072) mb = 131072; resize_TT(mb);
@@ -365,9 +357,9 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       else if (optName == "Threads") {
         bool ok=false; int thr = parse_int(valueStr, ok); if (!ok) continue;
         if (thr < 1) thr = 1; if (thr > 1024) thr = 1024;
-        // Gracefully stop existing threads
+         
         thread_data.terminate = true;
-        // Wake blocked threads and join them safely
+         
         try { reset_barrier.cancel(); idle_barrier.cancel(); } catch (...) {}
         for (auto &t : thread_data.threads) {
           try { if (t.joinable()) t.join(); } catch (...) {}
@@ -377,11 +369,11 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
         thread_data.threads.clear();
         thread_data.terminate = false;
         thread_data.num_threads = thr;
-        // Reinitialize barriers with new thread count
+         
         reset_barrier.reset(thread_data.num_threads);
         idle_barrier.reset(thread_data.num_threads);
         search_end_barrier.reset(thread_data.num_threads);
-        // Spawn new threads (thr-1 additional threads; main thread is thread 0)
+         
         for (int i = 0; i < thr - 1; i++) {
           thread_data.thread_infos.emplace_back();
           thread_data.threads.emplace_back(loop, i);
@@ -435,7 +427,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       else if (optName == "UseSyzygy") {
         bool b = to_bool(valueStr);
         if (b && !thread_info.syzygy_path.empty()) {
-          // Check if path exists before enabling (like polyglot book)
+           
           if (std::filesystem::exists(thread_info.syzygy_path)) {
             thread_info.use_syzygy = true;
             if (tb_initialized) { tb_free(); tb_initialized = false; }
@@ -462,7 +454,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           thread_info.syzygy_path = valueStr;
           if (tb_initialized) { tb_free(); tb_initialized = false; }
           if (thread_info.use_syzygy) {
-            // Re-validate path if syzygy is currently enabled (like polyglot book)
+             
             if (std::filesystem::exists(valueStr)) {
               safe_printf("info string syzygy path updated: %s\n", valueStr.c_str());
               safe_fflush();
@@ -479,7 +471,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       else if (optName == "UseOpeningBook") {
         bool b = to_bool(valueStr);
         if (b && !thread_info.book_path.empty()) {
-          // Check if book file exists before enabling (like syzygy)
+           
           if (std::filesystem::exists(thread_info.book_path)) {
             thread_info.use_opening_book = true;
             safe_printf("info string opening book enabled: %s\n", thread_info.book_path.c_str());
@@ -503,7 +495,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
         if (valueStr != thread_info.book_path) {
           thread_info.book_path = valueStr;
           if (thread_info.use_opening_book) {
-            // Re-validate path if opening book is currently enabled (like syzygy)
+             
             if (std::filesystem::exists(valueStr)) {
               safe_printf("info string opening book path updated: %s\n", valueStr.c_str());
               safe_fflush();
@@ -519,7 +511,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       else if (optName == "BookMinWeight") { bool ok=false; int v=parse_int(valueStr,ok); if(!ok) continue; v = std::clamp(v, 0, 1000); thread_info.book_min_weight = v; }
   else if (optName == "PonderTimeFactor") { bool ok=false; int v=parse_int(valueStr,ok); if(!ok) continue; v = std::clamp(v, 0, 200); thread_info.ponder_time_factor = v; }
       else {
-        // Tunable internal params exposed via printparams (if GUI sets them)
+         
         for (auto &param : params) {
           if (optName == param.name) {
             bool ok=false; int v=parse_int(valueStr,ok); if(!ok) break; v = std::clamp(v, param.min, param.max); param.value = v;
@@ -546,15 +538,15 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       }
 
       new_game(thread_info, TT);
-      thread_info.game_ply = 0; // Reset game ply for new game
+      thread_info.game_ply = 0;  
       
-      // Initialize TimeManager
+       
       thread_info.time_manager = TimeManager();
       thread_info.best_move_stable = false;
       thread_info.stability_counter = 0;
       thread_info.previous_best_move = MoveNone;
       
-      // Opening book initialization if enabled
+       
       if (thread_info.use_opening_book && !thread_info.book_path.empty()) {
         if (!thread_info.opening_book.is_loaded()) {
           bool loaded = thread_info.opening_book.load_book(thread_info.book_path);
@@ -565,10 +557,10 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
         }
       }
       
-      // Syzygy tablebase initialization if enabled
+       
       if (thread_info.use_syzygy && !tb_init(thread_info.syzygy_path.c_str())) {
         safe_print_cerr(std::string("Warning: Syzygy TB initialization failed for path: ") + thread_info.syzygy_path);
-        thread_info.use_syzygy = false; // Disable on failure
+        thread_info.use_syzygy = false;  
       } else if (!thread_info.use_syzygy) {
         tb_free();
       }
@@ -577,7 +569,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
     }
 
     else if (command == "position") {
-      // Ensure previous search threads are finished before altering the board
+       
       thread_data.stop = true;
       {
         std::unique_lock<std::mutex> lk(thread_data.search_mutex);
@@ -593,13 +585,12 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       std::string setup;
       input_stream >> setup;
       if (setup == "fen") {
-        thread_info.game_ply = 0; // Reset for FEN position
+        thread_info.game_ply = 0;  
         std::string fen;
 
         for (int i = 0; i < 6; i++) {
-          //                    1                        2  3   4 5 6 subtokens
-          // rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
-
+           
+           
           std::string substr;
           input_stream >> substr;
           fen += substr + " ";
@@ -607,7 +598,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
 
         set_board(position, thread_info, fen);
       } else {
-        thread_info.game_ply = 0; // Reset for startpos
+        thread_info.game_ply = 0;  
         set_board(position, thread_info,
                   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
       }
@@ -615,7 +606,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       calculate(position);
       std::string has_moves;
       if (input_stream >>
-          has_moves) { // we're at the "moves" part of the command now
+          has_moves) {  
 
         std::string moves;
         Move last_move_played = MoveNone;
@@ -623,7 +614,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           Move move = uci_to_internal(position, moves);
           if (move == MoveNone) break;
           if (thread_info.game_ply >= GameSize) break;
-          // Update game history without affecting search stack depth
+           
           thread_info.game_hist[thread_info.game_ply].position_key = position.zobrist_key;
           thread_info.game_hist[thread_info.game_ply].played_move = move;
           thread_info.game_hist[thread_info.game_ply].piece_moved = position.board[extract_from(move)];
@@ -634,20 +625,20 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           make_move(position, move);
           last_move_played = move;
         }
-        // Ensure search starts from root depth
+         
         thread_info.search_ply = 0;
-        // If we were pondering and opponent move != predicted ponder move -> abort current search
+         
         if (thread_info.pondering && last_move_played != MoveNone && thread_info.ponder_move != MoveNone) {
           if (last_move_played != thread_info.ponder_move) {
-            // Mismatch: force stop so GUI can issue new 'go'
+             
             thread_info.pondering = false;
               if (!thread_data.stop) {
               thread_data.stop = true;
               safe_printf("info string ponder mismatch abort\n");
-                // AutoPonderRestart removed: rely on GUI to send new 'go'
+                 
             }
           } else {
-            // Correct prediction: mark ponderhit implicitly (engine might not receive explicit ponderhit)
+             
             thread_info.ponder_hit = true; thread_info.pondering = false;
           }
         }
@@ -658,19 +649,19 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
     else if (command == "go") {
       thread_info.start_time = std::chrono::steady_clock::now();
       thread_info.infinite_search = false;
-      // If this is a fresh non-ponder search ensure previous ponder state is cleared
+       
       if (thread_info.pondering == false) {
         thread_info.ponder_hit = false;
         thread_info.ponder_move = MoveNone;
       }
-      // Syzygy: only initialize if enabled and not already initialized
+       
       if (thread_info.use_syzygy && !tb_initialized) {
         if (tb_init(thread_info.syzygy_path.c_str())) {
           tb_initialized = true;
           safe_printf("info string tablebase initialized: %s\n", thread_info.syzygy_path.c_str());
         } else {
           safe_print_cerr(std::string("Warning: Syzygy TB initialization failed for path: ") + thread_info.syzygy_path);
-          thread_info.use_syzygy = false; // Disable on failure
+          thread_info.use_syzygy = false;  
         }
       } else if (!thread_info.use_syzygy && tb_initialized) {
         tb_free();
@@ -694,27 +685,16 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
         int movestogo = 0;
         int mate_in = 0;
         std::vector<Move> searchmoves;
-      bool is_perft_command = false; // Flag to skip normal search for perft
+      bool is_perft_command = false;  
       
       while (input_stream >> token) {
           if (token == "ponder") {
             thread_info.pondering = true;
             continue;
           }
-        // Handle "go perft <depth>" command (extension for testing)
-        // This bypasses normal search and runs perft directly
-        if (token == "perft") {
-          int perft_depth;
-          if (input_stream >> perft_depth) {
-            auto perft_start = std::chrono::steady_clock::now();
-            uint64_t nodes = perft(perft_depth, position, true, thread_info);
-            uint64_t elapsed_ms = time_elapsed(perft_start);
-            uint64_t nps = (elapsed_ms > 0) ? (nodes * 1000 / elapsed_ms) : 0;
-            safe_printf("%" PRIu64 " nodes %" PRIu64 " nps\n", nodes, nps);
-          }
-          is_perft_command = true;
-          break; // Skip rest of "go" processing
-        } else if (token == "infinite") {
+         
+         
+        if (token == "infinite") {
           thread_info.max_iter_depth = MaxSearchDepth;
           thread_info.max_time = UINT64_MAX;
           thread_info.opt_time = UINT64_MAX;
@@ -740,7 +720,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
               searchmoves.push_back(move);
             }
           }
-          // Put the last token back if it's not a move
+           
           if (!move_str.empty() && move_str.length() < 4) {
             input_stream.str(move_str + " " + input_stream.str().substr(input_stream.tellg()));
             input_stream.seekg(0);
@@ -763,19 +743,19 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           thread_info.time_manager.panic_time = static_cast<uint64_t>(t);
           thread_info.time_manager.soft_limit = static_cast<uint64_t>(t);
           thread_info.time_manager.hard_limit = static_cast<uint64_t>(t);
-          time = INT32_MAX; // Skip TimeManager initialization
+          time = INT32_MAX;  
           goto run;
         }
       }
 
-      // Adjust time based on movestogo if provided
+       
       if (movestogo > 0 && time != INT32_MAX) {
         int overhead = std::min(50, time / 10);
         time = std::max(2, time - overhead);
         thread_info.max_time = static_cast<uint64_t>(time) / std::max(movestogo, 1);
         thread_info.opt_time = thread_info.max_time * 8 / 10;
       } else {
-        // Calculate time allotted to search
+         
         int overhead = std::min(50, time / 10);
         time = std::max(2, time - overhead);
         thread_info.max_time = static_cast<uint64_t>(time) * 4 / 5;
@@ -783,7 +763,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       }
 
     run:
-      // Initialize enhanced time manager
+       
       if (!thread_info.infinite_search && time != INT32_MAX) {
         int game_move = (thread_info.game_ply / 2) + 1;
         thread_info.time_manager.initialize(static_cast<uint64_t>(time), static_cast<uint64_t>(increment), movestogo, game_move);
@@ -798,7 +778,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
                               : 0;
       }
       
-      // Check opening book first (if not pondering and within depth limit)
+       
       if (!thread_info.pondering && thread_info.use_opening_book && 
           thread_info.opening_book.is_loaded() && 
           (thread_info.book_depth_limit == 0 || thread_info.game_ply <= thread_info.book_depth_limit)) {
@@ -807,16 +787,16 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
         Move book_move = thread_info.opening_book.probe_book(book_key, thread_info.book_min_weight);
         
         if (book_move != MoveNone && thread_info.variety > 0) {
-          // Avoid repeating same opening sequence: if key seen recently, with some probability skip
+           
           bool seen = false;
           for (auto k : thread_info.recent_book_keys) if (k == book_key) { seen = true; break; }
           if (seen) {
-            // Quadratic scaling: low variety -> minimal impact, high variety -> strong diversification
-            int v = (int)thread_info.variety; // 0..150
-            int skip_chance = (v * v) / 225; // ~ (v/15)^2, max 100 at v=150
+             
+            int v = (int)thread_info.variety;  
+            int skip_chance = (v * v) / 225;  
             if (skip_chance > 100) skip_chance = 100;
             if ((Random::dist(Random::rd) % 100) < skip_chance) {
-              book_move = MoveNone; // force search instead
+              book_move = MoveNone;  
             }
           }
           if (book_move != MoveNone) {
@@ -825,7 +805,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
         }
         
         if (book_move != MoveNone) {
-          // Verify the book move is legal
+           
           std::array<Move, ListSize> legal_moves;
           int num_legal = legal_movegen(position, legal_moves.data());
           bool is_legal = false;
@@ -838,7 +818,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           if (is_legal) {
             std::string bm = internal_to_uci(position, book_move);
             safe_printf("bestmove %s\n", bm.c_str());
-            continue; // Don't search, use book move directly and continue to next command
+            continue;  
           }
         }
         
@@ -847,20 +827,20 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
         }
       }
       
-      // Enforce MaxDepth limit if set (0 = no limit)
+       
       if (thread_info.max_depth > 0) {
         thread_info.max_iter_depth = std::min(thread_info.max_iter_depth, static_cast<int>(thread_info.max_depth));
       }
-      // Apply human (limit strength) depth cap if active and lower than current limit
+       
       if (thread_info.is_human && thread_info.human_depth_limit > 0) {
         thread_info.max_iter_depth = std::min(thread_info.max_iter_depth, thread_info.human_depth_limit);
       }
-      // Enforce MaxNodes limit if set (0 = no limit)  
+       
       if (thread_info.max_nodes > 0) {
         thread_info.max_nodes_searched = std::min(thread_info.max_nodes_searched, thread_info.max_nodes);
       }
       
-      // Only run normal search if this wasn't a "go perft" command
+       
       if (!is_perft_command) {
         run_thread(position, thread_info, s);
       }
@@ -868,10 +848,10 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
 
     else if (command == "ponderhit") {
       if (thread_info.pondering) {
-        // Reuse the existing search: do not stop threads, just mark hit.
+         
         thread_info.ponder_hit = true;
         thread_info.pondering = false;
-        // Extend time budget (simple heuristic: half of ponder elapsed added to opt_time within hard limit)
+         
         auto ponder_elapsed = time_elapsed(thread_info.ponder_start_time);
         if (ponder_elapsed > 0 && !thread_info.infinite_search) {
           uint64_t bonus = ponder_elapsed * thread_info.ponder_time_factor / 100;
@@ -881,11 +861,20 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       }
     }
 
-    // Note: Standalone "perft" command removed - use "go perft <depth>" instead
-    // This maintains UCI command structure consistency
-
+     
     else if (command == "bench") {
       bench(position, thread_info);
+    }
+
+    else if (command == "perft") {
+      int perft_depth;
+      if (input_stream >> perft_depth) {
+        auto perft_start = std::chrono::steady_clock::now();
+        uint64_t nodes = perft(perft_depth, position, true, thread_info);
+        uint64_t elapsed_ms = time_elapsed(perft_start);
+        uint64_t nps = (elapsed_ms > 0) ? (nodes * 1000 / elapsed_ms) : 0;
+        safe_printf("%" PRIu64 " nodes %" PRIu64 " nps\n", nodes, nps);
+      }
     }
 
     else if (command == "eval") {
@@ -904,7 +893,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       int filled = 0;
       int sample_size = static_cast<int>(std::min<uint64_t>(safe_TT_size(), 1000));
       if (sample_size <= 0) sample_size = 0;
-      // Acquire mutex while sampling TT to avoid races with resize/new_game
+       
       {
         std::lock_guard<std::mutex> lg(thread_data.data_mutex);
         for (int i = 0; i < sample_size; i++) {
@@ -916,12 +905,12 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           }
         }
       }
-      if (sample_size == 0) sample_size = 1; // avoid div by zero
+      if (sample_size == 0) sample_size = 1;  
       safe_printf("info hashfull %d\n", (filled * 1000) / sample_size);
     }
   }
 
-  // Handle EOF or broken pipe gracefully
+   
   if (std::cin.eof() || std::cin.fail()) {
     thread_data.terminate = true;
     
@@ -929,13 +918,13 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       s.join();
     }
     
-    // Only call barriers if threads are actually running
+     
     if (thread_data.num_threads > 0 && !thread_data.threads.empty()) {
       try {
         reset_barrier.arrive_and_wait();
         idle_barrier.arrive_and_wait();
       } catch (...) {
-        // best-effort continue
+         
       }
 
       for (size_t i = 0; i < thread_data.threads.size(); i++) {
@@ -944,7 +933,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
             thread_data.threads[i].join();
           }
         } catch (...) {
-          // swallow exceptions during join
+           
         }
       }
     }

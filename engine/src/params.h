@@ -15,9 +15,7 @@ struct Parameter {
 
 std::vector<Parameter> params;
 
-// SPSA parameter code is based off Clover
-// (https://github.com/lucametehau/CloverEngine)
-
+ 
 struct CreateParam {
   int _value;
   CreateParam(std::string name, int value, int min, int max) : _value(value) {
@@ -61,32 +59,31 @@ TUNE_PARAM(NodeTmFactor1, 149, 100, 200);
 TUNE_PARAM(NodeTmFactor2, 177, 125, 225);
 TUNE_PARAM(BmFactor1, 152, 100, 200);
 
-// Material value constants (in centipawns)
+ 
 const int KNIGHT_VALUE = 300;
 const int BISHOP_VALUE = 300;
 const int ROOK_VALUE = 500;
 const int QUEEN_VALUE = 900;
 
-// Halfmove draw scaling
+ 
 const int HALFMOVE_SCALE_MAX = 200;
 
-// Delta pruning in qsearch
+ 
 const int DELTA_MARGIN_BASE = 200;
 
-// Variety/multi-PV thresholds
-const int VARIETY_BASE_THRESHOLD = 150; // at variety=0: 300cp
+ 
+const int VARIETY_BASE_THRESHOLD = 150;  
 const int VARIETY_MULTIPLIER = 2;
 
-// Promotion bonus in variety mode
+ 
 const int PROMO_BONUS_DOUBLE_FORK = 200;
 const int PROMO_BONUS_SINGLE_FORK = 75;
 
-// Human mode ELO scaling
+ 
 const int HUMAN_ELO_MIN = 500;
 const int HUMAN_ELO_RANGE = 1100;
 
-// Artık bu parametreler thread_info yapısında
-
+ 
 void print_params_for_ob() {
   for (auto &param : params) {
     safe_printf("%s, int, %d, %d, %d, %f, 0.002\n",
@@ -98,12 +95,12 @@ void print_params_for_ob() {
 void init_LMR() {
   for (int i = 0; i < 256; i++) {
     for (int n = 0; n < ListSize; n++) {
-      // CRITICAL FIX: Use log(1 + x) to avoid log(0) domain error
-      // This ensures mathematical correctness for i=0 or n=0 cases
+       
+       
       double di = std::log(1.0 + static_cast<double>(i));
       double dn = std::log(1.0 + static_cast<double>(n));
       double val = (LMRBase / 10.0) + (di * dn) / (LMRRatio / 10.0);
-      // Safety clamp to ensure non-negative reduction values
+       
       if (val < 0.0) val = 0.0;
       LMRTable[i][n] = static_cast<int>(val + 0.5);
     }

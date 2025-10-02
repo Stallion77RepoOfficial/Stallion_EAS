@@ -3,15 +3,15 @@
 #include "nnue.h"
 #include "params.h"
 #include "position.h"
-// tm.h removed; adjust_soft_limit forward declared in utils.h
+ 
 #include "utils.h"
 #include "../fathom/src/tbprobe.h"
 #include <memory>
 
-// Global state for tablebase
+ 
 extern bool tb_initialized;
 
-// Forward declarations
+ 
 inline int64_t safe_elapsed(const std::chrono::steady_clock::time_point &start){
   auto ms = time_elapsed(start);
   return ms ? ms : 1;
@@ -19,17 +19,12 @@ inline int64_t safe_elapsed(const std::chrono::steady_clock::time_point &start){
 
 int analyze_sacrifice(Position &position, ThreadInfo &thread_info, int depth, int ply, int sacrificer_color);
 
-// Probe WDL tablebase during search for positions with ≤6 pieces.
-// Honors 50-move rule if thread_info.syzygy_50_move_rule is true, otherwise ignores halfmove clock for probing.
-// Returns ScoreNone on probe failure, otherwise a normalized internal score (including 0 for draw).
+ 
 int probe_wdl_tb(Position &position, const ThreadInfo &thread_info) {
-  // Lightweight mid-node Syzygy WDL probe similar in spirit to Stockfish.
-  // Differences from earlier version:
-  //  * We always attempt a probe (within limits) and pass the rule50 clock instead of aborting early.
-  //  * We respect both the compiled TB_LARGEST and user syzygy_probe_limit.
-  //  * We map WDL (including CURSED/BLESSED variants) to stable near-mate scores.
+   
+   
   if (!tb_initialized || !thread_info.use_syzygy) return ScoreNone;
-  // Remaining depth gating (simple heuristic): avoid probing when too close to leaf
+   
   if (thread_info.syzygy_probe_depth > 0 && thread_info.max_iter_depth > 0) {
     int remaining = thread_info.max_iter_depth - thread_info.search_ply;
     if (remaining < thread_info.syzygy_probe_depth) return ScoreNone;
@@ -38,9 +33,9 @@ int probe_wdl_tb(Position &position, const ThreadInfo &thread_info) {
   int piece_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
   int compiled_limit = TB_LARGEST ? (int)TB_LARGEST : 7;
   if (piece_count > compiled_limit) return ScoreNone;
-  if (piece_count > thread_info.syzygy_probe_limit) return ScoreNone; // user limit
+  if (piece_count > thread_info.syzygy_probe_limit) return ScoreNone;  
 
-  // Tablebases are only defined for positions without castling rights.
+   
   unsigned castling = 0;
   if (position.castling_squares[Colors::White][Sides::Kingside] != SquareNone) castling |= TB_CASTLING_K;
   if (position.castling_squares[Colors::White][Sides::Queenside] != SquareNone) castling |= TB_CASTLING_Q;
@@ -49,7 +44,7 @@ int probe_wdl_tb(Position &position, const ThreadInfo &thread_info) {
   if (castling) return ScoreNone;
 
   unsigned ep = position.ep_square != SquareNone ? position.ep_square : 0;
-  // rule50 parameter: halfmove clock if honoring 50-move rule, else 0 to ignore it
+   
   unsigned rule50 = thread_info.syzygy_50_move_rule ? position.halfmoves : 0;
 
   unsigned result = tb_probe_wdl(
@@ -73,15 +68,14 @@ int probe_wdl_tb(Position &position, const ThreadInfo &thread_info) {
 
 constexpr int NormalizationFactor = 195;
 
-void update_history(int16_t &entry, int score) { // Update history score
+void update_history(int16_t &entry, int score) {  
   entry += score - entry * abs(score) / 16384;
 }
-void update_corrhist(int16_t &entry, int score) { // Update history score
+void update_corrhist(int16_t &entry, int score) {  
   entry += score - entry * abs(score) / 1024;
 }
 
-// Helper: Update all continuation histories for a move
-// Centralizes the repetitive update logic to reduce code duplication
+ 
 inline void update_continuation_histories(
     ThreadInfo &thread_info, int piece, int sq, int bonus,
     Move their_last, int their_piece,
@@ -109,10 +103,10 @@ inline void update_continuation_histories(
 
 bool out_of_time(ThreadInfo &thread_info) {
   if (thread_data.stop || thread_info.datagen_stop) return true;
-  // Only main thread performs global time/node budget checks.
+   
   if (thread_info.thread_id != 0) return false;
 
-  // Aggregate node count across all threads for node limit decisions.
+   
   uint64_t total_nodes = thread_info.nodes.load();
   for (auto &ti : thread_data.thread_infos) total_nodes += ti.nodes.load();
   if (total_nodes >= thread_info.max_nodes_searched) {
@@ -120,15 +114,15 @@ bool out_of_time(ThreadInfo &thread_info) {
     return true;
   }
 
-  // More frequent (adaptive) time checks.
+   
   thread_info.time_checks++;
-  const uint16_t check_interval = 512; // smaller than 1024 for finer granularity
+  const uint16_t check_interval = 512;  
   if (thread_info.time_checks >= check_interval) {
     thread_info.time_checks = 0;
     if (!thread_info.infinite_search && !thread_info.pondering) {
       uint64_t elapsed = time_elapsed(thread_info.start_time);
       thread_info.time_manager.update_node_count(total_nodes);
-      bool in_trouble = false; // Placeholder for future eval trend detection
+      bool in_trouble = false;  
       if (thread_info.time_manager.should_stop(elapsed, thread_info.best_move_stable, in_trouble) ||
           elapsed > thread_info.max_time) {
         thread_data.stop = true;
@@ -158,7 +152,7 @@ bool has_non_pawn_material(const Position &position, int color) {
 }
 
 int16_t total_mat_color(const Position &position, int color) {
-  // total material for one color
+   
 
   int m = 0;
   for (int i = 0; i < 5; i++) {
@@ -170,7 +164,7 @@ int16_t total_mat_color(const Position &position, int color) {
 int eval(Position &position, ThreadInfo &thread_info) {
   int color = position.color;
   
-  // First check if we can use tablebase WDL score
+   
   if (thread_info.use_syzygy && tb_initialized) {
   int tb_score = probe_wdl_tb(position, thread_info);
     if (tb_score != ScoreNone) return tb_score;
@@ -185,7 +179,7 @@ int eval(Position &position, ThreadInfo &thread_info) {
   int s_m = thread_info.game_hist[start_index].m_diff;
   int sacrifice_pattern = 0;
 
-  // Detect sacrifice patterns in recent history (simple heuristic patterns)
+   
   for (int idx = start_index + 2; idx < thread_info.game_ply - 4; idx += 2) {
     bool pattern = (thread_info.game_hist[idx].m_diff < s_m &&
                     thread_info.game_hist[idx + 1].m_diff > s_m &&
@@ -196,7 +190,7 @@ int eval(Position &position, ThreadInfo &thread_info) {
       sacrifice_pattern = s_m + thread_info.game_hist[idx + 4].m_diff;
       break;
     }
-    // Big piece sacrifice (queen/rook capture) immediately after loss
+     
     if ((thread_info.game_hist[idx].piece_moved == Pieces::WQueen ||
          thread_info.game_hist[idx].piece_moved == Pieces::BQueen ||
          thread_info.game_hist[idx].piece_moved == Pieces::WRook ||
@@ -205,7 +199,7 @@ int eval(Position &position, ThreadInfo &thread_info) {
       sacrifice_pattern = 3;
       break;
     }
-    // Multiple sacrifices in a short span
+     
     if (idx < thread_info.game_ply - 6) {
       int sacrifice_count = 0;
       for (int i = idx; i < idx + 6 && i < thread_info.game_ply; i++) {
@@ -240,7 +234,7 @@ int eval(Position &position, ThreadInfo &thread_info) {
     }
   }
 
-  // Central control
+   
   uint64_t center_squares = (1ULL << 27) | (1ULL << 28) | (1ULL << 35) | (1ULL << 36);
   uint64_t extended_center = center_squares | (1ULL << 26) | (1ULL << 29) | (1ULL << 34) |
                              (1ULL << 37) | (1ULL << 42) | (1ULL << 43) | (1ULL << 44) | (1ULL << 45);
@@ -294,9 +288,9 @@ int eval(Position &position, ThreadInfo &thread_info) {
     int sq = pop_lsb(own_rooks);
     int f = get_file(sq);
     if (!(Files[f] & pawns)) {
-      positional_bonus += 12; // Open file
+      positional_bonus += 12;  
     } else if (!(Files[f] & pawns & position.colors_bb[color])) {
-      positional_bonus += 6; // Semi-open
+      positional_bonus += 6;  
     }
   }
 
@@ -330,9 +324,9 @@ int eval(Position &position, ThreadInfo &thread_info) {
   }
 
   if (thread_info.is_human && thread_info.search_ply < 3 && thread_info.human_noise_sigma > 0) {
-    // Small opening noise proportional to configured sigma (keep bounded)
-    int span = std::max(4, thread_info.human_noise_sigma / 4); // cap early influence
-    int noise = (Random::dist(Random::rd) % (2 * span + 1)) - span; // uniform in [-span, span]
+     
+    int span = std::max(4, thread_info.human_noise_sigma / 4);  
+    int noise = (Random::dist(Random::rd) % (2 * span + 1)) - span;  
     nnue_eval += noise;
   }
 
@@ -361,7 +355,7 @@ int correct_eval(const Position &position, ThreadInfo &thread_info, int eval) {
 }
 
 void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
-  // EXTREME DEFENSIVE VALIDATION: Prevent memory corruption crashes
+   
   if (!thread_info.game_hist.data()) {
     thread_data.stop = true;
     return;
@@ -369,13 +363,13 @@ void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
 
   if (thread_info.search_ply + 1 >= MaxSearchDepth ||
       thread_info.game_ply >= GameSize) {
-    // Record diagnostic event to help triage stack corruption
+     
     thread_data.tb_hits.fetch_add(1);
     thread_data.stop = true;
     return;
   }
 
-  // ADDITIONAL SAFETY: Check for corrupted game_ply values
+   
   if (thread_info.game_ply < 0 || thread_info.game_ply >= GameSize) {
     thread_data.tb_hits.fetch_add(1);
     thread_data.stop = true;
@@ -384,15 +378,14 @@ void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
 
   ++thread_info.search_ply;
 
-  // Sanity check: if search_ply exceeds a high watermark, abort search to
-  // avoid infinite spin or runaway recursion (this signals corruption upstream).
+   
   if (thread_info.search_ply > MaxSearchDepth - 2) {
     thread_data.tb_fails.fetch_add(1);
     thread_data.stop = true;
     return;
   }
 
-  // SAFE ARRAY ACCESS: snapshot index and validate move squares before writing
+   
   const int gp = static_cast<int>(thread_info.game_ply);
   if (gp < 0 || gp >= GameSize) {
     thread_data.stop = true;
@@ -401,108 +394,107 @@ void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
 
   const int from_sq = static_cast<int>(extract_from(move));
   const int to_sq = static_cast<int>(extract_to(move));
-  // Validate move squares before reading position.board or calling is_cap
+   
   if (!is_valid_square(from_sq) || !is_valid_square(to_sq)) {
-    // Corrupted move detected; stop search to avoid crashes
+     
     thread_data.stop = true;
     return;
   }
 
-  // Now it is safe to write into game_hist at index gp
+   
   thread_info.game_hist[gp].position_key = position.zobrist_key;
   thread_info.game_hist[gp].played_move = move;
   thread_info.game_hist[gp].piece_moved = position.board[from_sq];
   thread_info.game_hist[gp].is_cap = is_cap(position, move);
   thread_info.game_hist[gp].m_diff = material_eval(position);
 
-  // Advance game_ply safely
+   
   if (thread_info.game_ply + 1 < GameSize)
     thread_info.game_ply++;
 }
 
 void ss_pop(ThreadInfo &thread_info) {
-  // EXTREME DEFENSIVE VALIDATION: Prevent memory corruption in pop operations
+   
   if (thread_info.search_ply <= 0 || thread_info.game_ply <= 0) {
-    return; // Invalid state, don't decrement below 0
+    return;  
   }
 
   if (thread_info.search_ply > MaxSearchDepth || thread_info.game_ply > GameSize) {
-    return; // Corrupted state detected
+    return;  
   }
 
   thread_info.search_ply--;
   thread_info.game_ply--;
 
-  // SAFE NNUE POP: Only pop if NNUE state is valid
+   
   if (thread_info.nnue_state.m_curr >= thread_info.nnue_state.m_accumulator_stack) {
     thread_info.nnue_state.pop();
   }
 }
 
 bool material_draw(
-    const Position &position) { // Is there not enough material on the
-                                // position for one side to win?
+    const Position &position) {  
+                                 
   for (int i : {0, 1, 6, 7, 8,
-                9}) { // Do we have pawns, rooks, or queens on the position?
+                9}) {  
     if (position.material_count[i]) {
       return false;
     }
   }
   if (position.material_count[4] > 1 || position.material_count[2] > 2 ||
       (position.material_count[2] &&
-       position.material_count[4])) { // Do we have three knights, two bishops,
-                                      // or a bishop and knight for either side?
+       position.material_count[4])) {  
+                                       
     return false;
   }
   if (position.material_count[5] > 1 || position.material_count[3] > 2 ||
       (position.material_count[3] &&
-       position.material_count[5])) { // Do we have three knights, two bishops,
-                                      // or a bishop and knight for either side?
+       position.material_count[5])) {  
+                                       
     return false;
   }
   return true;
 }
 
 bool is_draw(const Position &position,
-             ThreadInfo &thread_info) { // Detects if the position is a draw.
+             ThreadInfo &thread_info) {  
 
   const uint64_t hash = position.zobrist_key;
   const int halfmoves = position.halfmoves;
   const int game_ply = thread_info.game_ply;
 
-  // EXTREME DEFENSIVE VALIDATION: Check for corrupted thread state
+   
   if (game_ply < 0 || game_ply > GameSize) {
-    return false; // Corrupted game state
+    return false;  
   }
 
-  // SAFE ARRAY ACCESS: Check game_hist array validity
+   
   if (!thread_info.game_hist.data()) {
-    return false; // Corrupted memory
+    return false;  
   }
 
-  // Validate king positions
+   
   int white_king = get_king_pos(position, Colors::White);
   int black_king = get_king_pos(position, Colors::Black);
   if (!is_valid_square(white_king) || !is_valid_square(black_king)) {
-    return false; // Invalid king positions
+    return false;  
   }
 
-  // Fifty-move rule (automatic draw once counter reaches 100 half-moves)
+   
   if (halfmoves >= 100) {
     return true;
   }
 
-  // Insufficient material detection
+   
   if (material_draw(position)) {
     return true;
   }
 
-  // Threefold repetition: only need to examine positions since the last
-  // irreversible move (captured by the half-move clock)
+   
   if (game_ply >= 2 && game_ply <= GameSize) {
     const int min_index = std::max(game_ply - halfmoves, 0);
     for (int i = game_ply - 2; i >= min_index && i < GameSize; i -= 2) {
-      // SAFE ARRAY ACCESS: Bounds check before accessing game_hist
+       
       if (i >= 0 && i < GameSize) {
         if (thread_info.game_hist[i].position_key == hash) {
           return true;
@@ -511,14 +503,14 @@ bool is_draw(const Position &position,
     }
   }
 
-  // Stalemate: side to move has no legal moves and is not in check
+   
   const int king_sq = get_king_pos(position, position.color);
   if (!is_valid_square(king_sq)) {
     return false;
   }
   if (!attacks_square(position, king_sq, position.color ^ 1)) {
-    // Use a more conservative approach to prevent stack overflow
-    // Instead of generating all legal moves, check if king has any safe squares
+     
+     
     uint64_t king_moves = KING_ATK_SAFE(king_sq) & ~position.colors_bb[position.color];
     bool has_safe_move = false;
     while (king_moves && !has_safe_move) {
@@ -528,12 +520,12 @@ bool is_draw(const Position &position,
       }
     }
     if (!has_safe_move) {
-      // King has no safe moves, check if any other piece can move
-      // Use limited move generation to prevent overflow
+       
+       
       std::array<Move, 32> limited_moves{};
       int move_count = 0;
       
-      // Generate only king moves first
+       
       uint64_t king_attacks = KING_ATK_SAFE(king_sq) & ~position.colors_bb[position.color];
       while (king_attacks && move_count < 32) {
         int to = pop_lsb(king_attacks);
@@ -542,13 +534,13 @@ bool is_draw(const Position &position,
         }
       }
       
-      // If no king moves, check one piece from each type
+       
       if (move_count == 0) {
         for (int pt = PieceTypes::Pawn; pt <= PieceTypes::Queen && move_count < 32; ++pt) {
           uint64_t pieces = position.pieces_bb[pt] & position.colors_bb[position.color];
           if (pieces) {
             int from = get_lsb(pieces);
-            // Generate limited attacks for this piece
+             
             uint64_t attacks = 0;
             if (pt == PieceTypes::Pawn) {
               attacks = PAWN_ATK_SAFE(position.color, from) & position.colors_bb[position.color ^ 1];
@@ -572,7 +564,7 @@ bool is_draw(const Position &position,
         }
       }
       
-      // Check if any of these limited moves are legal
+       
       bool has_legal_move = false;
       for (int i = 0; i < move_count && !has_legal_move; ++i) {
         if (is_legal(position, limited_moves[i])) {
@@ -581,7 +573,7 @@ bool is_draw(const Position &position,
       }
       
       if (!has_legal_move) {
-        return true; // Stalemate
+        return true;  
       }
     }
   }
@@ -591,32 +583,32 @@ bool is_draw(const Position &position,
 
 int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
             std::vector<TTBucket> &TT, int qdepth = 0) {
-  // EXTREME STACK PROTECTION: Much more aggressive limits
-  constexpr int MAX_QPLY = 32;    // Reduced from 64 to 32 (was 128)
-  constexpr int MAX_QDEPTH = 16;  // Reduced from 32 to 16 (was 128)
+   
+  constexpr int MAX_QPLY = 32;     
+  constexpr int MAX_QDEPTH = 16;   
 
   auto eval_now = [&](Position &pos) {
     return correct_eval(pos, thread_info, eval(pos, thread_info));
   };
 
-  // EARLY DEPTH CHECK: Return immediately if too deep
+   
   if (qdepth >= MAX_QDEPTH) {
     return eval_now(position);
   }
 
   int ply = thread_info.search_ply;
 
-  // MULTI-LAYER STACK PROTECTION: Multiple safety checks
+   
   if (ply >= MaxSearchDepth - 4 || ply >= MAX_QPLY) {
     return eval_now(position);
   }
 
-  // ADDITIONAL SAFETY: Check game ply bounds
+   
   if (thread_info.game_ply < 0 || thread_info.game_ply > GameSize) {
     return eval_now(position);
   }
 
-  // SAFE ARRAY ACCESS: Check game_hist validity
+   
   if (!thread_info.game_hist.data()) {
     return eval_now(position);
   }
@@ -645,11 +637,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
     if (tb_score != ScoreNone) return tb_score;
   }
 
-  // Defensive: clamp game_ply to a valid index before taking address into
-  // the game history array. Some crashes were caused by game_ply drifting
-  // outside [0, GameSize) under race conditions; this prevents an OOB
-  // dereference. This masks the root cause but avoids ASAN SEGVs while we
-  // gather further diagnostics.
+   
   int _hist_idx = thread_info.game_ply;
   if (_hist_idx < 0) _hist_idx = 0;
   if (_hist_idx >= GameSize) _hist_idx = GameSize - 1;
@@ -658,7 +646,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
   ++thread_info.nodes;
   if (ply > thread_info.seldepth) thread_info.seldepth = ply;
 
-  // EXTRA SAFETY CHECK: Prevent any further recursion if close to limits
+   
   if (ply >= MaxSearchDepth - 3 || ply >= MAX_QPLY - 2) {
     return eval_now(position);
   }
@@ -774,7 +762,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
       if (stand_pat + delta_margin < alpha) continue;
     }
 
-    // Stack allocation instead of heap for better performance
+     
     Position moved_position = position;
     make_move(moved_position, move);
     auto *nnue_before = thread_info.nnue_state.m_curr;
@@ -787,7 +775,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
                        (qdepth + 1 < MAX_QDEPTH);
 
     if (can_recurse) {
-      // SAFE SS_PUSH: Additional validation before calling ss_push
+       
       if (thread_info.game_ply >= 0 && thread_info.game_ply < GameSize &&
           thread_info.game_hist.data()) {
         ss_push(position, thread_info, move);
@@ -795,7 +783,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
                          qdepth + 1);
         ss_pop(thread_info);
       } else {
-        // Fallback: Don't recurse if state is corrupted
+         
         int leaf_eval = eval_now(moved_position);
         score = -leaf_eval;
         if (thread_info.nnue_state.m_curr != nnue_before) {
@@ -851,7 +839,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
 template <bool is_pv>
 int search(int alpha, int beta, int depth, bool cutnode, Position &position,
            ThreadInfo &thread_info,
-           std::vector<TTBucket> &TT) { // Performs an alpha-beta search.
+           std::vector<TTBucket> &TT) {  
 
   GameHistory *ss = &(thread_info.game_hist[thread_info.game_ply]);
 
@@ -868,11 +856,11 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   if (out_of_time(thread_info) || ply >= MaxSearchDepth - 1) {
-    // check for timeout
+     
     return correct_eval(position, thread_info, eval(position, thread_info));
   }
 
-  if (ply && is_draw(position, thread_info)) { // Draw detection
+  if (ply && is_draw(position, thread_info)) {  
     int draw_score = 1 - (thread_info.nodes.load() & 3);
 
     int material = material_eval(position);
@@ -884,24 +872,18 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
 
     return draw_score;
-    // We want to discourage draws at the root.
-    // ply 0 - make a move that makes the position a draw
-    // ply 1 - bonus to side, which is penalty to us
-
-    // alternatively
-    // ply 0 - we make forced move
-    // ply 1 - opponent makes draw move
-    // ply 2 - penalty to us*/
+     
+     
   }
 
-  // Enforce UCI MaxDepth: if reached max depth, do not search deeper
+   
   if (thread_info.max_depth > 0 && ply >= thread_info.max_depth) {
     return correct_eval(position, thread_info, eval(position, thread_info));
   }
 
   if (depth <= 0) {
     return qsearch(alpha, beta, position, thread_info,
-                   TT); // drop into qsearch if depth is too low.
+                   TT);  
   }
   ++thread_info.nodes;
 
@@ -917,8 +899,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   thread_info.excluded_move =
-      MoveNone; // If we currently are in singular search, this sets it so moves
-                // *after* it are not in singular search
+      MoveNone;  
+                 
   int score = ScoreNone;
 
   uint64_t hash = position.zobrist_key;
@@ -926,8 +908,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
   int mate_distance = -Mate - ply;
   if (mate_distance <
-      beta) // Mate distance pruning; if we're at depth 10 but we've already
-            // found a mate in 3, there's no point searching this.
+      beta)  
+             
   {
     beta = mate_distance;
     if (alpha >= beta) {
@@ -941,7 +923,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   int entry_type = EntryTypes::None, tt_static_eval = ScoreNone,
       tt_score = ScoreNone, tt_move = MoveNone;
 
-  if (tt_hit && !singular_search) { // TT probe
+  if (tt_hit && !singular_search) {  
     entry_type = entry.get_type();
     tt_static_eval = entry.static_eval;
     tt_score = score_from_tt(entry.score, ply);
@@ -949,9 +931,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   if (tt_score != ScoreNone && !is_pv && entry.depth >= depth) {
-    // If we get a useful score from the TT and it's
-    // searched to at least the same depth we would
-    // have searched, then we can return
+     
+     
     if ((entry_type == EntryTypes::Exact) ||
         (entry_type == EntryTypes::LBound && tt_score >= beta) ||
         (entry_type == EntryTypes::UBound && tt_score <= alpha)) {
@@ -962,8 +943,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   uint64_t in_check =
       attacks_square(position, get_king_pos(position, color), color ^ 1);
 
-  // We can't do any eval-based pruning if in check.
-
+   
   int32_t static_eval;
   int32_t raw_eval;
 
@@ -991,9 +971,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
   bool improving = false;
 
-  // Improving: Is our eval better than it was last turn? If so we can prune
-  // less in certain circumstances (or prune more if it's not)
-
+   
   if (ply > 1 && thread_info.game_ply >= 2 && !in_check &&
       static_eval > (ss - 2)->static_eval) {
     improving = true;
@@ -1009,23 +987,21 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   if (!is_pv && !in_check && !singular_search) {
-    // Selective mid-node Syzygy probing (Stockfish-inspired): only at sufficient depth and low piece count
+     
     if (thread_info.use_syzygy && tb_initialized && depth >= thread_info.syzygy_probe_depth) {
       int piece_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
       int largest = TB_LARGEST ? (int)TB_LARGEST : 7;
       if (piece_count <= std::min(thread_info.syzygy_probe_limit, largest) && !in_check && !is_pv) {
         int tb_score = probe_wdl_tb(position, thread_info);
         if (tb_score != ScoreNone) {
-          // Stockfish-like: only use as bound cutoffs, do not overwrite static_eval unless decisive cutoff.
-          if (tb_score >= beta) return tb_score; // Lowerbound win
-          if (tb_score <= alpha) return tb_score; // Upperbound draw/loss
+           
+          if (tb_score >= beta) return tb_score;  
+          if (tb_score <= alpha) return tb_score;  
         }
       }
     }
 
-    // Reverse Futility Pruning (RFP): If our position is way better than beta,
-    // we're likely good to stop searching the node.
-
+     
     if (depth <= RFPMaxDepth &&
         static_eval - RFPMargin * (depth - improving) >= beta) {
       return (static_eval + beta) / 2;
@@ -1034,16 +1010,14 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         has_non_pawn_material(position, color) &&
         thread_info.game_ply > 0 && (ss - 1)->played_move != MoveNone) {
 
-      // Null Move Pruning (NMP): If we can give our opponent a free move and
-      // still beat beta on a reduced search, we can prune the node.
-
+       
       Position temp_pos = position;
-      // Null move is always legal (special case)
+       
       make_move(temp_pos, MoveNone);
 
-      // Defensive validation for ss_push
+       
       if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
-        return ScoreNone; // Safety fallback
+        return ScoreNone;  
       }
       ss_push(position, thread_info, MoveNone);
 
@@ -1053,7 +1027,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
                              thread_info, TT);
 
       thread_info.search_ply--, thread_info.game_ply--;
-      // we don't call ss_pop because the nnue state was never pushed
+       
 
       if (score >= beta) {
         if (score > MateScore) {
@@ -1065,8 +1039,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   if ((is_pv || cutnode) && tt_move == MoveNone && depth > IIRMinDepth) {
-    // Internal Iterative Reduction: If we are in a PV node and have no TT move,
-    // reduce the depth.
+     
+     
     depth--;
   }
 
@@ -1090,15 +1064,15 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         continue;
       }
 
-      // Stack allocation instead of heap for better performance
+       
       Position moved_position = position;
-      // SAFETY: Validate move before making it (is_legal already checked above)
+       
       make_move(moved_position, move);
       update_nnue_state(thread_info, move, position, moved_position);
       
-      // Defensive validation for ss_push
+       
       if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
-        return ScoreNone; // Safety fallback
+        return ScoreNone;  
       }
       ss_push(position, thread_info, move);
 
@@ -1127,57 +1101,54 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   MovePicker picker;
   init_picker(picker, position, -107, in_check, ss);
 
-  int best_score = ScoreNone, moves_played = 0; // Generate and score moves
+  int best_score = ScoreNone, moves_played = 0;  
   bool is_capture = false, skip = false;
   
-  // Material sacrifice analysis (SEE-based).
-  // If sacrifice_lookahead > 0, evaluate potential sacrifices. Range is now
-  // 0..1: 0 disables the feature, 1 enables a single-ply lookahead.
-  // Behavior: LookAhead = 1 means analysis at root (one-ply horizon); 0 = off.
+   
   if (thread_info.sacrifice_lookahead > 0 && thread_info.search_ply < thread_info.sacrifice_lookahead && !in_check) {
     std::array<Move, ListSize> moves;
     uint64_t checkers_local = attacks_square(position, get_king_pos(position, color), color ^ 1);
     int nmoves_local = movegen(position, moves.data(), checkers_local, Generate::GenAll);
-  // Static lookahead cap: clamp to 0..1
+   
   int lookahead_cap = std::clamp(thread_info.sacrifice_lookahead, 0, 1);
 
     for (int i = 0; i < nmoves_local; i++) {
       Move m = moves[i];
       if (!is_legal(position, m)) continue;
 
-      // SEE filtresi: Kayba açık / şüpheli değişimler (SEE başarısız) veya doğrudan capture ise değerlendir
+       
       bool isCapture = is_cap(position, m);
-      bool losing_exchange = !SEE(position, m, 0); // 0 eşiği: eşit ya da kârlı değilse potansiyel feda
+      bool losing_exchange = !SEE(position, m, 0);  
       if (!isCapture && !losing_exchange) continue;
 
       Position test_position = position;
-      // SAFETY: Already checked is_legal above in loop
+       
       make_move(test_position, m);
 
       int sacrifice_score = analyze_sacrifice(test_position, thread_info, lookahead_cap, 0, position.color);
-      if (sacrifice_score <= 0) continue; // sadece pozitif potansiyel
+      if (sacrifice_score <= 0) continue;  
 
-      // Derinlik uzatması: agresifliğe göre 1..3 ply
+       
       int sac_extension = 1 + (thread_info.sacrifice_lookahead_aggressiveness >= 130 ? 2 : (thread_info.sacrifice_lookahead_aggressiveness >= 90 ? 1 : 0));
       sac_extension = std::clamp(sac_extension, 1, 3);
 
-      // Stack allocation instead of heap for better performance
+       
       Position moved_position = position;
-      // SAFETY: Already validated with is_legal check above
+       
       make_move(moved_position, m);
       update_nnue_state(thread_info, m, position, moved_position);
       
-      // Defensive validation for ss_push
+       
       if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
-        return ScoreNone; // Safety fallback
+        return ScoreNone;  
       }
       ss_push(position, thread_info, m);
 
-      // Önce hızlı null pencere test (derinlik-1)
+       
       int probe_score = -search<false>(-alpha - 1, -alpha, std::max(1, depth - 1), false, moved_position, thread_info, TT);
       int score;
       if (probe_score > alpha && abs(probe_score) < MateScore) {
-        // Geniş pencere yerine daha derin tam arama (derinlik + uzatma)
+         
         int extended_depth = std::min(depth + sac_extension, 126);
         score = -search<true>(-beta, -alpha, extended_depth, false, moved_position, thread_info, TT);
       } else {
@@ -1188,7 +1159,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       thread_info.phase = phase;
 
       if (abs(score) < MateScore && score > alpha) {
-        // Dinamik bonus (oyun fazına göre) + agresiflik çarpanı
+         
         float phase_bonus = 0.0f;
         int move_number_local = (thread_info.game_ply / 2) + 1;
         if (move_number_local < 10) phase_bonus = thread_info.opening_aggressiveness * 15.0f;
@@ -1200,12 +1171,12 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         int bonus = static_cast<int>(phase_bonus * aggr_factor_local);
         score += bonus;
 
-        // HistoryScores güncelle: küçük pozitif takviye (sacrifice_score ölçekli)
+         
         int piece_from = position.board[extract_from(m)];
         int to_sq = extract_to(m);
-        int hist_bonus = std::clamp(16 + sacrifice_score / 8, 8, 128); // sınırlı güç
+        int hist_bonus = std::clamp(16 + sacrifice_score / 8, 8, 128);  
         if (thread_info.attack_mode) {
-          hist_bonus = hist_bonus * 6 / 5 + 6; // %20 güçlendir + küçük ek
+          hist_bonus = hist_bonus * 6 / 5 + 6;  
           hist_bonus = std::min(hist_bonus, 192);
         }
         update_history(thread_info.HistoryScores[piece_from][to_sq], hist_bonus);
@@ -1256,20 +1227,16 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     is_capture = is_cap(position, move);
     if (!is_capture && !is_pv && best_score > -MateScore) {
 
-      // Late Move Pruning (LMP): If we've searched enough moves, we can skip
-      // the rest.
-
+       
       if (depth < LMPDepth &&
           moves_played >= LMPBase + depth * depth / (2 - improving)) {
         skip = true;
       }
 
-      // Futility Pruning (FP): If we're far worse than alpha and our move isn't
-      // a good capture, we can skip the rest.
-
+       
       if (!in_check && depth < FPDepth && picker.stage > Stages::Captures) {
         int fp_margin = FPMargin1 + FPMargin2 * depth;
-        if (thread_info.attack_mode) fp_margin += 60; // saldırıda daha fazla genişlet
+        if (thread_info.attack_mode) fp_margin += 60;  
         if (static_eval + fp_margin < alpha) {
         skip = true;
         }
@@ -1286,17 +1253,15 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
           is_capture ? SeePruningQuietMargin : (depth * SeePruningNoisyMargin);
 
       if (!SEE(position, move, depth * margin)) {
-        // SEE pruning: if we are hanging material, prune under certain
-        // conditions.
+         
+         
         continue;
       }
     }
 
     int extension = 0;
 
-    // Singular Extensions (SE): If a search finds that the TT move is way
-    // better than all other moves, extend it under certain conditions.
-
+     
     if (!root && ply < thread_info.current_iter * 2) {
       if (!singular_search && depth >= SEDepth && move == tt_move &&
           abs(entry.score) < MateScore && entry.depth >= depth - 3 &&
@@ -1311,15 +1276,14 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
           if (!is_pv && sScore + SEDoubleExtMargin < sBeta &&
               ply < thread_info.current_iter) {
 
-            // In some cases we can even double extend
+             
             extension = 2 + (!is_capture && sScore < sBeta - 125);
           } else {
             extension = 1;
           }
         } else if (sBeta >= beta) {
-          // Multicut: If there was another move that beat beta, it's a sign
-          // that we'll probably beat beta with a full search too.
-
+           
+           
           return sBeta;
         } else if (cutnode) {
           extension = -1;
@@ -1327,44 +1291,38 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       }
     }
 
-    // Stack allocation instead of heap for better performance
+     
     Position moved_position = position;
     make_move(moved_position, move);
 
     update_nnue_state(thread_info, move, position, moved_position);
 
-    // Defensive validation for ss_push
+     
     if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
-      return best_score; // Safety fallback
+      return best_score;  
     }
     ss_push(position, thread_info, move);
 
     bool full_search = false;
     int newdepth = std::min(depth - 1 + extension, 126);
 
-    // Late Move Reductions (LMR): Moves ordered later in search and at high
-    // depths can be searched to a lesser depth than normal. If the reduced
-    // search beats alpha, we'll have to search again, but most moves don't,
-    // making this technique more than worth it.
-    // If that beats alpha, we search at normal depth with null window
-    // If that also beats alpha, we search at normal depth with full window.
-
+     
     if (depth >= LMRMinDepth && moves_played > is_pv) {
       int R = LMRTable[depth][moves_played];
       if (is_capture) {
-        // Captures get LMRd less because they're the most likely moves to beat
-        // alpha/beta
+         
+         
         R /= 2;
       } else {
         R -= hist_score / 10000;
       }
 
-      // Increase reduction if not in pv
+       
       R -= is_pv;
 
       R -= (tt_hit && entry.depth >= depth);
 
-      // Increase reduction if not improving
+       
       R += !improving;
 
       R += cutnode;
@@ -1372,15 +1330,14 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       R -= (attacks_square(moved_position, get_king_pos(position, color ^ 1), color) != 0);
 
 
-      // Attack mode'da daha sığ azalt: agresiflik arttırma
       if (thread_info.attack_mode && R > 0) {
         R = std::max(0, R - 1);
       }
 
-      // Clamp reduction so we don't immediately go into qsearch
+       
       R = std::clamp(R, 0, newdepth - 1);
 
-      // Reduced search, reduced window
+       
       score = -search<false>(-alpha - 1, -alpha, newdepth - R, true,
                              moved_position, thread_info, TT);
       if (score > alpha) {
@@ -1392,12 +1349,12 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       full_search = moves_played || !is_pv;
     }
     if (full_search) {
-      // Full search, null window
+       
       score = -search<false>(-alpha - 1, -alpha, newdepth, !cutnode,
                              moved_position, thread_info, TT);
     }
     if ((score > alpha || !moves_played) && is_pv) {
-      // Full search, full window
+       
       score = -search<true>(-beta, -alpha, newdepth, false, moved_position,
                             thread_info, TT);
     }
@@ -1406,7 +1363,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     thread_info.phase = phase;
 
     if (thread_data.stop || thread_info.datagen_stop) {
-      // return if we ran out of time for search
+       
       return best_score;
     }
 
@@ -1463,8 +1420,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     int bonus = std::min((int)HistBonus * (depth - 1 + (best_score > beta + 125)), (int)HistMax);
 
-    // Update history scores and the killer move.
-
+     
     if (is_capture) {
 
       update_history(thread_info.CapHistScores[piece][sq], bonus);
@@ -1493,15 +1449,13 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
       for (int i = 0; i < num_quiets; i++) {
 
-        // Every quiet move that *didn't* raise beta gets its history score
-        // reduced
-
+         
         Move move = quiets[i];
 
         int piece_m = position.board[extract_from(move)],
             sq_m = extract_to(move);
 
-        // Use centralized helper for failed quiets (negative bonus)
+         
         update_continuation_histories(
             thread_info, piece_m, sq_m, -bonus,
             their_last, their_piece,
@@ -1509,7 +1463,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
             ply4_last, ply4_piece);
       }
 
-      // Use centralized helper to update all continuation histories
+       
       update_continuation_histories(
           thread_info, piece, sq, bonus,
           their_last, their_piece,
@@ -1528,7 +1482,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
   }
 
-  if (best_score == ScoreNone) { // handle no legal moves (stalemate/checkmate)
+  if (best_score == ScoreNone) {  
     return singular_search ? alpha : in_check ? (Mate + ply) : 0;
   }
 
@@ -1557,7 +1511,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         bonus);
   }
 
-  // Add the search results to the TT, accounting for mate scores
+   
   if (!singular_search) {
     insert_entry(entry, hash, depth, best_move, raw_eval,
                  score_to_tt(best_score, ply), entry_type,
@@ -1582,8 +1536,7 @@ void print_pv(Position &position, ThreadInfo &thread_info) {
 
     Move best_move = thread_info.pv[indx];
 
-    // Verify that the pv move is possible and legal by generating moves
-
+     
     MoveInfo moves;
   int movelen = legal_movegen(temp_pos, moves.moves.data());
 
@@ -1615,16 +1568,16 @@ void print_pv(Position &position, ThreadInfo &thread_info) {
 
 void iterative_deepen(
     Position &position, ThreadInfo &thread_info,
-    std::vector<TTBucket> &TT) { // Performs an iterative deepening search.
+    std::vector<TTBucket> &TT) {  
 
   thread_info.original_opt = thread_info.opt_time;
   thread_info.datagen_stop = false;
   
-  // Determine the initial phase based on material and game progress
+   
   int material = total_mat(position);
   int move_number = (thread_info.game_ply / 2) + 1;
   
-  // Phase detection logic
+   
   if (move_number < 15 && material > 4500) {
     thread_info.phase = PhaseTypes::Opening;
   }
@@ -1642,19 +1595,19 @@ void iterative_deepen(
   calculate(position);
   thread_info.nodes.store(0);
   thread_info.time_checks = 0;
-  thread_info.search_ply = 0; // reset all relevant thread_info
+  thread_info.search_ply = 0;  
   thread_info.excluded_move = MoveNone;
   thread_info.best_moves = {0};
   thread_info.best_scores = {ScoreNone, ScoreNone, ScoreNone, ScoreNone, ScoreNone};
   thread_info.KillerMoves.fill(MoveNone);
-  // Root Syzygy DTZ/WDL ranking integration
+   
   bool tb_decisive_shortcut = false;
   if (thread_info.use_syzygy && tb_initialized) {
-    // Skip probing if any castling rights remain (tablebases defined only for no castling rights)
+     
     bool any_castling = false;
     for (int c=0;c<2;c++) for (int s=0;s<2;s++) if (position.castling_squares[c][s] != SquareNone) any_castling = true;
     if (any_castling) goto skip_tb_root;
-    // Count pieces quickly
+     
     int piece_count = 0; for (int i=0;i<64;i++) if (position.board[i]) piece_count++;
     if (piece_count && TB_LARGEST && piece_count <= (int)TB_LARGEST) {
       uint64_t white=0, black=0, kings=0, queens=0, rooks=0, bishops=0, knights=0, pawns=0;
@@ -1665,9 +1618,9 @@ void iterative_deepen(
       }
       unsigned ep = position.ep_square<64 ? (position.ep_square%8)+1 : 0;
   unsigned rule50 = thread_info.syzygy_50_move_rule ? position.halfmoves : 0;
-      unsigned castling = 0; // TB requires 0 for castling in probe functions used here
+      unsigned castling = 0;  
       TbRootMoves tbMoves{}; int ok = 0;
-      // Try DTZ first
+       
       ok = tb_probe_root_dtz(kings|(queens|rooks|bishops|knights|pawns)&white,
                              kings|(queens|rooks|bishops|knights|pawns)&black,
                              kings, queens, rooks, bishops, knights, pawns,
@@ -1681,7 +1634,7 @@ void iterative_deepen(
                                true, &tbMoves);
       }
       if (ok) {
-        // Convert TbRootMoves into root_moves ordering (will rebuild later root_moves vector)
+         
         std::vector<std::pair<Move,int>> tbOrdered;
         for (unsigned i=0; i<tbMoves.size; ++i) {
           TbMove tm = tbMoves.moves[i].move; int from = TB_MOVE_FROM(tm); int to = TB_MOVE_TO(tm); int promo = TB_MOVE_PROMOTES(tm);
@@ -1698,29 +1651,29 @@ void iterative_deepen(
           }
           tbOrdered.emplace_back(m, mapped);
         }
-        // Heuristic: if any winning WDL present and none losing for side to move, can shortcut.
+         
         bool hasWin=false, hasLoss=false; for (auto &p: tbOrdered){ if (p.second > MateScore-1000) hasWin=true; if (p.second < -MateScore+1000) hasLoss=true; }
         if (hasWin && !hasLoss && !thread_info.infinite_search) {
-          // choose first winning move
+           
             thread_info.best_moves[0] = tbOrdered[0].first; thread_info.ponder_move = MoveNone; tb_decisive_shortcut = true;
-            // verbose TB shortcut suppressed
+             
             {
               std::string bm = internal_to_uci(position, tbOrdered[0].first);
               safe_printf("bestmove %s\n", bm.c_str());
             }
             return;
         }
-        // Rebuild root_moves with TB ordering at front
+         
         thread_info.root_moves.clear();
         for (auto &p: tbOrdered) thread_info.root_moves.push_back({p.first,0});
-        // If not decisive, fall through to search (ordering improved)
-  // verbose ordering info suppressed
+         
+   
       }
     }
   }
 skip_tb_root: ;
 
-  // Prepare root moves
+   
   thread_info.root_moves.reserve(ListSize);
   thread_info.root_moves.clear();
   {
@@ -1739,19 +1692,19 @@ skip_tb_root: ;
   int last_completed_depth = 0;
 
   auto update_phase = [&](ThreadInfo &ti, Position &pos) {
-    // Sadece kök thread (id 0) faz kararını verir
+     
     if (ti.thread_id != 0) return;
 
     int total_material = total_mat(pos);
-    int root_eval = ti.best_scores[0]; // cp
+    int root_eval = ti.best_scores[0];  
     ti.prev_root_eval = ti.last_root_eval;
     ti.last_root_eval = root_eval;
     ti.root_completed_depth = last_completed_depth;
 
-    // Attack mode histerezis (sacrifice replacement)
+     
     if (!ti.attack_mode) {
       if (last_completed_depth >= 8 && root_eval >= ti.sacrifice_enter_cp && total_material >= 3200) {
-        // İki ardışık şart gerek: geçmişte de üstte miydi?
+         
         if (ti.prev_root_eval >= ti.sacrifice_enter_cp) {
           ti.attack_mode = true;
         }
@@ -1763,64 +1716,60 @@ skip_tb_root: ;
       }
     }
 
-    // Hedef faz belirleme
-    uint8_t desired_phase = ti.phase; // default aynı kalsın
+     
+    uint8_t desired_phase = ti.phase;  
 
-    // Opening'ten çıkış: ply + gelişmiş hafif taş kriterleri (basit: game_ply >= opening_min_ply)
+     
     if (ti.phase == PhaseTypes::Opening && ti.game_ply >= ti.opening_min_ply) {
       desired_phase = PhaseTypes::MiddleGame;
     }
 
-    // Endgame geri dönüşleri (tamponlar)
+     
     if (ti.phase == PhaseTypes::Endgame) {
       if (total_material > ti.end_recover_material && total_material > ti.endgame_material) {
-        desired_phase = PhaseTypes::LateMiddleGame; // bir seviye yukarı
+        desired_phase = PhaseTypes::LateMiddleGame;  
       }
     }
-    // LateMiddleGame geri Middle
+     
     else if (ti.phase == PhaseTypes::LateMiddleGame) {
       if (total_material > ti.mid_recover_material) {
         desired_phase = PhaseTypes::MiddleGame;
       }
     }
 
-    // İleri geçişler
+     
     if (total_material <= ti.endgame_material) {
       desired_phase = PhaseTypes::Endgame;
     } else if (total_material <= ti.late_phase_material) {
-      // Endgame değilse LateMiddleGame'e
+       
       if (desired_phase != PhaseTypes::Endgame)
         desired_phase = PhaseTypes::LateMiddleGame;
     } else {
-      // Yüksek materyalde Opening/MG seçimi
+       
       if (ti.game_ply < ti.opening_min_ply)
         desired_phase = PhaseTypes::Opening;
       else
         desired_phase = PhaseTypes::MiddleGame;
     }
 
-    // Attack mode aktifse, ayrı bir Sacrifice fazına map etme: sadece farklı ağ gereksinimi varsa
-    // Burada Sacrifice fazını fiziksel ağ değiştirmeyecek şekilde devre dışı bırakıyoruz (opsiyonel)
-    // İstenirse: desired_phase = PhaseTypes::Sacrifice; mantığı eklenebilir.
-
-    // Histerezis doğrulama
+     
     if (desired_phase != ti.phase) {
       ti.phase_hit_counts[desired_phase]++;
-      // diğer faz aday sayaçlarını sıfırla (sadece hedefi arttır)
+       
       for (size_t i = 0; i < ti.phase_hit_counts.size(); ++i) {
         if (i != desired_phase) ti.phase_hit_counts[i] = 0;
       }
       if (ti.phase_hit_counts[desired_phase] >= ti.phase_confirm_hits) {
         uint8_t old_phase = ti.phase;
         ti.phase = desired_phase;
-        // Fiziksel ağ gerçekten değişiyor mu kontrolü
+         
         auto physical_net = [](uint8_t ph) {
           switch (ph) {
             case PhaseTypes::Opening:
-            case PhaseTypes::MiddleGame: return 0; // Net A
-            case PhaseTypes::LateMiddleGame: return 1; // Net B
-            case PhaseTypes::Endgame: return 2; // Net C
-            case PhaseTypes::Sacrifice: return 2; // Sacrifice -> Endgame ağına bağladık
+            case PhaseTypes::MiddleGame: return 0;  
+            case PhaseTypes::LateMiddleGame: return 1;  
+            case PhaseTypes::Endgame: return 2;  
+            case PhaseTypes::Sacrifice: return 2;  
             default: return 0;
           }
         };
@@ -1829,7 +1778,7 @@ skip_tb_root: ;
         }
       }
     } else {
-      // Faz değişmedi, sayaç sıfırla
+       
       for (auto &c : ti.phase_hit_counts) c = 0;
     }
   };
@@ -1859,10 +1808,7 @@ skip_tb_root: ;
       score =
           search<true>(alpha, beta, depth, false, position, thread_info, TT);
 
-      // Aspiration Windows: We search the position with a narrow window around
-      // the last search score in order to get cutoffs faster. If our search
-      // lands outside the bounds, expand them and try again.
-
+       
       while (score <= alpha || score >= beta || thread_data.stop ||
              thread_info.datagen_stop) {
 
@@ -1971,8 +1917,7 @@ skip_tb_root: ;
           nps = wezly;
         }
 
-        if (!thread_info.doing_datagen /*&&
-            !(thread_info.is_human && thread_info.multipv_index)*/) {
+        if (!thread_info.doing_datagen  ) {
           safe_printf("info multipv %i depth %i seldepth %i score %s nodes %" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv ",
                  thread_info.multipv_index + 1, depth, thread_info.seldepth,
                  eval_string.c_str(), nodes, nps, search_time);
@@ -2011,7 +1956,7 @@ skip_tb_root: ;
               bm_stability);
         }
 
-  // Eski tek-seferlik derinlik 6 faz geçişleri kaldırıldı
+   
       }
 
       if (thread_data.stop || thread_info.datagen_stop) {
@@ -2030,11 +1975,11 @@ skip_tb_root: ;
     last_completed_depth = depth;
   }
 
-  // Yeni faz güncelleme sistemi
+   
   update_phase(thread_info, position);
 
 finish:
-  // wait for all threads to finish searching
+   
   if (thread_info.thread_id == 0 && !thread_info.doing_datagen) {
     thread_data.stop = true;
   }
@@ -2074,24 +2019,24 @@ finish:
     return MoveNone;
   };
 
-  // Enhanced ponder move calculation - always try to set ponder move from PV
+   
   if (thread_info.thread_id == 0) {
-    // Try to get ponder move from principal variation
+     
     if (thread_info.pv[0] != MoveNone && thread_info.pv[1] != MoveNone) {
       thread_info.ponder_move = thread_info.pv[1];
     } else {
-      // Fallback: try to predict opponent's likely response
+       
         auto temp_pos_uptr2 = std::make_unique<Position>(position);
         Position &temp_pos = *temp_pos_uptr2;
       if (thread_info.best_moves[0] != MoveNone) {
         make_move(temp_pos, thread_info.best_moves[0]);
         
-        // Simple response prediction - choose most natural reply
+         
         std::array<Move, ListSize> responses;
   int num_responses = legal_movegen(temp_pos, responses.data());
         
         if (num_responses > 0) {
-          // Prefer captures or center control moves as ponder candidates
+           
           Move best_response = responses[0];
           int best_score = -1000;
           
@@ -2103,7 +2048,7 @@ finish:
             int file = to_square % 8;
             int rank = to_square / 8;
             
-            // Prefer center squares
+             
             if (file >= 3 && file <= 4 && rank >= 3 && rank <= 4) score += 50;
             
             if (score > best_score) {
@@ -2119,7 +2064,7 @@ finish:
       }
     }
   }
-  // Syzygy tablebase override: if enabled, probe TB at root and override bestmove
+   
   if (thread_info.thread_id == 0 && thread_info.use_syzygy) {
     auto &pos = position;
     unsigned castling = 0;
@@ -2148,7 +2093,7 @@ finish:
       }
       Move best = promo ? pack_move_promo(from, to, promo) : pack_move(from, to, MoveTypes::Normal);
       
-      // Add info string for tablebase hit like opening book
+       
       unsigned wdl = TB_GET_WDL(tb_res);
       const char* wdl_str = "";
       switch (wdl) {
@@ -2178,26 +2123,24 @@ finish:
       return;
     }
   }
-  // Apply variety-based move selection BEFORE bestmove output
-  // Updated: now also works when MultiPV == 1 by sampling an alternative move
-  // in the root PV set (and optionally near-best quiets) if they are within
-  // a variety-dependent centipawn window.
+   
+   
   if (thread_info.thread_id == 0 && !thread_info.doing_datagen && thread_info.variety > 0) {
-    // Implement variety-based move selection
-    Move selected_move = thread_info.best_moves[0]; // Default to best move
+     
+    Move selected_move = thread_info.best_moves[0];  
     int best_score = thread_info.best_scores[0];
     
-    // Determine how many alternative PV lines (if any) to consider.
+     
     int variety_lines = real_multi_pv > 1 ? std::min<int>(real_multi_pv, 1 + (static_cast<int>(thread_info.variety) / 50)) : 1;
     
-    // Core threshold (centipawns) allowed below the top move. Scales down as variety increases.
-    int base_threshold = (VARIETY_BASE_THRESHOLD - static_cast<int>(thread_info.variety)) * VARIETY_MULTIPLIER; // 300 cp (var=0) -> 0 cp (var=150)
+     
+    int base_threshold = (VARIETY_BASE_THRESHOLD - static_cast<int>(thread_info.variety)) * VARIETY_MULTIPLIER;  
     if (base_threshold < 0) base_threshold = 0;
 
     if (variety_lines > 1) {
-      // Calculate a threshold based on variety setting and best score
+       
       int threshold = base_threshold;
-      // Local promo adjustments to avoid mutating true search scores (important for later weakening logic)
+       
       int promo_adjust[32]; std::fill(std::begin(promo_adjust), std::end(promo_adjust), 0);
       for (int i = 0; i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
         Move move = thread_info.best_moves[i];
@@ -2227,26 +2170,23 @@ finish:
           if (promo_bonus > 0) {
             int score_diff = best_score - thread_info.best_scores[i];
             if (score_diff <= threshold + promo_bonus) {
-              promo_adjust[i] = promo_bonus; // record adjustment
+              promo_adjust[i] = promo_bonus;  
             }
           }
         }
       }
-      // Apply adjustments on-the-fly in later candidate selection (below) by referencing promo_adjust
-      // Replace stored scores temporarily for candidate evaluation
+       
+       
       for (int i = 0; i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
         if (promo_adjust[i]) thread_info.best_scores[i] += promo_adjust[i];
       }
-      // NOTE: We revert adjustments after selection to keep original scores for weakening margin.
-      // PV-based candidate selection handled below (shared logic).
-      // After selection swapping (if any), restore original scores.
+       
+       
     } else {
-      // MultiPV == 1 durumunda: near-best alternatif quiet hamleleri üret ve değerlendir.
-      // Amaç: oyun gidişatını çeşitlendirmek (açık oyun / orta oyun motif çeşitliliği) için
-      // en iyi hamleden çok uzak olmayan seçenekleri Variety oranında seçebilmek.
-      // Guard: yalnızca yeterli derinlik ve stabil skor olduğunda uygula.
+       
+       
       if (thread_info.seldepth > 8 && std::abs(best_score) < 1200) {
-        // Generate fresh legal moves (avoid captures that drastically change eval unless close)
+         
         std::array<Move, ListSize> legal_moves;
         int num_legal = legal_movegen(position, legal_moves.data());
         struct AltCand { Move m; int score; int diff; };
@@ -2254,31 +2194,31 @@ finish:
         for (int i = 0; i < num_legal; ++i) {
           Move m = legal_moves[i];
           if (m == thread_info.best_moves[0]) continue;
-          // Light static filtering: deprioritize big material swings (captures) unless variety yüksek
+           
           bool cap = is_cap(position, m);
-          if (cap && thread_info.variety < 40) continue; // düşük variety ile riskli capture'ı atla
-          // Quick static: reuse history scores as approximation if available
+          if (cap && thread_info.variety < 40) continue;  
+           
           int piece = position.board[extract_from(m)];
           int to = extract_to(m);
           int hist_score = thread_info.HistoryScores[piece][to];
-          // Diff tahmini: history skorunu normalize edip best_score ile bir pencere karşılaştırması yap
-          // Basit: diff = (best_history_proxy - hist_score)/k gibi; burada k ~ 256 varsayalım.
+           
+           
           int diff = (thread_info.best_scores[0] / 4) - (hist_score / 4);
-          // Variety penceresi: base_threshold + küçük bonus (variety * 3 cp)
+           
           int effective_window = base_threshold + (static_cast<int>(thread_info.variety) * 3) / 2;
           if (diff <= effective_window) {
             alts.push_back({m, hist_score, diff});
           }
         }
         if (!alts.empty()) {
-          // Ağırlıklandırma: daha düşük diff ve yüksek hist_score avantajlı.
+           
           uint64_t total_w = 0;
             std::vector<uint64_t> prefix(alts.size());
           for (size_t i = 0; i < alts.size(); ++i) {
             int quality = std::max(1, 1000 - std::max(0, alts[i].diff));
-            // Variety büyüdükçe kalite farkını düzleştirmek: weight = quality^(f)
-            // f ~ (100 - variety/2)/100 => yüksek variety -> daha düz dağılım.
-            double flatten = (100.0 - (thread_info.variety / 2.0)) / 100.0; // 1.0 .. 0.25
+             
+             
+            double flatten = (100.0 - (thread_info.variety / 2.0)) / 100.0;  
             double w = std::pow((double)quality, std::max(0.25, flatten));
             uint64_t iw = (uint64_t)std::max<double>(1.0, w);
             total_w += iw;
@@ -2294,9 +2234,9 @@ finish:
       }
     }
 
-    // PV (MultiPV>1) adaylarını ve (MultiPV==1) alternatiflerini ortak finalize etme:
+     
     if (real_multi_pv > 1) {
-      // Consider selecting from top PV moves based on variety factor
+       
       std::vector<int> candidates;
       int threshold = base_threshold;
       for (int i = 0; i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
@@ -2314,9 +2254,9 @@ finish:
       }
     }
     
-    // Ensure the selected move becomes the top move
+     
   if (selected_move != thread_info.best_moves[0]) {
-      // Find the index of the selected move
+       
       int selected_idx = 0;
       for (int i = 0; i < real_multi_pv; i++) {
         if (thread_info.best_moves[i] == selected_move) {
@@ -2325,43 +2265,42 @@ finish:
         }
       }
       
-      // Swap the selected move to the top position
+       
       std::swap(thread_info.best_moves[0], thread_info.best_moves[selected_idx]);
       std::swap(thread_info.best_scores[0], thread_info.best_scores[selected_idx]);
     }
-  // Revert any temporary promo adjustments (only first variety_lines entries possibly adjusted)
-  // Ensure we don't keep inflated scores for human weakening margin.
-  // We cannot reconstruct without original snapshot; simpler: clamp top score not to exceed true_top later in weakening.
+   
+   
   }
 
-  // Human / LimitStrength weakening (Stockfish-like probabilistic selection)
+   
   if (thread_info.thread_id == 0 && thread_info.is_human && !thread_info.doing_datagen) {
-    // Skip weakening during active pondering to preserve prediction accuracy; apply after ponderhit or normal search.
+     
     bool can_weaken = !(thread_info.pondering && !thread_info.ponder_hit);
     if (can_weaken && thread_info.best_moves[0] != MoveNone) {
-      // Variety aşaması best_moves[0]'ı değiştirmiş olabilir; gerçek en yüksek skoru yeniden bul.
+       
       int true_top = thread_info.best_scores[0];
       for (int i = 1; i < 16 && thread_info.best_moves[i] != MoveNone; i++)
         if (thread_info.best_scores[i] > true_top) true_top = thread_info.best_scores[i];
 
       int base_margin = std::max(0, thread_info.human_value_margin);
-      // Variety yükseldikçe (0..150) margin'i attenüe et (çifte rastgeleliği frenler).
+       
       int v = std::clamp<int>(thread_info.variety, 0, 150);
-      double v_norm = v / 150.0;               // 0..1
-      double attenuation = 1.0 - 0.55 * v_norm; // variety=150 -> ~%45 margin kalan
-      if (attenuation < 0.35) attenuation = 0.35; // taban güvenliği
+      double v_norm = v / 150.0;                
+      double attenuation = 1.0 - 0.55 * v_norm;  
+      if (attenuation < 0.35) attenuation = 0.35;  
       int margin = (int)std::lround(base_margin * attenuation);
 
-      // Düşük Elo'larda aşırı çeşitliliği frenlemek için opsiyonel yumuşatma (ör: Elo <=1600 variety efektif düşer)
+       
       if (thread_info.human_elo <= 1600) {
-        double elo_scale = (thread_info.human_elo - HUMAN_ELO_MIN) / static_cast<double>(HUMAN_ELO_RANGE); // 500->0, 1600->~1
+        double elo_scale = (thread_info.human_elo - HUMAN_ELO_MIN) / static_cast<double>(HUMAN_ELO_RANGE);  
         if (elo_scale < 0) elo_scale = 0; if (elo_scale > 1) elo_scale = 1;
         margin = (int)std::lround(margin * (0.75 + 0.25 * elo_scale));
       }
 
-      if (margin <= 0) margin = 1; // en azından minimal pencere
+      if (margin <= 0) margin = 1;  
 
-      // Aday indeksleri topla (true_top referans alınır)
+       
       std::vector<int> cand;
       cand.reserve(16);
       for (int i = 0; i < 16 && thread_info.best_moves[i] != MoveNone; i++) {
@@ -2369,7 +2308,7 @@ finish:
         if (diff >= 0 && diff <= margin) cand.push_back(i);
       }
       if (cand.size() > 1) {
-        // Gürültü sigma margin dışına biraz daha genişleme sağlayabilir
+         
         if (thread_info.human_noise_sigma > 0) {
           int extra = Random::dist(Random::rd) % (thread_info.human_noise_sigma + 1);
           int widened = margin + extra;
@@ -2379,7 +2318,7 @@ finish:
             if (diff > margin && diff <= widened) cand.push_back(i);
           }
         }
-        // Ağırlıklı seçim: weight = (margin - diff + sabit)
+         
         int total_w = 0;
         for (int idx : cand) {
           int diff = true_top - thread_info.best_scores[idx];
@@ -2411,12 +2350,11 @@ finish:
     }
   }
 
-  // Bestmove output: suppress during active pondering until ponderhit or explicit stop without hit.
-  // Previously disabled for human mode causing no move output with UCI_LimitStrength=true; condition fixed.
+   
   if (thread_info.thread_id == 0 && !thread_info.doing_datagen &&
       thread_info.best_moves[0] != MoveNone && (!thread_info.infinite_search || thread_data.stop)) {
     bool can_output = true;
-    // Suppress output while actively pondering until either ponderhit or external stop command arrives
+     
     if (thread_info.pondering && !thread_info.ponder_hit && !thread_data.stop) {
       can_output = false;
     }
@@ -2443,7 +2381,6 @@ void search_position(Position &position, ThreadInfo &thread_info,
   thread_info.nodes.store(0);
 
 
-  // Wait for threads to be ready
   reset_barrier.arrive_and_wait();
 
   for (size_t i = 0; i < thread_data.thread_infos.size(); i++) {
@@ -2451,7 +2388,7 @@ void search_position(Position &position, ThreadInfo &thread_info,
     thread_data.thread_infos[i].thread_id = i + 1;
   }
 
-  // Tell threads to start
+   
   idle_barrier.arrive_and_wait();
 
   thread_data.stop = false;
@@ -2485,37 +2422,35 @@ void loop(int i) {
   }
 }
 
-// Materyal feda analizini yapan fonksiyon
-// Belirli bir hamle dizisindeki materyal feda ederek kazanç olasılığını değerlendirir
+ 
 int analyze_sacrifice(Position &position, ThreadInfo &thread_info, int depth, int ply, int sacrificer_color) {
-  // Güvenlik kontrolü: negatif depth veya çok derin aramayı engelle
+   
   if (depth < 0 || ply > 10) return 0;
   
-  // Gerçek mini feda varyant ağacı (0-3 ply) – negatif/pozitif skor sacrificer açısından.
-  // Zaman limiti
+   
 int64_t time_for_sacrifice = static_cast<int64_t>(
     (thread_info.opt_time * thread_info.sacrifice_lookahead_time_multiplier) / 100);
 if (time_elapsed(thread_info.start_time) > time_for_sacrifice) return 0;
 
-  // Leaf: değerlendir (basit materyal + mevcut eval karışımı)
+   
   if (depth == 0) {
-    int mat = material_eval(position); // side-to-move perspektifine
+    int mat = material_eval(position);  
     if (position.color != sacrificer_color) mat = -mat;
-    // Hafif NNUE bileşeni (pahalı değil):
-    int stat = eval(position, thread_info); // side-to-move perspektifine yakın
-    // Stat'ı sacrificer perspektifine normalize et
+     
+    int stat = eval(position, thread_info);  
+     
     if (position.color != sacrificer_color) stat = -stat;
-    int score = (mat * 3 + stat) / 4; // harman
+    int score = (mat * 3 + stat) / 4;  
     return score;
   }
 
-  // Move generation
+   
   std::array<Move, ListSize> moves;
   uint64_t checkers = attacks_square(position, get_king_pos(position, position.color), position.color ^ 1);
   int nmoves = movegen(position, moves.data(), checkers, Generate::GenAll);
 
-  int best = -1000000; // büyük negatif
-  // Basit sınırlama: maksimum 16 aday
+  int best = -1000000;  
+   
   int considered = 0;
   for (int i = 0; i < nmoves && considered < 16; i++) {
     Move m = moves[i];
@@ -2524,49 +2459,49 @@ if (time_elapsed(thread_info.start_time) > time_for_sacrifice) return 0;
     Position np = position;
     int before_mat = material_eval(position);
     make_move(np, m);
-    update_nnue_state(thread_info, m, position, np); // NNUE state güncelle
+    update_nnue_state(thread_info, m, position, np);  
     
-    // Defensive validation for ss_push
+     
     if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
-      return best; // Safety fallback
+      return best;  
     }
-    ss_push(position, thread_info, m); // Stack push
+    ss_push(position, thread_info, m);  
 
     int after_mat = material_eval(np);
 
-    // Filtre: Sadece (a) capture, (b) sacrificer tarafı materyal kaybı, (c) ply>0 ise taktiksel devam olabilecek hamleleri ara
+     
     bool isCapture = is_cap(position, m);
     bool sacrificer_turn = (position.color == sacrificer_color);
     bool sacrificer_loses = false;
     if (sacrificer_turn) {
-      // sacrificer beyazsa mat düşüşü > 0 rakip lehine demek
+       
       if (sacrificer_color == Colors::White && after_mat < before_mat) sacrificer_loses = true;
       if (sacrificer_color == Colors::Black && after_mat > before_mat) sacrificer_loses = true;
     }
     if (!(isCapture || sacrificer_loses || ply == 0)) {
-      ss_pop(thread_info); // Stack pop
-      continue; // gereksiz genişleme
+      ss_pop(thread_info);  
+      continue;  
     }
 
     considered++;
     int child = -analyze_sacrifice(np, thread_info, depth - 1, ply + 1, sacrificer_color);
     if (child > best) best = child;
 
-    ss_pop(thread_info); // Stack pop
+    ss_pop(thread_info);  
   }
 
   if (best == -1000000) {
-    // Hiç aday yoksa leaf gibi değerlendir
-    int mat = material_eval(position); // side-to-move perspektifine
+     
+    int mat = material_eval(position);  
     if (position.color != sacrificer_color) mat = -mat;
     return mat;
   }
-  // Agresiflik bonusu (lineer)
+   
   int aggr_bonus = (thread_info.sacrifice_lookahead_aggressiveness - 100) * 2;
-  return best + aggr_bonus / 4; // küçük ek
+  return best + aggr_bonus / 4;  
 }
 
-// Materyal değişimini hesaplayan yardımcı fonksiyon
+ 
 int calculate_material_change(const Position &position) {
     return material_eval(position);
 }

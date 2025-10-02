@@ -72,8 +72,8 @@ uint64_t perft(int depth, Position &position, bool first,
     if (!is_legal(position, move)) {
       continue;
     }
-  auto new_pos_uptr = std::make_unique<Position>(position);
-  Position &new_position = *new_pos_uptr;
+    // Stack allocation instead of heap for better performance
+    Position new_position = position;
     make_move(new_position, move);
 
     uint64_t nodes = perft(depth - 1, new_position, false, thread_info);
@@ -694,13 +694,27 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
         int movestogo = 0;
         int mate_in = 0;
         std::vector<Move> searchmoves;
+      bool is_perft_command = false; // Flag to skip normal search for perft
       
       while (input_stream >> token) {
           if (token == "ponder") {
             thread_info.pondering = true;
             continue;
           }
-        if (token == "infinite") {
+        // Handle "go perft <depth>" command (extension for testing)
+        // This bypasses normal search and runs perft directly
+        if (token == "perft") {
+          int perft_depth;
+          if (input_stream >> perft_depth) {
+            auto perft_start = std::chrono::steady_clock::now();
+            uint64_t nodes = perft(perft_depth, position, true, thread_info);
+            uint64_t elapsed_ms = time_elapsed(perft_start);
+            uint64_t nps = (elapsed_ms > 0) ? (nodes * 1000 / elapsed_ms) : 0;
+            safe_printf("%" PRIu64 " nodes %" PRIu64 " nps\n", nodes, nps);
+          }
+          is_perft_command = true;
+          break; // Skip rest of "go" processing
+        } else if (token == "infinite") {
           thread_info.max_iter_depth = MaxSearchDepth;
           thread_info.max_time = UINT64_MAX;
           thread_info.opt_time = UINT64_MAX;
@@ -845,7 +859,11 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       if (thread_info.max_nodes > 0) {
         thread_info.max_nodes_searched = std::min(thread_info.max_nodes_searched, thread_info.max_nodes);
       }
-      run_thread(position, thread_info, s);
+      
+      // Only run normal search if this wasn't a "go perft" command
+      if (!is_perft_command) {
+        run_thread(position, thread_info, s);
+      }
     }
 
     else if (command == "ponderhit") {
@@ -863,17 +881,8 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       }
     }
 
-    else if (command == "perft") {
-      int depth;
-      input_stream >> depth;
-      auto start_time = std::chrono::steady_clock::now();
-
-      uint64_t nodes = perft(depth, position, true, thread_info);
-
-      safe_printf("%" PRIu64 " nodes %" PRIu64 " nps\n", nodes,
-        (uint64_t)(nodes * 1000 /
-         (std::max((int64_t)1, time_elapsed(start_time)))));
-    }
+    // Note: Standalone "perft" command removed - use "go perft <depth>" instead
+    // This maintains UCI command structure consistency
 
     else if (command == "bench") {
       bench(position, thread_info);

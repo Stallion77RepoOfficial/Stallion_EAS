@@ -237,38 +237,57 @@ void set_board(Position &position, ThreadInfo &thread_info,
     }
 
     int color = std::islower(right) ? Colors::Black : Colors::White;
-
+    char original_right = right;
     right = std::tolower(right);
 
     int square;
     int base = 56 * color;
+    int king_pos = get_king_pos(position, color);
 
-    if (right == 'k') {
-      square = base + 7;
-      if (thread_data.is_frc && castling_rights == "KQkq"){
-        for (int i = base; i < SquareNone; i++){
-          if (position.board[i] == Pieces::WRook + color){
+    // Enhanced FRC/Chess960 support:
+    // 1. Shredder-FEN notation (AHah) - file letter indicates rook position
+    // 2. Standard KQkq notation - infer from board position
+    
+    if (right >= 'a' && right <= 'h') {
+      // Shredder-FEN: explicit file notation (e.g., 'e' for e1/e8 rook)
+      square = (right - 'a') + base;
+    } else if (right == 'k') {
+      // Kingside castling
+      if (thread_data.is_frc) {
+        // FRC: find kingside rook (right of king)
+        square = base + 7; // default h-file
+        for (int i = king_pos + 1; i < base + 8; i++) {
+          if (position.board[i] == Pieces::WRook + color) {
             square = i;
             break;
           }
         }
+      } else {
+        square = base + 7; // Standard chess h-file
       }
     } else if (right == 'q') {
-      square = base;
-      if (thread_data.is_frc && castling_rights == "KQkq"){
-        for (int i = base + 7; i >= 0; i--){
-          if (position.board[i] == Pieces::WRook + color){
+      // Queenside castling
+      if (thread_data.is_frc) {
+        // FRC: find queenside rook (left of king)
+        square = base; // default a-file
+        for (int i = king_pos - 1; i >= base; i--) {
+          if (position.board[i] == Pieces::WRook + color) {
             square = i;
             break;
           }
         }
+      } else {
+        square = base; // Standard chess a-file
       }
     } else {
-      square = right - 'a' + 56 * color;
+      // Unknown notation, skip
+      continue;
     }
 
-    int side = square > get_king_pos(position, color) ? Sides::Kingside
-                                                      : Sides::Queenside;
+    // Validate square before setting
+    if (!is_valid_square(square)) continue;
+    
+    int side = square > king_pos ? Sides::Kingside : Sides::Queenside;
     position.castling_squares[color][side] = square;
   }
 

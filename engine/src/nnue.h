@@ -399,6 +399,17 @@ void NNUE_State::add_sub_sub(int from_piece, int from, int to_piece, int to,
     return; // Invalid NNUE parameters
   }
 
+  // CRITICAL: Validate array bounds before accessing feature_v
+  const size_t max_feature_offset = LAYER1_SIZE;
+  if (white_from * LAYER1_SIZE + max_feature_offset > ptr->feature_v.size() ||
+      black_from * LAYER1_SIZE + max_feature_offset > ptr->feature_v.size() ||
+      white_to * LAYER1_SIZE + max_feature_offset > ptr->feature_v.size() ||
+      black_to * LAYER1_SIZE + max_feature_offset > ptr->feature_v.size() ||
+      white_capt * LAYER1_SIZE + max_feature_offset > ptr->feature_v.size() ||
+      black_capt * LAYER1_SIZE + max_feature_offset > ptr->feature_v.size()) {
+    return; // Out of bounds access would occur
+  }
+
   // SAFE ARRAY ACCESS: Bounds checking for all array accesses
   // Use index-based stack access
   const size_t next_idx = static_cast<size_t>(m_idx + 1);

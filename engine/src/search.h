@@ -80,6 +80,33 @@ void update_corrhist(int16_t &entry, int score) { // Update history score
   entry += score - entry * abs(score) / 1024;
 }
 
+// Helper: Update all continuation histories for a move
+// Centralizes the repetitive update logic to reduce code duplication
+inline void update_continuation_histories(
+    ThreadInfo &thread_info, int piece, int sq, int bonus,
+    Move their_last, int their_piece,
+    Move our_last, int our_piece,
+    Move ply4_last, int ply4_piece) {
+  
+  update_history(thread_info.HistoryScores[piece][sq], bonus);
+  
+  if (their_last != MoveNone) {
+    update_history(
+        thread_info.ContHistScores[their_piece][their_last][piece][sq],
+        bonus);
+  }
+  if (our_last != MoveNone) {
+    update_history(
+        thread_info.ContHistScores[our_piece][our_last][piece][sq],
+        bonus);
+  }
+  if (ply4_last != MoveNone) {
+    update_history(
+        thread_info.ContHistScores[ply4_piece][ply4_last][piece][sq],
+        bonus / 2);
+  }
+}
+
 bool out_of_time(ThreadInfo &thread_info) {
   if (thread_data.stop || thread_info.datagen_stop) return true;
   // Only main thread performs global time/node budget checks.
@@ -315,7 +342,7 @@ int eval(Position &position, ThreadInfo &thread_info) {
 
 int correct_eval(const Position &position, ThreadInfo &thread_info, int eval) {
 
-  eval = eval * (200 - position.halfmoves) / 200;
+  eval = eval * (HALFMOVE_SCALE_MAX - position.halfmoves) / HALFMOVE_SCALE_MAX;
 
   int corr =
       thread_info
@@ -743,12 +770,12 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
             MaterialValues[PromoPieceTypes[extract_promo(move)]] -
             MaterialValues[PieceTypes::Pawn];
       }
-      int delta_margin = capture_value + promotion_gain + 200;
+      int delta_margin = capture_value + promotion_gain + DELTA_MARGIN_BASE;
       if (stand_pat + delta_margin < alpha) continue;
     }
 
-  auto moved_pos_uptr = std::make_unique<Position>(position);
-  Position &moved_position = *moved_pos_uptr;
+    // Stack allocation instead of heap for better performance
+    Position moved_position = position;
     make_move(moved_position, move);
     auto *nnue_before = thread_info.nnue_state.m_curr;
     update_nnue_state(thread_info, move, position, moved_position);
@@ -1011,6 +1038,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       // still beat beta on a reduced search, we can prune the node.
 
       Position temp_pos = position;
+      // Null move is always legal (special case)
       make_move(temp_pos, MoveNone);
 
       // Defensive validation for ss_push
@@ -1062,8 +1090,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         continue;
       }
 
-  auto moved_pos_uptr = std::make_unique<Position>(position);
-  Position &moved_position = *moved_pos_uptr;
+      // Stack allocation instead of heap for better performance
+      Position moved_position = position;
+      // SAFETY: Validate move before making it (is_legal already checked above)
       make_move(moved_position, move);
       update_nnue_state(thread_info, move, position, moved_position);
       
@@ -1122,6 +1151,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       if (!isCapture && !losing_exchange) continue;
 
       Position test_position = position;
+      // SAFETY: Already checked is_legal above in loop
       make_move(test_position, m);
 
       int sacrifice_score = analyze_sacrifice(test_position, thread_info, lookahead_cap, 0, position.color);
@@ -1131,8 +1161,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       int sac_extension = 1 + (thread_info.sacrifice_lookahead_aggressiveness >= 130 ? 2 : (thread_info.sacrifice_lookahead_aggressiveness >= 90 ? 1 : 0));
       sac_extension = std::clamp(sac_extension, 1, 3);
 
-  auto moved_pos_uptr = std::make_unique<Position>(position);
-  Position &moved_position = *moved_pos_uptr;
+      // Stack allocation instead of heap for better performance
+      Position moved_position = position;
+      // SAFETY: Already validated with is_legal check above
       make_move(moved_position, m);
       update_nnue_state(thread_info, m, position, moved_position);
       
@@ -1296,8 +1327,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       }
     }
 
-  auto moved_pos_uptr = std::make_unique<Position>(position);
-  Position &moved_position = *moved_pos_uptr;
+    // Stack allocation instead of heap for better performance
+    Position moved_position = position;
     make_move(moved_position, move);
 
     update_nnue_state(thread_info, move, position, moved_position);
@@ -1470,44 +1501,20 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         int piece_m = position.board[extract_from(move)],
             sq_m = extract_to(move);
 
-        update_history(thread_info.HistoryScores[piece_m][sq_m], -bonus);
-
-        if (their_last != MoveNone) {
-          update_history(
-              thread_info.ContHistScores[their_piece][their_last][piece_m][sq_m],
-              -bonus);
-        }
-
-        if (our_last != MoveNone) {
-          update_history(
-              thread_info.ContHistScores[our_piece][our_last][piece_m][sq_m],
-              -bonus);
-        }
-
-        if (ply4_last != MoveNone) {
-          update_history(
-              thread_info.ContHistScores[ply4_piece][ply4_last][piece_m][sq_m],
-              -bonus / 2);
-        }
+        // Use centralized helper for failed quiets (negative bonus)
+        update_continuation_histories(
+            thread_info, piece_m, sq_m, -bonus,
+            their_last, their_piece,
+            our_last, our_piece,
+            ply4_last, ply4_piece);
       }
 
-      update_history(thread_info.HistoryScores[piece][sq], bonus);
-
-      if (their_last != MoveNone) {
-        update_history(
-            thread_info.ContHistScores[their_piece][their_last][piece][sq],
-            bonus);
-      }
-      if (our_last != MoveNone) {
-        update_history(
-            thread_info.ContHistScores[our_piece][our_last][piece][sq],
-            bonus);
-      }
-      if (ply4_last != MoveNone) {
-        update_history(
-            thread_info.ContHistScores[ply4_piece][ply4_last][piece][sq],
-            bonus / 2);
-      }
+      // Use centralized helper to update all continuation histories
+      update_continuation_histories(
+          thread_info, piece, sq, bonus,
+          their_last, their_piece,
+          our_last, our_piece,
+          ply4_last, ply4_piece);
 
       thread_info.KillerMoves[ply] = best_move;
     }
@@ -2184,7 +2191,7 @@ finish:
     int variety_lines = real_multi_pv > 1 ? std::min<int>(real_multi_pv, 1 + (static_cast<int>(thread_info.variety) / 50)) : 1;
     
     // Core threshold (centipawns) allowed below the top move. Scales down as variety increases.
-    int base_threshold = (150 - static_cast<int>(thread_info.variety)) * 2; // 300 cp (var=0) -> 0 cp (var=150)
+    int base_threshold = (VARIETY_BASE_THRESHOLD - static_cast<int>(thread_info.variety)) * VARIETY_MULTIPLIER; // 300 cp (var=0) -> 0 cp (var=150)
     if (base_threshold < 0) base_threshold = 0;
 
     if (variety_lines > 1) {
@@ -2207,7 +2214,7 @@ finish:
             uint64_t valuable_targets = (temp_pos.pieces_bb[PieceTypes::Queen] | temp_pos.pieces_bb[PieceTypes::Rook] | temp_pos.pieces_bb[PieceTypes::King]) & temp_pos.colors_bb[position.color ^ 1];
             int fork_count = 0;
             while (valuable_targets) { int target_sq = pop_lsb(valuable_targets); if (knight_attacks & (1ULL << target_sq)) fork_count++; }
-            if (fork_count >= 2) promo_bonus = 200; else if (fork_count == 1) promo_bonus = 75;
+            if (fork_count >= 2) promo_bonus = PROMO_BONUS_DOUBLE_FORK; else if (fork_count == 1) promo_bonus = PROMO_BONUS_SINGLE_FORK;
           } else if (promo_type == Promos::Bishop) {
             uint64_t bishop_attacks = get_bishop_attacks(to, temp_pos.colors_bb[0] | temp_pos.colors_bb[1]);
             uint64_t central_diagonals = 0x8040201008040201ULL | 0x0102040810204080ULL;
@@ -2347,7 +2354,7 @@ finish:
 
       // Düşük Elo'larda aşırı çeşitliliği frenlemek için opsiyonel yumuşatma (ör: Elo <=1600 variety efektif düşer)
       if (thread_info.human_elo <= 1600) {
-        double elo_scale = (thread_info.human_elo - 500) / 1100.0; // 500->0, 1600->~1
+        double elo_scale = (thread_info.human_elo - HUMAN_ELO_MIN) / static_cast<double>(HUMAN_ELO_RANGE); // 500->0, 1600->~1
         if (elo_scale < 0) elo_scale = 0; if (elo_scale > 1) elo_scale = 1;
         margin = (int)std::lround(margin * (0.75 + 0.25 * elo_scale));
       }

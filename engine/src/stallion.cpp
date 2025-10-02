@@ -44,7 +44,12 @@ std::optional<int> handle_cli_mode(const std::vector<std::string_view>& args,
                   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         try {
             const int depth = std::stoi(std::string(args[2]));
-            perft(depth, position, true, thread_info);
+            auto start_time = std::chrono::steady_clock::now();
+            uint64_t nodes = perft(depth, position, true, thread_info);
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            uint64_t nps = (elapsed_ms > 0) ? (nodes * 1000 / elapsed_ms) : 0;
+            safe_printf("%" PRIu64 " nodes %" PRIu64 " nps\n", nodes, nps);
             return 0;
         } catch (const std::exception&) {
             safe_print_cerr(std::string("Error: invalid depth '") + std::string(args[2]) + "' for perft");

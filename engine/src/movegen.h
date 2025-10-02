@@ -42,11 +42,15 @@ void pawn_moves(const Position &position, uint64_t check_filter,
 
     while (move_1) {
       int to = pop_lsb(move_1);
-      move_list[key++] = pack_move(to - (dir), to, MoveTypes::Normal);
+      if (key < ListSize) {
+        move_list[key++] = pack_move(to - (dir), to, MoveTypes::Normal);
+      }
     }
     while (move_2) {
       int to = pop_lsb(move_2);
-      move_list[key++] = pack_move(to - (2 * dir), to, MoveTypes::Normal);
+      if (key < ListSize) {
+        move_list[key++] = pack_move(to - (2 * dir), to, MoveTypes::Normal);
+      }
     }
   }
 
@@ -58,11 +62,15 @@ void pawn_moves(const Position &position, uint64_t check_filter,
 
     while (cap_left) {
       int to = pop_lsb(cap_left);
-      move_list[key++] = pack_move(to - (left), to, MoveTypes::Normal);
+      if (key < ListSize) {
+        move_list[key++] = pack_move(to - (left), to, MoveTypes::Normal);
+      }
     }
     while (cap_right) {
       int to = pop_lsb(cap_right);
-      move_list[key++] = pack_move(to - (right), to, MoveTypes::Normal);
+      if (key < ListSize) {
+        move_list[key++] = pack_move(to - (right), to, MoveTypes::Normal);
+      }
     }
 
     if (position.ep_square != SquareNone) {
@@ -71,8 +79,10 @@ void pawn_moves(const Position &position, uint64_t check_filter,
       uint64_t ep_captures = our_non_promos & ep_targets;
       while (ep_captures) {
         int from = pop_lsb(ep_captures);
-        move_list[key++] =
-            pack_move(from, position.ep_square, MoveTypes::EnPassant);
+        if (key < ListSize) {
+          move_list[key++] =
+              pack_move(from, position.ep_square, MoveTypes::EnPassant);
+        }
       }
     }
   }

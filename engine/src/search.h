@@ -1420,10 +1420,10 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     int bonus = std::min((int)HistBonus * (depth - 1 + (best_score > beta + 125)), (int)HistMax);
 
-     
     if (is_capture) {
-
-      update_history(thread_info.CapHistScores[piece][sq], bonus);
+      // Capture'lara daha az bonus - exchange yerine pozisyonel oyun
+      int capture_bonus = bonus / 2;  // %50 - capture'ları caydır
+      update_history(thread_info.CapHistScores[piece][sq], capture_bonus);
 
     } else {
 
@@ -1478,7 +1478,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
       int piece_m = position.board[extract_from(move)], sq_m = extract_to(move);
 
-      update_history(thread_info.CapHistScores[piece_m][sq_m], -bonus);
+      // Kötü capture'lara ağır penalty - exchange'den kaçın
+      int capture_penalty = bonus * 2;  // %200 - kötü capture'ları güçlü cezalandır
+      update_history(thread_info.CapHistScores[piece_m][sq_m], -capture_penalty);
     }
   }
 

@@ -8,19 +8,9 @@
 #include <cstring>
  
 #include <vector>
-#ifdef _MSC_VER
-#define W_MSVC
-#pragma push_macro("_MSC_VER")
-#undef _MSC_VER
-#endif
 
 #define INCBIN_PREFIX g_
 #include "incbin.h"
-
-#ifdef W_MSVC
-#pragma pop_macro("_MSC_VER")
-#undef W_MSVC
-#endif
 
 constexpr size_t INPUT_SIZE = 768;
 constexpr size_t LAYER1_SIZE = 768;
@@ -55,9 +45,9 @@ INCBIN(nnue5, "nets/gold.nnue");
 inline const NNUE_Params *make_nnue_safe(const unsigned char *data, size_t size) {
   if (!data || size < sizeof(NNUE_Params)) return nullptr;
    
-  void *buf = nullptr;
-   
-  if (posix_memalign(&buf, 64, sizeof(NNUE_Params)) != 0) return nullptr;
+  void *buf = ::operator new(sizeof(NNUE_Params), std::align_val_t{64});
+  if (!buf) return nullptr;
+  
   std::memcpy(buf, data, sizeof(NNUE_Params));
   return reinterpret_cast<const NNUE_Params *>(buf);
 }

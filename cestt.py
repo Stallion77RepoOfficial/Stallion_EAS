@@ -87,7 +87,7 @@ class UCIEngine:
         self.asan_q=queue.Queue()
         self.buf=[]
         self.rd=threading.Thread(target=self._reader,daemon=True); self.rd.start()
-        self._send("uci"); self._wait("uciok"); self._send("isready"); self._wait("readyok"); self._send("ucinewgame")
+        self._send("uci"); self._wait("uciok"); self._send("isready"); self._wait("readyok"); self._send("ucinewgame"); self._send("isready"); self._wait("readyok")
     def _reader(self):
         with open(os.path.join(LOG_DIR,f"engine_{self.tag}.log"),"a",encoding="utf-8") as lf, \
              open(os.path.join(LOG_DIR,f"stderr_{self.tag}.log"),"a",encoding="utf-8") as ef:

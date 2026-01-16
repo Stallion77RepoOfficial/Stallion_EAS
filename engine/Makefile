@@ -21,7 +21,7 @@ linux:
 
 clean:
 	@echo "Cleaning build artifacts..."
-	$(MAKE) -f Makefile.clean
+	$(MAKE) -f Makefile.clean all
 
 all:
 	@echo "Building for all platforms..."

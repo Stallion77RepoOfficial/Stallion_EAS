@@ -150,8 +150,11 @@ def worker(wid, engine_path, depth, max_moves, mem_limit_mb, spin_sec, games_lim
                     dump_crash(ctx,"\n".join(buf), pid_hint=eng.proc.pid, note="ASAN signal")
                     break
                 rss=p.memory_info().rss/(1024*1024)
-                thsum=sum([t.system_time+t.user_time for t in p.threads()])
-                log(f"[w{wid}] g{game_count} m{mv} rss {rss:.1f}MB thr_cpu {thsum:.2f}")
+                try:
+                    thsum=sum([t.system_time+t.user_time for t in p.threads()])
+                    log(f"[w{wid}] g{game_count} m{mv} rss {rss:.1f}MB thr_cpu {thsum:.2f}")
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    log(f"[w{wid}] g{game_count} m{mv} rss {rss:.1f}MB (cpu info denied)")
                 if rss>mem_limit_mb:
                     ctx={"ENGINE_PATH":engine_path,"WORKER":wid,"GAME":game_count,"MOVE":mv,"PID":eng.proc.pid,"FEN":board.fen()}
                     dump_crash(ctx,b"MEMORY LIMIT", pid_hint=eng.proc.pid, note="memory limit")

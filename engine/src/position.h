@@ -5,7 +5,6 @@
 #include <cstring>
 #include <sstream>
 
- 
 struct Position;
 struct ThreadInfo;
 
@@ -21,16 +20,13 @@ int16_t total_mat(const Position &position) {
   return m;
 }
 
-std::string
-internal_to_uci(const Position &position,
-                Move move) {  
+std::string internal_to_uci(const Position &position, Move move) {
 
   int from = extract_from(move), to = extract_to(move),
       promo = extract_promo(move);
 
-   
   if (!is_valid_square(from) || !is_valid_square(to)) {
-    return "0000";  
+    return "0000";
   }
 
   if (extract_type(move) == MoveTypes::Castling && !thread_data.is_frc) {
@@ -60,14 +56,13 @@ int get_king_pos(const Position &position, int color) {
                  position.pieces_bb[PieceTypes::King]);
 }
 
-void print_board(
-    Position position) {  
+void print_board(Position position) {
   for (int i = 56; i >= 0; i++) {
-  safe_printf("+---+---+---+---+---+---+---+---+\n");
+    safe_printf("+---+---+---+---+---+---+---+---+\n");
     for (int n = i; n != i + 8; n++) {
-  safe_printf("| ");
+      safe_printf("| ");
       if (position.board[n] == Pieces::Blank) {
-  safe_printf("  ");
+        safe_printf("  ");
       } else {
 
         switch (position.board[n]) {
@@ -112,14 +107,13 @@ void print_board(
         }
       }
     }
-  safe_printf("|\n");
+    safe_printf("|\n");
     i -= 8;
   }
   safe_printf("+---+---+---+---+---+---+---+---+\n\n");
 }
 
-void set_board(Position &position, ThreadInfo &thread_info,
-               std::string f) {  
+void set_board(Position &position, ThreadInfo &thread_info, std::string f) {
   position = Position{};
 
   generate_bb(f, position);
@@ -128,19 +122,19 @@ void set_board(Position &position, ThreadInfo &thread_info,
   std::string fen_pos;
   fen >> fen_pos;
 
-   
   int rank = 7;
   int file = 0;
   for (size_t idx = 0; idx < fen_pos.size(); ++idx) {
     char c = fen_pos[idx];
     if (c == '/') {
       if (file != 8) {
-         
+
         return;
       }
       --rank;
       file = 0;
-      if (rank < 0) break;
+      if (rank < 0)
+        break;
       continue;
     }
 
@@ -148,14 +142,14 @@ void set_board(Position &position, ThreadInfo &thread_info,
       int skip = c - '0';
       file += skip;
       if (file > 8) {
-         
+
         return;
       }
       continue;
     }
 
     if (file >= 8 || rank < 0) {
-       
+
       return;
     }
 
@@ -216,7 +210,7 @@ void set_board(Position &position, ThreadInfo &thread_info,
 
   std::string color;
   fen >> color;
-  if (color[0] == 'w') {  
+  if (color[0] == 'w') {
     position.color = Colors::White;
   } else {
     position.color = Colors::Black;
@@ -231,7 +225,7 @@ void set_board(Position &position, ThreadInfo &thread_info,
     }
   }
 
-  for (char right : castling_rights) {  
+  for (char right : castling_rights) {
     if (right == '-') {
       break;
     }
@@ -244,15 +238,14 @@ void set_board(Position &position, ThreadInfo &thread_info,
     int base = 56 * color;
     int king_pos = get_king_pos(position, color);
 
-     
     if (right >= 'a' && right <= 'h') {
-       
+
       square = (right - 'a') + base;
     } else if (right == 'k') {
-       
+
       if (thread_data.is_frc) {
-         
-        square = base + 7;  
+
+        square = base + 7;
         for (int i = king_pos + 1; i < base + 8; i++) {
           if (position.board[i] == Pieces::WRook + color) {
             square = i;
@@ -260,13 +253,13 @@ void set_board(Position &position, ThreadInfo &thread_info,
           }
         }
       } else {
-        square = base + 7;  
+        square = base + 7;
       }
     } else if (right == 'q') {
-       
+
       if (thread_data.is_frc) {
-         
-        square = base;  
+
+        square = base;
         for (int i = king_pos - 1; i >= base; i--) {
           if (position.board[i] == Pieces::WRook + color) {
             square = i;
@@ -274,21 +267,21 @@ void set_board(Position &position, ThreadInfo &thread_info,
           }
         }
       } else {
-        square = base;  
+        square = base;
       }
     } else {
-       
+
       continue;
     }
 
-     
-    if (!is_valid_square(square)) continue;
-    
+    if (!is_valid_square(square))
+      continue;
+
     int side = square > king_pos ? Sides::Kingside : Sides::Queenside;
     position.castling_squares[color][side] = square;
   }
 
-  std::string ep_square;  
+  std::string ep_square;
   fen >> ep_square;
   if (ep_square[0] == '-') {
     position.ep_square = SquareNone;
@@ -365,7 +358,7 @@ std::string export_fen(const Position &position,
         fen += "k";
         break;
       default:
-  safe_print_cerr(std::string("Error parsing board!"));
+        safe_print_cerr(std::string("Error parsing board!"));
         print_board(position);
         std::exit(1);
       }
@@ -436,23 +429,20 @@ std::string export_fen(const Position &position,
   return fen;
 }
 
-uint64_t
-attacks_square(const Position &position, int sq,
-               int color) {  
+uint64_t attacks_square(const Position &position, int sq, int color) {
 
-   
-  if (!is_valid_square(sq)) return 0ULL;
-  if (color != Colors::White && color != Colors::Black) return 0ULL;
+  if (!is_valid_square(sq))
+    return 0ULL;
+  if (color != Colors::White && color != Colors::Black)
+    return 0ULL;
 
-   
   uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
                      position.pieces_bb[PieceTypes::Queen];
   uint64_t rooks = position.pieces_bb[PieceTypes::Rook] |
                    position.pieces_bb[PieceTypes::Queen];
-  uint64_t occ = position.colors_bb[Colors::White] |
-                 position.colors_bb[Colors::Black];
+  uint64_t occ =
+      position.colors_bb[Colors::White] | position.colors_bb[Colors::Black];
 
-   
   uint64_t combined_pieces = 0ULL;
   for (int pt = PieceTypes::Pawn; pt <= PieceTypes::King; ++pt)
     combined_pieces |= position.pieces_bb[pt];
@@ -468,14 +458,14 @@ attacks_square(const Position &position, int sq,
   return attackers & position.colors_bb[color];
 }
 
-uint64_t
-attacks_square(const Position &position, int sq, int color,
-               uint64_t occ) {  
+uint64_t attacks_square(const Position &position, int sq, int color,
+                        uint64_t occ) {
 
-  if (!is_valid_square(sq)) return 0ULL;
-  if (color != Colors::White && color != Colors::Black) return 0ULL;
+  if (!is_valid_square(sq))
+    return 0ULL;
+  if (color != Colors::White && color != Colors::Black)
+    return 0ULL;
 
-   
   uint64_t combined_pieces = 0ULL;
   for (int pt = PieceTypes::Pawn; pt <= PieceTypes::King; ++pt)
     combined_pieces |= position.pieces_bb[pt];
@@ -496,12 +486,11 @@ attacks_square(const Position &position, int sq, int color,
   return attackers & position.colors_bb[color] & occ;
 }
 
- 
 uint64_t attacks_square(const Position &position, int sq, uint64_t occ) {
 
-  if (!is_valid_square(sq)) return 0ULL;
+  if (!is_valid_square(sq))
+    return 0ULL;
 
-   
   uint64_t combined_pieces = 0ULL;
   for (int pt = PieceTypes::Pawn; pt <= PieceTypes::King; ++pt)
     combined_pieces |= position.pieces_bb[pt];
@@ -522,11 +511,11 @@ uint64_t attacks_square(const Position &position, int sq, uint64_t occ) {
          (KING_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::King]);
 }
 
-uint64_t
-br_attacks_square(const Position &position, int sq, int color,
-                  uint64_t occ) {  
+uint64_t br_attacks_square(const Position &position, int sq, int color,
+                           uint64_t occ) {
 
-  if (!is_valid_square(sq)) return 0ULL;
+  if (!is_valid_square(sq))
+    return 0ULL;
 
   uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
                      position.pieces_bb[PieceTypes::Queen];
@@ -555,98 +544,14 @@ bool is_cap(const Position &position, Move &move) {
   }
   return (position.board[to] ||
           (to == position.ep_square &&
-           position.board[from_sq] ==
-                                           Pieces::WPawn + position.color) ||
+           position.board[from_sq] == Pieces::WPawn + position.color) ||
           is_queen_promo((move)));
 }
 
-void update_nnue_state(ThreadInfo &thread_info, Move move,
-                       const Position &position, const Position &moved_position) {  
+void make_move(Position &position, Move move) {
 
-  int from = extract_from(move), to = extract_to(move);
-  int from_piece = position.board[from];
-  int to_piece = from_piece, color = position.color;
-
-  if (!is_valid_square(from) || !is_valid_square(to)) {
-    return;
-  }
-
-  int phase = thread_info.phase;
-
-  if (extract_type(move) == MoveTypes::Promotion) {  
-    to_piece = (extract_promo(move) + 2) * 2 + color;
-  }
-
-  int captured_piece = Pieces::Blank, captured_square = SquareNone;
-
-  if (position.board[to]) {
-    captured_piece = position.board[to], captured_square = to;
-  }
-   
-  else if (extract_type(move) == MoveTypes::EnPassant) {
-    captured_square = to + (color ? Directions::North : Directions::South);
-    if (is_valid_square(captured_square)) {
-      captured_piece = position.board[captured_square];
-    } else {
-      captured_square = SquareNone;
-      captured_piece = Pieces::Blank;
-    }
-  }
-
-  if (extract_type(move) ==
-      MoveTypes::Castling) {  
-
-    int indx = color ? 56 : 0;
-    int side = to > from;
-
-    if (side) {
-      to = indx + 6;
-      thread_info.nnue_state.add_add_sub_sub(
-          from_piece, from, to, Pieces::WRook + color,
-          position.castling_squares[color][side], indx + 5, phase);
-
-    } else {
-      to = indx + 2;
-      thread_info.nnue_state.add_add_sub_sub(
-          from_piece, from, to, Pieces::WRook + color,
-          position.castling_squares[color][side], indx + 3, phase);
-    }
-  }
-
-  else if (captured_piece) {
-     
-    if (from_piece == Pieces::Blank || to_piece == Pieces::Blank) {
-      return;  
-    }
-    if (!is_valid_square(from) || !is_valid_square(to) || !is_valid_square(captured_square)) {
-      return;  
-    }
-    if (captured_piece == Pieces::Blank) {
-      return;  
-    }
-    if (phase < PhaseTypes::Opening || phase > PhaseTypes::Sacrifice) {
-      phase = PhaseTypes::MiddleGame;  
-    }
-
-     
-    if (thread_info.nnue_state.m_curr >= &thread_info.nnue_state.m_accumulator_stack[MaxSearchDepth - 1]) {
-      return;  
-    }
-
-    thread_info.nnue_state.add_sub_sub(from_piece, from, to_piece, to,
-                                      captured_piece, captured_square,
-                                      phase);
-  }
-
-  else {
-    thread_info.nnue_state.add_sub(from_piece, from, to_piece, to, phase);
-  }
-}
-
-void make_move(Position &position, Move move) {  
-   
   if (!position_integrity_check(position)) {
-    return;  
+    return;
   }
 
   position.halfmoves++;
@@ -664,13 +569,12 @@ void make_move(Position &position, Move move) {
 
   int from = extract_from(move), to = extract_to(move);
   if (!is_valid_square(from) || !is_valid_square(to)) {
-    return;  
+    return;
   }
 
-   
   int from_piece = position.board[from];
   if (from_piece == Pieces::Blank || get_color(from_piece) != position.color) {
-    return;  
+    return;
   }
 
   uint64_t temp_hash = position.zobrist_key;
@@ -678,9 +582,8 @@ void make_move(Position &position, Move move) {
   uint64_t non_pawn_white = position.non_pawn_key[Colors::White],
            non_pawn_black = position.non_pawn_key[Colors::Black];
 
-  int color = position.color,
-      opp_color = color ^ 1, captured_piece = Pieces::Blank,
-      captured_square = SquareNone;
+  int color = position.color, opp_color = color ^ 1,
+      captured_piece = Pieces::Blank, captured_square = SquareNone;
   int base_rank = (color ? a8 : 0);
   int ep_square = SquareNone;
 
@@ -688,17 +591,16 @@ void make_move(Position &position, Move move) {
 
   int king_pos = get_king_pos(position, color);
   if (!is_valid_square(king_pos)) {
-    return;  
+    return;
   }
   int side = to > king_pos;
 
   if (extract_type(move) == MoveTypes::Castling) {
-    to = base_rank + 2 + (side)*4;
+    to = base_rank + 2 + (side) * 4;
   }
 
-   
   else if (position.board[to]) {
-     
+
     position.halfmoves = 0;
     position.material_count[position.board[to] - 2]--;
     captured_piece = position.board[to], captured_square = to;
@@ -716,7 +618,7 @@ void make_move(Position &position, Move move) {
     }
 
   }
-   
+
   else if (extract_type(move) == MoveTypes::EnPassant) {
     position.material_count[opp_color]--;
     captured_square = to + (color ? Directions::North : Directions::South);
@@ -726,35 +628,29 @@ void make_move(Position &position, Move move) {
                                               captured_square)];
     temp_pawns ^= zobrist_keys[get_zobrist_key(position.board[captured_square],
                                                captured_square)];
-     
-     
+
     position.board[captured_square] = Pieces::Blank;
   }
 
-   
   position.board[from] = Pieces::Blank;
   position.board[to] = from_piece;
 
   int to_piece = position.board[to];
 
-   
   if (from_type == PieceTypes::Pawn) {
     position.halfmoves = 0;
 
-     
     if (extract_type(move) == MoveTypes::Promotion) {
       to_piece = extract_promo(move) * 2 + 4 + color;
       position.board[to] = to_piece;
       position.material_count[color]--, position.material_count[to_piece - 2]++;
     }
 
-     
     else if (to == from + Directions::North * 2 ||
              to == from + Directions::South * 2) {
       ep_square = (to + from) / 2;
     }
   }
-   
 
   else if (from_type == PieceTypes::King) {
 
@@ -787,7 +683,6 @@ void make_move(Position &position, Move move) {
       }
     }
 
-     
     if (position.castling_squares[color][Sides::Queenside] != SquareNone) {
       temp_hash ^= zobrist_keys[castling_index + color * 2 + Sides::Queenside];
       position.castling_squares[color][Sides::Queenside] = SquareNone;
@@ -799,7 +694,6 @@ void make_move(Position &position, Move move) {
     }
   }
 
-   
   if (from == position.castling_squares[color][Sides::Queenside] ||
       from == position.castling_squares[color][Sides::Kingside]) {
 
@@ -810,8 +704,7 @@ void make_move(Position &position, Move move) {
       temp_hash ^= zobrist_keys[castling_index + color * 2 + side];
     }
   }
-   
-   
+
   if (to == position.castling_squares[opp_color][Sides::Queenside] ||
       to == position.castling_squares[opp_color][Sides::Kingside]) {
 
@@ -849,16 +742,14 @@ void make_move(Position &position, Move move) {
 
   position.color ^= 1;
 
-  if ((position.ep_square == SquareNone) ^
-      (ep_square == SquareNone)) {  
-                                    
+  if ((position.ep_square == SquareNone) ^ (ep_square == SquareNone)) {
+
     temp_hash ^= zobrist_keys[ep_index];
   }
   position.ep_square = ep_square;
   position.zobrist_key = temp_hash;
   position.pawn_key = temp_pawns;
 
-   
   safe_TT_prefetch(temp_hash);
 }
 
@@ -905,8 +796,7 @@ bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
 
     uint64_t castle_bb = BetweenBBs[rook_square][rook_target];
     castle_bb |= BetweenBBs[from][king_target];
-    castle_bb &=
-        ~(1ull << from) & ~(1ull << rook_square);
+    castle_bb &= ~(1ull << from) & ~(1ull << rook_square);
 
     return (!checkers && position.castling_squares[color][side] != SquareNone &&
             !castle_bb);
@@ -914,7 +804,8 @@ bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
 
   if (type == MoveTypes::EnPassant) {
     int dir = color ? -1 : 1;
-    if (position.ep_square == SquareNone || !is_valid_square(position.ep_square)) {
+    if (position.ep_square == SquareNone ||
+        !is_valid_square(position.ep_square)) {
       return false;
     }
     return (to == position.ep_square && piece_type == PieceTypes::Pawn &&
@@ -931,10 +822,13 @@ bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
   }
 
   if (checkers) {
-   
-  int checker_sq = get_lsb(checkers);
-  uint64_t single_check_filter = BetweenBBs[get_king_pos(position, color)][checker_sq] | (1ULL << checker_sq);
-  if (!(single_check_filter & (1ULL << to))) return false;
+
+    int checker_sq = get_lsb(checkers);
+    uint64_t single_check_filter =
+        BetweenBBs[get_king_pos(position, color)][checker_sq] |
+        (1ULL << checker_sq);
+    if (!(single_check_filter & (1ULL << to)))
+      return false;
   }
 
   if (piece_type == PieceTypes::Pawn) {
@@ -970,8 +864,7 @@ bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
   return (attacks & (1ull << to));
 }
 
-bool is_legal(const Position &position,
-              Move move) {  
+bool is_legal(const Position &position, Move move) {
   uint64_t occupied =
       position.colors_bb[Colors::White] | position.colors_bb[Colors::Black];
   int from = extract_from(move), to = extract_to(move), color = position.color,
@@ -983,7 +876,6 @@ bool is_legal(const Position &position,
 
   int from_piece = position.board[from];
 
-   
   if (from_piece < Pieces::Blank || from_piece > Pieces::BKing) {
     return false;
   }
@@ -1000,7 +892,6 @@ bool is_legal(const Position &position,
 
   int king_pos = get_king_pos(position, color);
 
-   
   if (extract_type(move) == MoveTypes::EnPassant) {
     int cap_square = to + (color ? Directions::North : Directions::South);
     if (!is_valid_square(cap_square)) {
@@ -1022,65 +913,61 @@ bool is_legal(const Position &position,
 }
 
 bool position_integrity_check(const Position &position) {
-   
 
   for (int sq = 0; sq < 64; sq++) {
     int piece = position.board[sq];
     if (piece < Pieces::Blank || piece > Pieces::BKing) {
-      return false;  
+      return false;
     }
     if (piece != Pieces::Blank && !is_valid_square(sq)) {
-      return false;  
+      return false;
     }
   }
 
-   
   int white_king = get_king_pos(position, Colors::White);
   int black_king = get_king_pos(position, Colors::Black);
   if (!is_valid_square(white_king) || !is_valid_square(black_king)) {
-    return false;  
+    return false;
   }
   if (white_king == black_king) {
-    return false;  
+    return false;
   }
 
-   
   int white_pieces = 0, black_pieces = 0;
   for (int sq = 0; sq < 64; sq++) {
     int piece = position.board[sq];
     if (piece != Pieces::Blank) {
-      if (get_color(piece) == Colors::White) white_pieces++;
-      else black_pieces++;
+      if (get_color(piece) == Colors::White)
+        white_pieces++;
+      else
+        black_pieces++;
     }
   }
   if (white_pieces > 16 || black_pieces > 16) {
-    return false;  
+    return false;
   }
 
-   
-  if (position.ep_square != SquareNone && !is_valid_square(position.ep_square)) {
-    return false;  
+  if (position.ep_square != SquareNone &&
+      !is_valid_square(position.ep_square)) {
+    return false;
   }
 
-   
   for (int color = 0; color < 2; color++) {
     for (int side = 0; side < 2; side++) {
       int square = position.castling_squares[color][side];
       if (square != SquareNone && !is_valid_square(square)) {
-        return false;  
+        return false;
       }
     }
   }
 
-   
   if (position.color != Colors::White && position.color != Colors::Black) {
-    return false;  
+    return false;
   }
 
-   
   if (position.halfmoves < 0 || position.halfmoves > 100) {
-    return false;  
+    return false;
   }
 
-  return true;  
+  return true;
 }

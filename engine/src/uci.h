@@ -1,47 +1,55 @@
 #pragma once
 #include <array>
- 
- 
+
+#include "../fathom/src/tbprobe.h"
 #include "search.h"
-#include <iostream>
-#include <memory>
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include "../fathom/src/tbprobe.h"
+#include <iostream>
+#include <memory>
 
- 
 bool tb_initialized = false;
 
- 
 inline void compute_human_params(ThreadInfo &thread_info) {
   int elo = thread_info.human_elo;
-  int delta = 3401 - elo; if (delta < 0) delta = 0; if (delta > 3000) delta = 3000;
+  int delta = 3401 - elo;
+  if (delta < 0)
+    delta = 0;
+  if (delta > 3000)
+    delta = 3000;
   thread_info.human_value_margin = 15 + delta / 30;
-  if (thread_info.human_value_margin > 120) thread_info.human_value_margin = 120;
+  if (thread_info.human_value_margin > 120)
+    thread_info.human_value_margin = 120;
   thread_info.human_noise_sigma = delta / 25;
-  if (thread_info.human_noise_sigma > 120) thread_info.human_noise_sigma = 120;
+  if (thread_info.human_noise_sigma > 120)
+    thread_info.human_noise_sigma = 120;
   int depth_cap = 0;
   if (elo < 3300) {
-    depth_cap = 8 + (elo - 1200) * 8 / 2100;  
+    depth_cap = 8 + (elo - 1200) * 8 / 2100;
   }
-   
-  if (elo <= 2000) depth_cap = 14;
-  if (elo <= 1800) depth_cap = 16;  
-  if (elo <= 1500) depth_cap = 14;
-  if (elo <= 1300) depth_cap = 12;
+
+  if (elo <= 2000)
+    depth_cap = 14;
+  if (elo <= 1800)
+    depth_cap = 16;
+  if (elo <= 1500)
+    depth_cap = 14;
+  if (elo <= 1300)
+    depth_cap = 12;
   thread_info.human_depth_limit = depth_cap;
 }
 
 void run_thread(Position &position, ThreadInfo &thread_info, std::thread &s) {
-   
-  s = std::thread(search_position, std::ref(position), std::ref(thread_info), std::ref(TT));
+
+  s = std::thread(search_position, std::ref(position), std::ref(thread_info),
+                  std::ref(TT));
 }
 
 uint64_t perft(int depth, Position &position, bool first,
                ThreadInfo &thread_info)
- 
- 
+
 {
   uint64_t total_nodes = 0;
   uint64_t checkers = attacks_square(
@@ -49,8 +57,8 @@ uint64_t perft(int depth, Position &position, bool first,
 
   if (depth <= 1) {
     std::array<Move, ListSize> list;
-   
-  int nmoves = legal_movegen(position, list.data());
+
+    int nmoves = legal_movegen(position, list.data());
 
     for (int i = 0; i < nmoves; i++) {
       total_nodes += is_legal(position, list[i]);
@@ -60,16 +68,16 @@ uint64_t perft(int depth, Position &position, bool first,
   }
 
   MovePicker picker;
-  init_picker(picker, position, -107, checkers, &(thread_info.game_hist[thread_info.game_ply]));
+  init_picker(picker, position, -107, checkers,
+              &(thread_info.game_hist[thread_info.game_ply]));
 
-  while (Move move = next_move(picker, position, thread_info, MoveNone,
-                               false))  
-                                        
+  while (Move move = next_move(picker, position, thread_info, MoveNone, false))
+
   {
     if (!is_legal(position, move)) {
       continue;
     }
-     
+
     Position new_position = position;
     make_move(new_position, move);
 
@@ -108,8 +116,8 @@ void bench(Position &position, ThreadInfo &thread_info) {
       "1r4k1/4ppb1/2n1b1qp/pB4p1/1n1BP1P1/7P/2PNQPK1/3RN3 w - - 8 29",
       "8/p2B4/PkP5/4p1pK/4Pb1p/5P2/8/8 w - - 29 68",
       "3r4/ppq1ppkp/4bnp1/2pN4/2P1P3/1P4P1/PQ3PBP/R4K2 b - - 2 20",
-  "5rr1/4n2k/4q2P/P1P2n2/3B1p2/4pP2/2N1P3/1RR1K2Q w - - 1 49",
-  "q5k1/5ppp/1r3bn1/1B6/P1N2P2/BQ2P1P1/5K1P/8 b - - 2 34",
+      "5rr1/4n2k/4q2P/P1P2n2/3B1p2/4pP2/2N1P3/1RR1K2Q w - - 1 49",
+      "q5k1/5ppp/1r3bn1/1B6/P1N2P2/BQ2P1P1/5K1P/8 b - - 2 34",
       "r1b2k1r/5n2/p4q2/1ppn1Pp1/3pp1p1/NP2P3/P1PPBK2/1RQN2R1 w - - 0 22",
       "r1bqk2r/pppp1ppp/5n2/4b3/4P3/P1N5/1PP2PPP/R1BQKB1R w KQkq - 0 5",
       "r1bqr1k1/pp1p1ppp/2p5/8/3N1Q2/P2BB3/1PP2PPP/R3K2n b Q - 1 12",
@@ -147,26 +155,13 @@ void bench(Position &position, ThreadInfo &thread_info) {
     new_game(thread_info, TT);
     set_board(position, thread_info, fen);
     thread_info.start_time = std::chrono::steady_clock::now();
-      thread_info.infinite_search = false;
+    thread_info.infinite_search = false;
     search_position(position, thread_info, TT);
     total_nodes += thread_info.nodes.load();
   }
 
   safe_printf("Bench: %" PRIu64 " nodes %" PRIi64 " nps\n", total_nodes,
-    (int64_t)(total_nodes * 1000 / time_elapsed(start)));
-}
-
-Move uci_to_internal(const Position &position, std::string uci) {
-   
-  std::array<Move, ListSize> list;
-  int nmoves = legal_movegen(position, list.data());
-
-  for (int i = 0; i < nmoves; i++) {
-    if (internal_to_uci(position, list[i]) == uci)
-      return list[i];
-  }
-
-  return 0;
+              (int64_t)(total_nodes * 1000 / time_elapsed(start)));
 }
 
 void uci(ThreadInfo &thread_info, Position &position) noexcept {
@@ -183,22 +178,20 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
 
   std::thread s;
 
-   
   auto safe_join = [](std::thread &t) {
     try {
-      if (t.joinable()) t.join();
+      if (t.joinable())
+        t.join();
     } catch (...) {
-       
     }
   };
 
   while (getline(std::cin, input)) {
-     
+
     if (std::cin.eof() || std::cin.fail()) {
       break;
     }
-    
-     
+
     if (input.empty()) {
       continue;
     }
@@ -207,7 +200,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
 
     std::string command;
 
-    input_stream >> std::skipws >> command;  
+    input_stream >> std::skipws >> command;
 
     if (command == "d") {
       input_stream.clear();
@@ -222,15 +215,14 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
 
       safe_join(s);
 
-       
       if (thread_data.num_threads > 0 && !thread_data.threads.empty()) {
-         
+
         try {
           reset_barrier.cancel();
           idle_barrier.cancel();
-        } catch (...) {}
+        } catch (...) {
+        }
 
-         
         {
           std::lock_guard<std::mutex> lg(thread_data.data_mutex);
           for (size_t i = 0; i < thread_data.threads.size(); i++) {
@@ -240,54 +232,60 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           thread_data.threads.clear();
         }
 
-         
         try {
           reset_barrier.clear_cancel();
           idle_barrier.clear_cancel();
-        } catch (...) {}
+        } catch (...) {
+        }
       }
       std::exit(0);
     }
 
     else if (command == "uci") {
-  safe_printf("id name Stallion GB Edition\n"
-             "id author LegendOfCompiling\n"
-              
-             "option name Hash type spin default 256 min 1 max 131072\n"
-             "option name Threads type spin default 1 min 1 max 1024\n"
-             "option name MultiPV type spin default 1 min 1 max 256\n"
-              
-             "option name Variety type spin default 150 min 0 max 150\n"
-             "option name UCI_LimitStrength type check default false\n"
-              
-             "option name UCI_Elo type spin default 3401 min 500 max 3401\n"
-             "option name UCI_Chess960 type check default false\n"
-             "option name OpeningAggressiveness type spin default 150 min 50 max 150\n"
-             "option name MiddlegameAggressiveness type spin default 150 min 50 max 150\n"
-             "option name LateMiddlegameAggressiveness type spin default 150 min 50 max 150\n"
-             "option name EndgameAggressiveness type spin default 150 min 50 max 150\n"
-             "option name SacrificeLookAhead type spin default 1 min 0 max 1\n"
-             "option name SacrificeLookAheadTimeMultiplier type spin default 200 min 50 max 200\n"
-             "option name SacrificeLookAheadAggressiveness type spin default 150 min 50 max 150\n"
-             "option name MaxMoveTime type spin default 0 min 0 max 10000\n"
-             "option name MoveOverhead type spin default 30 min 0 max 1000\n"
-             "option name Ponder type check default false\n"
-             "option name UseSyzygy type check default false\n"
-             "option name SyzygyPath type string default \"\"\n"
-             "option name MaxDepth type spin default 0 min 0 max 256\n"
-             "option name MaxNodes type spin default 0 min 0 max 500000\n"
-              
-             "option name UseOpeningBook type check default false\n"
-             "option name BookPath type string default \"\"\n"
-             "option name BookDepthLimit type spin default 0 min 0 max 50\n"
-             "option name SyzygyProbeDepth type spin default 6 min 1 max 64\n"
-             "option name SyzygyProbeLimit type spin default 6 min 1 max 7\n"
-             "option name Syzygy50MoveRule type check default true\n"
-             "option name BookMinWeight type spin default 0 min 0 max 1000\n"
-             "option name PonderTimeFactor type spin default 200 min 0 max 200\n");
+      safe_printf(
+          "id name Stallion GB Edition\n"
+          "id author LegendOfCompiling\n"
 
-       
-  safe_printf("uciok\n");
+          "option name Hash type spin default 256 min 1 max 131072\n"
+          "option name Threads type spin default 1 min 1 max 1024\n"
+          "option name MultiPV type spin default 1 min 1 max 256\n"
+
+          "option name Variety type spin default 150 min 0 max 150\n"
+          "option name UCI_LimitStrength type check default false\n"
+
+          "option name UCI_Elo type spin default 3401 min 500 max 3401\n"
+          "option name UCI_Chess960 type check default false\n"
+          "option name OpeningAggressiveness type spin default 150 min 50 max "
+          "150\n"
+          "option name MiddlegameAggressiveness type spin default 150 min 50 "
+          "max 150\n"
+          "option name LateMiddlegameAggressiveness type spin default 150 min "
+          "50 max 150\n"
+          "option name EndgameAggressiveness type spin default 150 min 50 max "
+          "150\n"
+          "option name SacrificeLookAhead type spin default 1 min 0 max 1\n"
+          "option name SacrificeLookAheadTimeMultiplier type spin default 200 "
+          "min 50 max 200\n"
+          "option name SacrificeLookAheadAggressiveness type spin default 150 "
+          "min 50 max 150\n"
+          "option name MaxMoveTime type spin default 0 min 0 max 10000\n"
+          "option name MoveOverhead type spin default 30 min 0 max 1000\n"
+          "option name Ponder type check default false\n"
+          "option name UseSyzygy type check default false\n"
+          "option name SyzygyPath type string default \"\"\n"
+          "option name MaxDepth type spin default 0 min 0 max 256\n"
+          "option name MaxNodes type spin default 0 min 0 max 500000\n"
+
+          "option name UseOpeningBook type check default false\n"
+          "option name BookPath type string default \"\"\n"
+          "option name BookDepthLimit type spin default 0 min 0 max 50\n"
+          "option name SyzygyProbeDepth type spin default 6 min 1 max 64\n"
+          "option name SyzygyProbeLimit type spin default 6 min 1 max 7\n"
+          "option name Syzygy50MoveRule type check default true\n"
+          "option name BookMinWeight type spin default 0 min 0 max 1000\n"
+          "option name PonderTimeFactor type spin default 200 min 0 max 200\n");
+
+      safe_printf("uciok\n");
     }
 
     else if (command == "printparams") {
@@ -295,12 +293,11 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
     }
 
     else if (command == "isready") {
-  safe_printf("readyok\n");
+      safe_printf("readyok\n");
     }
 
     else if (command == "setoption") {
-       
-       
+
       std::string word;
       std::string optName;
       std::string valueStr;
@@ -315,30 +312,46 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           gotName = true;
         } else if (word == "value") {
           afterValue = true;
-           
+
           std::string rest;
           std::getline(input_stream, rest);
-          if (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.erase(0, rest.find_first_not_of(" \t"));
+          if (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t'))
+            rest.erase(0, rest.find_first_not_of(" \t"));
           valueStr = rest;
           break;
         } else if (!afterValue) {
-           
+
           valueStr = word;
           afterValue = true;
           std::string rest;
           std::getline(input_stream, rest);
-          if (!rest.empty()) valueStr += rest;
-          if (!valueStr.empty() && (valueStr[0] == ' ' || valueStr[0] == '\t')) valueStr.erase(0, valueStr.find_first_not_of(" \t"));
+          if (!rest.empty())
+            valueStr += rest;
+          if (!valueStr.empty() && (valueStr[0] == ' ' || valueStr[0] == '\t'))
+            valueStr.erase(0, valueStr.find_first_not_of(" \t"));
           break;
         }
       }
 
-       
       auto parse_int = [](const std::string &s, bool &ok) {
-        try { int v = std::stoi(s); ok = true; return v; } catch (...) { ok = false; return 0; }
+        try {
+          int v = std::stoi(s);
+          ok = true;
+          return v;
+        } catch (...) {
+          ok = false;
+          return 0;
+        }
       };
       auto parse_uint64 = [](const std::string &s, bool &ok) -> uint64_t {
-        try { unsigned long long tmp = std::stoull(s); ok = true; return static_cast<uint64_t>(tmp); } catch (...) { ok = false; return static_cast<uint64_t>(0); }
+        try {
+          unsigned long long tmp = std::stoull(s);
+          ok = true;
+          return static_cast<uint64_t>(tmp);
+        } catch (...) {
+          ok = false;
+          return static_cast<uint64_t>(0);
+        }
       };
       auto to_bool = [](std::string s) {
         std::transform(s.begin(), s.end(), s.begin(), ::tolower);
@@ -346,101 +359,203 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       };
 
       if (!gotName) {
-        continue;  
+        continue;
       }
 
-       
       if (optName == "Hash") {
-        bool ok=false; int mb = parse_int(valueStr, ok); if (!ok) continue;
-        if (mb < 1) mb = 1; if (mb > 131072) mb = 131072; resize_TT(mb);
-      }
-      else if (optName == "Threads") {
-        bool ok=false; int thr = parse_int(valueStr, ok); if (!ok) continue;
-        if (thr < 1) thr = 1; if (thr > 1024) thr = 1024;
-         
+        bool ok = false;
+        int mb = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        if (mb < 1)
+          mb = 1;
+        if (mb > 131072)
+          mb = 131072;
+        resize_TT(mb);
+      } else if (optName == "Threads") {
+        bool ok = false;
+        int thr = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        if (thr < 1)
+          thr = 1;
+        if (thr > 1024)
+          thr = 1024;
+
         thread_data.terminate = true;
-         
-        try { reset_barrier.cancel(); idle_barrier.cancel(); } catch (...) {}
-        for (auto &t : thread_data.threads) {
-          try { if (t.joinable()) t.join(); } catch (...) {}
+
+        try {
+          reset_barrier.cancel();
+          idle_barrier.cancel();
+        } catch (...) {
         }
-        try { reset_barrier.clear_cancel(); idle_barrier.clear_cancel(); } catch (...) {}
+        for (auto &t : thread_data.threads) {
+          try {
+            if (t.joinable())
+              t.join();
+          } catch (...) {
+          }
+        }
+        try {
+          reset_barrier.clear_cancel();
+          idle_barrier.clear_cancel();
+        } catch (...) {
+        }
         thread_data.thread_infos.clear();
         thread_data.threads.clear();
         thread_data.terminate = false;
         thread_data.num_threads = thr;
-         
+
         reset_barrier.reset(thread_data.num_threads);
         idle_barrier.reset(thread_data.num_threads);
         search_end_barrier.reset(thread_data.num_threads);
-         
+
         for (int i = 0; i < thr - 1; i++) {
           thread_data.thread_infos.emplace_back();
           thread_data.threads.emplace_back(loop, i);
         }
-      }
-      else if (optName == "MultiPV") {
-        bool ok=false; int mv = parse_int(valueStr, ok); if (!ok) continue; if (mv < 1) mv = 1; if (mv > 256) mv = 256; thread_info.multipv = mv;
-      }
-      else if (optName == "Variety") {
-        bool ok=false; int v = parse_int(valueStr, ok); if (!ok) continue; v = std::clamp(v, 0, 150); thread_info.variety = v;
-      }
-      else if (optName == "UCI_LimitStrength") {
-        bool b = to_bool(valueStr); 
-        thread_info.is_human = b; 
+      } else if (optName == "MultiPV") {
+        bool ok = false;
+        int mv = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        if (mv < 1)
+          mv = 1;
+        if (mv > 256)
+          mv = 256;
+        thread_info.multipv = mv;
+      } else if (optName == "Variety") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 0, 150);
+        thread_info.variety = v;
+      } else if (optName == "UCI_LimitStrength") {
+        bool b = to_bool(valueStr);
+        thread_info.is_human = b;
         if (!b) {
-          thread_info.human_value_margin = 0; 
-          thread_info.human_noise_sigma = 0; 
-          thread_info.human_depth_limit = 0; 
+          thread_info.human_value_margin = 0;
+          thread_info.human_noise_sigma = 0;
+          thread_info.human_depth_limit = 0;
         } else {
           compute_human_params(thread_info);
         }
-      }
-      else if (optName == "UCI_Chess960") {
-        bool b = to_bool(valueStr); thread_data.is_frc = b; }
-      else if (optName == "UCI_Elo") {
-        bool ok=false; int elo = parse_int(valueStr, ok); if (!ok) continue;
+      } else if (optName == "UCI_Chess960") {
+        bool b = to_bool(valueStr);
+        thread_data.is_frc = b;
+      } else if (optName == "UCI_Elo") {
+        bool ok = false;
+        int elo = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
         elo = std::clamp(elo, 500, 3401);
         thread_info.human_elo = elo;
         if (thread_info.is_human) {
           compute_human_params(thread_info);
         }
-      }
-      else if (optName == "OpeningAggressiveness") {
-        bool ok=false; int v = parse_int(valueStr, ok); if (!ok) continue; v = std::clamp(v, 50, 150); thread_info.opening_aggressiveness = v / 100.0f; }
-      else if (optName == "MiddlegameAggressiveness") {
-        bool ok=false; int v = parse_int(valueStr, ok); if (!ok) continue; v = std::clamp(v, 50, 150); thread_info.middlegame_aggressiveness = v / 100.0f; }
-      else if (optName == "LateMiddlegameAggressiveness") {
-        bool ok=false; int v = parse_int(valueStr, ok); if (!ok) continue; v = std::clamp(v, 50, 150); thread_info.late_middlegame_aggressiveness = v / 100.0f; }
-      else if (optName == "EndgameAggressiveness") {
-        bool ok=false; int v = parse_int(valueStr, ok); if (!ok) continue; v = std::clamp(v, 50, 150); thread_info.endgame_aggressiveness = v / 100.0f; }
-      else if (optName == "SacrificeLookAhead") {
-        bool ok=false; int v = parse_int(valueStr, ok); if (!ok) continue; v = std::clamp(v, 0, 1); thread_info.sacrifice_lookahead = v; }
-      else if (optName == "SacrificeLookAheadTimeMultiplier") {
-        bool ok=false; int v = parse_int(valueStr, ok); if (!ok) continue; v = std::clamp(v, 50, 200); thread_info.sacrifice_lookahead_time_multiplier = v; }
-      else if (optName == "SacrificeLookAheadAggressiveness") {
-        bool ok=false; int v = parse_int(valueStr, ok); if (!ok) continue; v = std::clamp(v, 50, 150); thread_info.sacrifice_lookahead_aggressiveness = v; }
-  else if (optName == "MaxMoveTime") { bool ok=false; int v=parse_int(valueStr,ok); if(!ok) continue; thread_info.max_move_time = static_cast<uint64_t>(std::max(0, v)); }
-      else if (optName == "MoveOverhead") { bool ok=false; int v=parse_int(valueStr,ok); if(!ok) continue; thread_info.move_overhead = static_cast<uint64_t>(std::clamp(v, 0, 1000)); }
-      else if (optName == "MaxDepth") { bool ok=false; int v=parse_int(valueStr,ok); if(!ok) continue; v = std::clamp(v, 0, 256); thread_info.max_depth = (uint16_t)v; }
-      else if (optName == "MaxNodes") { bool ok=false; uint64_t v=parse_uint64(valueStr,ok); if(!ok) continue; if (v > 500000ULL) v = 500000ULL; thread_info.max_nodes = v; }
-      else if (optName == "UseSyzygy") {
+      } else if (optName == "OpeningAggressiveness") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 50, 150);
+        thread_info.opening_aggressiveness = v / 100.0f;
+      } else if (optName == "MiddlegameAggressiveness") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 50, 150);
+        thread_info.middlegame_aggressiveness = v / 100.0f;
+      } else if (optName == "LateMiddlegameAggressiveness") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 50, 150);
+        thread_info.late_middlegame_aggressiveness = v / 100.0f;
+      } else if (optName == "EndgameAggressiveness") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 50, 150);
+        thread_info.endgame_aggressiveness = v / 100.0f;
+      } else if (optName == "SacrificeLookAhead") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 0, 1);
+        thread_info.sacrifice_lookahead = v;
+      } else if (optName == "SacrificeLookAheadTimeMultiplier") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 50, 200);
+        thread_info.sacrifice_lookahead_time_multiplier = v;
+      } else if (optName == "SacrificeLookAheadAggressiveness") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 50, 150);
+        thread_info.sacrifice_lookahead_aggressiveness = v;
+      } else if (optName == "MaxMoveTime") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        thread_info.max_move_time = static_cast<uint64_t>(std::max(0, v));
+      } else if (optName == "MoveOverhead") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        thread_info.move_overhead =
+            static_cast<uint64_t>(std::clamp(v, 0, 1000));
+      } else if (optName == "MaxDepth") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 0, 256);
+        thread_info.max_depth = (uint16_t)v;
+      } else if (optName == "MaxNodes") {
+        bool ok = false;
+        uint64_t v = parse_uint64(valueStr, ok);
+        if (!ok)
+          continue;
+        if (v > 500000ULL)
+          v = 500000ULL;
+        thread_info.max_nodes = v;
+      } else if (optName == "UseSyzygy") {
         bool b = to_bool(valueStr);
         if (b && !thread_info.syzygy_path.empty()) {
-           
+
           if (std::filesystem::exists(thread_info.syzygy_path)) {
             thread_info.use_syzygy = true;
-            if (tb_initialized) { tb_free(); tb_initialized = false; }
-            safe_printf("info string syzygy enabled: %s\n", thread_info.syzygy_path.c_str());
+            if (tb_initialized) {
+              tb_free();
+              tb_initialized = false;
+            }
+            safe_printf("info string syzygy enabled: %s\n",
+                        thread_info.syzygy_path.c_str());
             safe_fflush();
           } else {
-            safe_printf("info string failed to enable syzygy: %s\n", thread_info.syzygy_path.c_str());
+            safe_printf("info string failed to enable syzygy: %s\n",
+                        thread_info.syzygy_path.c_str());
             safe_fflush();
             thread_info.use_syzygy = false;
           }
         } else if (!b) {
           thread_info.use_syzygy = false;
-          if (tb_initialized) { tb_free(); tb_initialized = false; }
+          if (tb_initialized) {
+            tb_free();
+            tb_initialized = false;
+          }
           safe_printf("info string syzygy disabled\n");
           safe_fflush();
         } else {
@@ -448,36 +563,53 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           safe_fflush();
           thread_info.use_syzygy = false;
         }
-      }
-      else if (optName == "SyzygyPath") {
+      } else if (optName == "SyzygyPath") {
         if (valueStr != thread_info.syzygy_path) {
           thread_info.syzygy_path = valueStr;
-          if (tb_initialized) { tb_free(); tb_initialized = false; }
+          if (tb_initialized) {
+            tb_free();
+            tb_initialized = false;
+          }
           if (thread_info.use_syzygy) {
-             
+
             if (std::filesystem::exists(valueStr)) {
-              safe_printf("info string syzygy path updated: %s\n", valueStr.c_str());
+              safe_printf("info string syzygy path updated: %s\n",
+                          valueStr.c_str());
               safe_fflush();
             } else {
-              safe_printf("info string failed to set syzygy path: %s\n", valueStr.c_str());
+              safe_printf("info string failed to set syzygy path: %s\n",
+                          valueStr.c_str());
               safe_fflush();
               thread_info.use_syzygy = false;
             }
           }
         }
-      }
-  else if (optName == "SyzygyProbeDepth") { bool ok=false; int v=parse_int(valueStr,ok); if(!ok) continue; v = std::clamp(v, 1, 64); thread_info.syzygy_probe_depth = v; }
-      else if (optName == "SyzygyProbeLimit") { bool ok=false; int v=parse_int(valueStr,ok); if(!ok) continue; v = std::clamp(v, 1, 7); thread_info.syzygy_probe_limit = v; }
-      else if (optName == "UseOpeningBook") {
+      } else if (optName == "SyzygyProbeDepth") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 1, 64);
+        thread_info.syzygy_probe_depth = v;
+      } else if (optName == "SyzygyProbeLimit") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 1, 7);
+        thread_info.syzygy_probe_limit = v;
+      } else if (optName == "UseOpeningBook") {
         bool b = to_bool(valueStr);
         if (b && !thread_info.book_path.empty()) {
-           
+
           if (std::filesystem::exists(thread_info.book_path)) {
             thread_info.use_opening_book = true;
-            safe_printf("info string opening book enabled: %s\n", thread_info.book_path.c_str());
+            safe_printf("info string opening book enabled: %s\n",
+                        thread_info.book_path.c_str());
             safe_fflush();
           } else {
-            safe_printf("info string failed to enable opening book: %s\n", thread_info.book_path.c_str());
+            safe_printf("info string failed to enable opening book: %s\n",
+                        thread_info.book_path.c_str());
             safe_fflush();
             thread_info.use_opening_book = false;
           }
@@ -486,36 +618,61 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           safe_printf("info string opening book disabled\n");
           safe_fflush();
         } else {
-          safe_printf("info string failed to enable opening book: no path set\n");
+          safe_printf(
+              "info string failed to enable opening book: no path set\n");
           safe_fflush();
           thread_info.use_opening_book = false;
         }
-      }
-      else if (optName == "BookPath") {
+      } else if (optName == "BookPath") {
         if (valueStr != thread_info.book_path) {
           thread_info.book_path = valueStr;
           if (thread_info.use_opening_book) {
-             
+
             if (std::filesystem::exists(valueStr)) {
-              safe_printf("info string opening book path updated: %s\n", valueStr.c_str());
+              safe_printf("info string opening book path updated: %s\n",
+                          valueStr.c_str());
               safe_fflush();
             } else {
-              safe_printf("info string failed to set opening book path: %s\n", valueStr.c_str());
+              safe_printf("info string failed to set opening book path: %s\n",
+                          valueStr.c_str());
               safe_fflush();
               thread_info.use_opening_book = false;
             }
           }
         }
-      }
-  else if (optName == "BookDepthLimit") { bool ok=false; int v=parse_int(valueStr,ok); if(!ok) continue; v = std::clamp(v, 0, 50); thread_info.book_depth_limit = v; }
-      else if (optName == "BookMinWeight") { bool ok=false; int v=parse_int(valueStr,ok); if(!ok) continue; v = std::clamp(v, 0, 1000); thread_info.book_min_weight = v; }
-  else if (optName == "PonderTimeFactor") { bool ok=false; int v=parse_int(valueStr,ok); if(!ok) continue; v = std::clamp(v, 0, 200); thread_info.ponder_time_factor = v; }
-      else {
-         
+      } else if (optName == "BookDepthLimit") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 0, 50);
+        thread_info.book_depth_limit = v;
+      } else if (optName == "BookMinWeight") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 0, 1000);
+        thread_info.book_min_weight = v;
+      } else if (optName == "PonderTimeFactor") {
+        bool ok = false;
+        int v = parse_int(valueStr, ok);
+        if (!ok)
+          continue;
+        v = std::clamp(v, 0, 200);
+        thread_info.ponder_time_factor = v;
+      } else {
+
         for (auto &param : params) {
           if (optName == param.name) {
-            bool ok=false; int v=parse_int(valueStr,ok); if(!ok) break; v = std::clamp(v, param.min, param.max); param.value = v;
-            if (optName == "LMRBase" || optName == "LMRRatio") init_LMR();
+            bool ok = false;
+            int v = parse_int(valueStr, ok);
+            if (!ok)
+              break;
+            v = std::clamp(v, param.min, param.max);
+            param.value = v;
+            if (optName == "LMRBase" || optName == "LMRRatio")
+              init_LMR();
             break;
           }
         }
@@ -538,29 +695,31 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       }
 
       new_game(thread_info, TT);
-      thread_info.game_ply = 0;  
-      
-       
+      thread_info.game_ply = 0;
+
       thread_info.time_manager = TimeManager();
       thread_info.best_move_stable = false;
       thread_info.stability_counter = 0;
       thread_info.previous_best_move = MoveNone;
-      
-       
+
       if (thread_info.use_opening_book && !thread_info.book_path.empty()) {
         if (!thread_info.opening_book.is_loaded()) {
-          bool loaded = thread_info.opening_book.load_book(thread_info.book_path);
+          bool loaded =
+              thread_info.opening_book.load_book(thread_info.book_path);
           if (!loaded) {
-            safe_print_cerr(std::string("Warning: Failed to load opening book: ") + thread_info.book_path);
+            safe_print_cerr(
+                std::string("Warning: Failed to load opening book: ") +
+                thread_info.book_path);
             thread_info.use_opening_book = false;
           }
         }
       }
-      
-       
+
       if (thread_info.use_syzygy && !tb_init(thread_info.syzygy_path.c_str())) {
-        safe_print_cerr(std::string("Warning: Syzygy TB initialization failed for path: ") + thread_info.syzygy_path);
-        thread_info.use_syzygy = false;  
+        safe_print_cerr(
+            std::string("Warning: Syzygy TB initialization failed for path: ") +
+            thread_info.syzygy_path);
+        thread_info.use_syzygy = false;
       } else if (!thread_info.use_syzygy) {
         tb_free();
       }
@@ -569,13 +728,14 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
     }
 
     else if (command == "position") {
-       
+
       thread_data.stop = true;
       {
         std::unique_lock<std::mutex> lk(thread_data.search_mutex);
-        thread_data.search_cv.wait(lk, [&]{
-          return std::none_of(thread_data.thread_infos.begin(), thread_data.thread_infos.end(),
-                              [](const ThreadInfo& ti){ return ti.searching.load(); });
+        thread_data.search_cv.wait(lk, [&] {
+          return std::none_of(
+              thread_data.thread_infos.begin(), thread_data.thread_infos.end(),
+              [](const ThreadInfo &ti) { return ti.searching.load(); });
         });
       }
       if (s.joinable()) {
@@ -585,12 +745,11 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       std::string setup;
       input_stream >> setup;
       if (setup == "fen") {
-        thread_info.game_ply = 0;  
+        thread_info.game_ply = 0;
         std::string fen;
 
         for (int i = 0; i < 6; i++) {
-           
-           
+
           std::string substr;
           input_stream >> substr;
           fen += substr + " ";
@@ -598,48 +757,55 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
 
         set_board(position, thread_info, fen);
       } else {
-        thread_info.game_ply = 0;  
+        thread_info.game_ply = 0;
         set_board(position, thread_info,
                   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
       }
 
       calculate(position);
       std::string has_moves;
-      if (input_stream >>
-          has_moves) {  
+      if (input_stream >> has_moves) {
 
         std::string moves;
         Move last_move_played = MoveNone;
         while (input_stream >> moves) {
           Move move = uci_to_internal(position, moves);
-          if (move == MoveNone) break;
-          if (thread_info.game_ply >= GameSize) break;
-           
-          thread_info.game_hist[thread_info.game_ply].position_key = position.zobrist_key;
+          if (move == MoveNone)
+            break;
+          if (thread_info.game_ply >= GameSize)
+            break;
+
+          thread_info.game_hist[thread_info.game_ply].position_key =
+              position.zobrist_key;
           thread_info.game_hist[thread_info.game_ply].played_move = move;
-          thread_info.game_hist[thread_info.game_ply].piece_moved = position.board[extract_from(move)];
-          thread_info.game_hist[thread_info.game_ply].is_cap = is_cap(position, move);
-          thread_info.game_hist[thread_info.game_ply].m_diff = material_eval(position);
-          if (thread_info.game_ply + 1 < GameSize) thread_info.game_ply++;
+          thread_info.game_hist[thread_info.game_ply].piece_moved =
+              position.board[extract_from(move)];
+          thread_info.game_hist[thread_info.game_ply].is_cap =
+              is_cap(position, move);
+          thread_info.game_hist[thread_info.game_ply].m_diff =
+              material_eval(position);
+          if (thread_info.game_ply + 1 < GameSize)
+            thread_info.game_ply++;
 
           make_move(position, move);
           last_move_played = move;
         }
-         
+
         thread_info.search_ply = 0;
-         
-        if (thread_info.pondering && last_move_played != MoveNone && thread_info.ponder_move != MoveNone) {
+
+        if (thread_info.pondering && last_move_played != MoveNone &&
+            thread_info.ponder_move != MoveNone) {
           if (last_move_played != thread_info.ponder_move) {
-             
+
             thread_info.pondering = false;
-              if (!thread_data.stop) {
+            if (!thread_data.stop) {
               thread_data.stop = true;
               safe_printf("info string ponder mismatch abort\n");
-                 
             }
           } else {
-             
-            thread_info.ponder_hit = true; thread_info.pondering = false;
+
+            thread_info.ponder_hit = true;
+            thread_info.pondering = false;
           }
         }
       }
@@ -649,19 +815,23 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
     else if (command == "go") {
       thread_info.start_time = std::chrono::steady_clock::now();
       thread_info.infinite_search = false;
-       
+
       if (thread_info.pondering == false) {
         thread_info.ponder_hit = false;
         thread_info.ponder_move = MoveNone;
       }
-       
+
       if (thread_info.use_syzygy && !tb_initialized) {
         if (tb_init(thread_info.syzygy_path.c_str())) {
           tb_initialized = true;
-          safe_printf("info string tablebase initialized: %s\n", thread_info.syzygy_path.c_str());
+          safe_printf("info string tablebase initialized: %s\n",
+                      thread_info.syzygy_path.c_str());
         } else {
-          safe_print_cerr(std::string("Warning: Syzygy TB initialization failed for path: ") + thread_info.syzygy_path);
-          thread_info.use_syzygy = false;  
+          safe_print_cerr(
+              std::string(
+                  "Warning: Syzygy TB initialization failed for path: ") +
+              thread_info.syzygy_path);
+          thread_info.use_syzygy = false;
         }
       } else if (!thread_info.use_syzygy && tb_initialized) {
         tb_free();
@@ -669,31 +839,31 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       }
       {
         std::unique_lock<std::mutex> lk(thread_data.search_mutex);
-        thread_data.search_cv.wait(lk, [&]{
-          return std::none_of(thread_data.thread_infos.begin(), thread_data.thread_infos.end(),
-                              [](const ThreadInfo& ti){ return ti.searching.load(); });
+        thread_data.search_cv.wait(lk, [&] {
+          return std::none_of(
+              thread_data.thread_infos.begin(), thread_data.thread_infos.end(),
+              [](const ThreadInfo &ti) { return ti.searching.load(); });
         });
       }
       if (s.joinable()) {
         s.join();
       }
       thread_info.max_nodes_searched = UINT64_MAX / 2;
-      if (thread_info.max_iter_depth != -1) thread_info.max_iter_depth = MaxSearchDepth;
+      if (thread_info.max_iter_depth != -1)
+        thread_info.max_iter_depth = MaxSearchDepth;
 
       int color = position.color, time = INT32_MAX, increment = 0;
       std::string token;
-        int movestogo = 0;
-        int mate_in = 0;
-        std::vector<Move> searchmoves;
-      bool is_perft_command = false;  
-      
+      int movestogo = 0;
+      int mate_in = 0;
+      std::vector<Move> searchmoves;
+
       while (input_stream >> token) {
-          if (token == "ponder") {
-            thread_info.pondering = true;
-            continue;
-          }
-         
-         
+        if (token == "ponder") {
+          thread_info.pondering = true;
+          continue;
+        }
+
         if (token == "infinite") {
           thread_info.max_iter_depth = MaxSearchDepth;
           thread_info.max_time = UINT64_MAX;
@@ -711,7 +881,8 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           input_stream >> movestogo;
         } else if (token == "mate") {
           input_stream >> mate_in;
-          thread_info.max_iter_depth = std::min(mate_in * 2 + 1, MaxSearchDepth);
+          thread_info.max_iter_depth =
+              std::min(mate_in * 2 + 1, MaxSearchDepth);
         } else if (token == "searchmoves") {
           std::string move_str;
           while (input_stream >> move_str && move_str.length() >= 4) {
@@ -720,9 +891,10 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
               searchmoves.push_back(move);
             }
           }
-           
+
           if (!move_str.empty() && move_str.length() < 4) {
-            input_stream.str(move_str + " " + input_stream.str().substr(input_stream.tellg()));
+            input_stream.str(move_str + " " +
+                             input_stream.str().substr(input_stream.tellg()));
             input_stream.seekg(0);
           }
         } else if (token == "nodes") {
@@ -743,69 +915,82 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           thread_info.time_manager.panic_time = static_cast<uint64_t>(t);
           thread_info.time_manager.soft_limit = static_cast<uint64_t>(t);
           thread_info.time_manager.hard_limit = static_cast<uint64_t>(t);
-          time = INT32_MAX;  
+          time = INT32_MAX;
           goto run;
         }
       }
 
-       
       if (movestogo > 0 && time != INT32_MAX) {
         int overhead = std::min(50, time / 10);
         time = std::max(2, time - overhead);
-        thread_info.max_time = static_cast<uint64_t>(time) / std::max(movestogo, 1);
+        thread_info.max_time =
+            static_cast<uint64_t>(time) / std::max(movestogo, 1);
         thread_info.opt_time = thread_info.max_time * 8 / 10;
       } else {
-         
+
         int overhead = std::min(50, time / 10);
         time = std::max(2, time - overhead);
         thread_info.max_time = static_cast<uint64_t>(time) * 4 / 5;
-        thread_info.opt_time = (static_cast<uint64_t>(time) / 15 + static_cast<uint64_t>(increment) * 9 / 10) * 7 / 10;
+        thread_info.opt_time = (static_cast<uint64_t>(time) / 15 +
+                                static_cast<uint64_t>(increment) * 9 / 10) *
+                               7 / 10;
       }
 
     run:
-       
+
       if (!thread_info.infinite_search && time != INT32_MAX) {
         int game_move = (thread_info.game_ply / 2) + 1;
-        thread_info.time_manager.initialize(static_cast<uint64_t>(time), static_cast<uint64_t>(increment), movestogo, game_move);
+        thread_info.time_manager.initialize(static_cast<uint64_t>(time),
+                                            static_cast<uint64_t>(increment),
+                                            movestogo, game_move);
         thread_info.max_time = thread_info.time_manager.hard_limit;
         thread_info.opt_time = thread_info.time_manager.soft_limit;
       }
-      
+
       if (thread_info.max_move_time > 0) {
         thread_info.max_time = thread_info.max_move_time;
-        thread_info.opt_time  = thread_info.max_move_time > thread_info.move_overhead
-                              ? thread_info.max_move_time - thread_info.move_overhead
-                              : 0;
+        thread_info.opt_time =
+            thread_info.max_move_time > thread_info.move_overhead
+                ? thread_info.max_move_time - thread_info.move_overhead
+                : 0;
       }
-      
-       
-      if (!thread_info.pondering && thread_info.use_opening_book && 
-          thread_info.opening_book.is_loaded() && 
-          (thread_info.book_depth_limit == 0 || thread_info.game_ply <= thread_info.book_depth_limit)) {
-        
+
+      if (!thread_info.pondering && thread_info.use_opening_book &&
+          thread_info.opening_book.is_loaded() &&
+          (thread_info.book_depth_limit == 0 ||
+           thread_info.game_ply <= thread_info.book_depth_limit)) {
+
         uint64_t book_key = thread_info.opening_book.polyglot_key(position);
-        Move book_move = thread_info.opening_book.probe_book(book_key, thread_info.book_min_weight);
-        
+        Move book_move = thread_info.opening_book.probe_book(
+            book_key, thread_info.book_min_weight);
+
         if (book_move != MoveNone && thread_info.variety > 0) {
-           
+
           bool seen = false;
-          for (auto k : thread_info.recent_book_keys) if (k == book_key) { seen = true; break; }
+          for (auto k : thread_info.recent_book_keys)
+            if (k == book_key) {
+              seen = true;
+              break;
+            }
           if (seen) {
-             
-            int v = (int)thread_info.variety;  
-            int skip_chance = (v * v) / 225;  
-            if (skip_chance > 100) skip_chance = 100;
+
+            int v = (int)thread_info.variety;
+            int skip_chance = (v * v) / 225;
+            if (skip_chance > 100)
+              skip_chance = 100;
             if ((Random::dist(Random::rd) % 100) < skip_chance) {
-              book_move = MoveNone;  
+              book_move = MoveNone;
             }
           }
           if (book_move != MoveNone) {
-            thread_info.recent_book_keys[thread_info.recent_book_head++ % thread_info.recent_book_keys.size()] = book_key;
+            thread_info.recent_book_keys[thread_info.recent_book_head++ %
+                                         thread_info.recent_book_keys.size()] =
+                book_key;
           }
         }
-        
+
         if (book_move != MoveNone) {
-           
+
           std::array<Move, ListSize> legal_moves;
           int num_legal = legal_movegen(position, legal_moves.data());
           bool is_legal = false;
@@ -818,50 +1003,52 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           if (is_legal) {
             std::string bm = internal_to_uci(position, book_move);
             safe_printf("bestmove %s\n", bm.c_str());
-            continue;  
+            continue;
           }
         }
-        
+
         if (thread_info.game_ply <= 2) {
           safe_printf("info string no book move found for this position\n");
         }
       }
-      
-       
+
       if (thread_info.max_depth > 0) {
-        thread_info.max_iter_depth = std::min(thread_info.max_iter_depth, static_cast<int>(thread_info.max_depth));
+        thread_info.max_iter_depth =
+            std::min(thread_info.max_iter_depth,
+                     static_cast<int>(thread_info.max_depth));
       }
-       
+
       if (thread_info.is_human && thread_info.human_depth_limit > 0) {
-        thread_info.max_iter_depth = std::min(thread_info.max_iter_depth, thread_info.human_depth_limit);
+        thread_info.max_iter_depth =
+            std::min(thread_info.max_iter_depth, thread_info.human_depth_limit);
       }
-       
+
       if (thread_info.max_nodes > 0) {
-        thread_info.max_nodes_searched = std::min(thread_info.max_nodes_searched, thread_info.max_nodes);
+        thread_info.max_nodes_searched =
+            std::min(thread_info.max_nodes_searched, thread_info.max_nodes);
       }
-      
-       
-      if (!is_perft_command) {
-        run_thread(position, thread_info, s);
-      }
+
+      // Run search
+      run_thread(position, thread_info, s);
     }
 
     else if (command == "ponderhit") {
       if (thread_info.pondering) {
-         
+
         thread_info.ponder_hit = true;
         thread_info.pondering = false;
-         
+
         auto ponder_elapsed = time_elapsed(thread_info.ponder_start_time);
         if (ponder_elapsed > 0 && !thread_info.infinite_search) {
-          uint64_t bonus = ponder_elapsed * thread_info.ponder_time_factor / 100;
-          thread_info.opt_time = std::min<uint64_t>(thread_info.opt_time + bonus, thread_info.max_time);
+          uint64_t bonus =
+              ponder_elapsed * thread_info.ponder_time_factor / 100;
+          thread_info.opt_time = std::min<uint64_t>(
+              thread_info.opt_time + bonus, thread_info.max_time);
         }
-  safe_printf("info string ponderhit reuse\n");
+        safe_printf("info string ponderhit reuse\n");
       }
     }
 
-     
     else if (command == "bench") {
       bench(position, thread_info);
     }
@@ -878,9 +1065,9 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
     }
 
     else if (command == "eval") {
-      thread_info.nnue_state.reset_nnue(position, thread_info.phase);
       int eval_score = eval(position, thread_info);
-  safe_printf("info string evaluation: %d cp\n", eval_score * 100 / NormalizationFactor);
+      safe_printf("info string evaluation: %d cp\n",
+                  eval_score * 100 / NormalizationFactor);
     }
 
     else if (command == "flip") {
@@ -891,13 +1078,15 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
 
     else if (command == "hashfull") {
       int filled = 0;
-      int sample_size = static_cast<int>(std::min<uint64_t>(safe_TT_size(), 1000));
-      if (sample_size <= 0) sample_size = 0;
-       
+      int sample_size =
+          static_cast<int>(std::min<uint64_t>(safe_TT_size(), 1000));
+      if (sample_size <= 0)
+        sample_size = 0;
+
       {
         std::lock_guard<std::mutex> lg(thread_data.data_mutex);
         for (int i = 0; i < sample_size; i++) {
-          for (auto& entry : TT[i].entries) {
+          for (auto &entry : TT[i].entries) {
             if (entry.score != 0 || entry.get_type() != EntryTypes::None) {
               filled++;
               break;
@@ -905,26 +1094,24 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           }
         }
       }
-      if (sample_size == 0) sample_size = 1;  
+      if (sample_size == 0)
+        sample_size = 1;
       safe_printf("info hashfull %d\n", (filled * 1000) / sample_size);
     }
   }
 
-   
   if (std::cin.eof() || std::cin.fail()) {
     thread_data.terminate = true;
-    
+
     if (s.joinable()) {
       s.join();
     }
-    
-     
+
     if (thread_data.num_threads > 0 && !thread_data.threads.empty()) {
       try {
         reset_barrier.arrive_and_wait();
         idle_barrier.arrive_and_wait();
       } catch (...) {
-         
       }
 
       for (size_t i = 0; i < thread_data.threads.size(); i++) {
@@ -933,7 +1120,6 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
             thread_data.threads[i].join();
           }
         } catch (...) {
-           
         }
       }
     }

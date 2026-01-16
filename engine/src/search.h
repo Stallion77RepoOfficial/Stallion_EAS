@@ -1,129 +1,158 @@
 #pragma once
 #include "movepick.h"
-#include "nnue.h"
 #include "params.h"
 #include "position.h"
- 
-#include "utils.h"
+
 #include "../fathom/src/tbprobe.h"
+#include "utils.h"
 #include <memory>
 
- 
+inline Move uci_to_internal(const Position &position, std::string uci) {
+  std::array<Move, ListSize> list;
+  int nmoves = legal_movegen(position, list.data());
+
+  for (int i = 0; i < nmoves; i++) {
+    if (internal_to_uci(position, list[i]) == uci)
+      return list[i];
+  }
+
+  return 0;
+}
+
 extern bool tb_initialized;
 
- 
-inline int64_t safe_elapsed(const std::chrono::steady_clock::time_point &start){
+inline int64_t
+safe_elapsed(const std::chrono::steady_clock::time_point &start) {
   auto ms = time_elapsed(start);
   return ms ? ms : 1;
 }
 
-int analyze_sacrifice(Position &position, ThreadInfo &thread_info, int depth, int ply, int sacrificer_color);
+int analyze_sacrifice(Position &position, ThreadInfo &thread_info, int depth,
+                      int ply, int sacrificer_color);
 
- 
 int probe_wdl_tb(Position &position, const ThreadInfo &thread_info) {
-   
-   
-  if (!tb_initialized || !thread_info.use_syzygy) return ScoreNone;
-   
+
+  if (!tb_initialized || !thread_info.use_syzygy)
+    return ScoreNone;
+
   if (thread_info.syzygy_probe_depth > 0 && thread_info.max_iter_depth > 0) {
     int remaining = thread_info.max_iter_depth - thread_info.search_ply;
-    if (remaining < thread_info.syzygy_probe_depth) return ScoreNone;
+    if (remaining < thread_info.syzygy_probe_depth)
+      return ScoreNone;
   }
 
   int piece_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
   int compiled_limit = TB_LARGEST ? (int)TB_LARGEST : 7;
-  if (piece_count > compiled_limit) return ScoreNone;
-  if (piece_count > thread_info.syzygy_probe_limit) return ScoreNone;  
+  if (piece_count > compiled_limit)
+    return ScoreNone;
+  if (piece_count > thread_info.syzygy_probe_limit)
+    return ScoreNone;
 
-   
   unsigned castling = 0;
-  if (position.castling_squares[Colors::White][Sides::Kingside] != SquareNone) castling |= TB_CASTLING_K;
-  if (position.castling_squares[Colors::White][Sides::Queenside] != SquareNone) castling |= TB_CASTLING_Q;
-  if (position.castling_squares[Colors::Black][Sides::Kingside] != SquareNone) castling |= TB_CASTLING_k;
-  if (position.castling_squares[Colors::Black][Sides::Queenside] != SquareNone) castling |= TB_CASTLING_q;
-  if (castling) return ScoreNone;
+  if (position.castling_squares[Colors::White][Sides::Kingside] != SquareNone)
+    castling |= TB_CASTLING_K;
+  if (position.castling_squares[Colors::White][Sides::Queenside] != SquareNone)
+    castling |= TB_CASTLING_Q;
+  if (position.castling_squares[Colors::Black][Sides::Kingside] != SquareNone)
+    castling |= TB_CASTLING_k;
+  if (position.castling_squares[Colors::Black][Sides::Queenside] != SquareNone)
+    castling |= TB_CASTLING_q;
+  if (castling)
+    return ScoreNone;
 
   unsigned ep = position.ep_square != SquareNone ? position.ep_square : 0;
-   
+
   unsigned rule50 = thread_info.syzygy_50_move_rule ? position.halfmoves : 0;
 
-  unsigned result = tb_probe_wdl(
-      position.colors_bb[0], position.colors_bb[1],
-      position.pieces_bb[PieceTypes::King], position.pieces_bb[PieceTypes::Queen],
-      position.pieces_bb[PieceTypes::Rook], position.pieces_bb[PieceTypes::Bishop],
-      position.pieces_bb[PieceTypes::Knight], position.pieces_bb[PieceTypes::Pawn],
-      rule50, castling, ep, position.color);
-  if (result == TB_RESULT_FAILED) { thread_data.tb_fails++; return ScoreNone; }
+  unsigned result = tb_probe_wdl(position.colors_bb[0], position.colors_bb[1],
+                                 position.pieces_bb[PieceTypes::King],
+                                 position.pieces_bb[PieceTypes::Queen],
+                                 position.pieces_bb[PieceTypes::Rook],
+                                 position.pieces_bb[PieceTypes::Bishop],
+                                 position.pieces_bb[PieceTypes::Knight],
+                                 position.pieces_bb[PieceTypes::Pawn], rule50,
+                                 castling, ep, position.color);
+  if (result == TB_RESULT_FAILED) {
+    thread_data.tb_fails++;
+    return ScoreNone;
+  }
   thread_data.tb_hits++;
   int wdl = TB_GET_WDL(result);
   switch (wdl) {
-    case TB_WIN:          return  TB_WIN_SCORE;
-    case TB_CURSED_WIN:   return  TB_CURSED_WIN_SCORE;
-    case TB_DRAW:         return  TB_DRAW_SCORE;
-    case TB_BLESSED_LOSS: return  TB_BLESSED_LOSS_SCORE;
-    case TB_LOSS:         return  TB_LOSS_SCORE;
-    default:              return ScoreNone;
+  case TB_WIN:
+    return TB_WIN_SCORE;
+  case TB_CURSED_WIN:
+    return TB_CURSED_WIN_SCORE;
+  case TB_DRAW:
+    return TB_DRAW_SCORE;
+  case TB_BLESSED_LOSS:
+    return TB_BLESSED_LOSS_SCORE;
+  case TB_LOSS:
+    return TB_LOSS_SCORE;
+  default:
+    return ScoreNone;
   }
 }
 
 constexpr int NormalizationFactor = 195;
 
-void update_history(int16_t &entry, int score) {  
+void update_history(int16_t &entry, int score) {
   entry += score - entry * abs(score) / 16384;
 }
-void update_corrhist(int16_t &entry, int score) {  
+void update_corrhist(int16_t &entry, int score) {
   entry += score - entry * abs(score) / 1024;
 }
 
- 
-inline void update_continuation_histories(
-    ThreadInfo &thread_info, int piece, int sq, int bonus,
-    Move their_last, int their_piece,
-    Move our_last, int our_piece,
-    Move ply4_last, int ply4_piece) {
-  
+inline void update_continuation_histories(ThreadInfo &thread_info, int piece,
+                                          int sq, int bonus, Move their_last,
+                                          int their_piece, Move our_last,
+                                          int our_piece, Move ply4_last,
+                                          int ply4_piece) {
+
   update_history(thread_info.HistoryScores[piece][sq], bonus);
-  
+
   if (their_last != MoveNone) {
     update_history(
-        thread_info.ContHistScores[their_piece][their_last][piece][sq],
-        bonus);
+        thread_info.ContHistScores[their_piece][their_last][piece][sq], bonus);
   }
   if (our_last != MoveNone) {
-    update_history(
-        thread_info.ContHistScores[our_piece][our_last][piece][sq],
-        bonus);
+    update_history(thread_info.ContHistScores[our_piece][our_last][piece][sq],
+                   bonus);
   }
   if (ply4_last != MoveNone) {
-    update_history(
-        thread_info.ContHistScores[ply4_piece][ply4_last][piece][sq],
-        bonus / 2);
+    update_history(thread_info.ContHistScores[ply4_piece][ply4_last][piece][sq],
+                   bonus / 2);
   }
 }
 
 bool out_of_time(ThreadInfo &thread_info) {
-  if (thread_data.stop || thread_info.datagen_stop) return true;
-   
-  if (thread_info.thread_id != 0) return false;
+  if (thread_data.stop || thread_info.datagen_stop)
+    return true;
 
-   
+  if (thread_info.thread_id != 0)
+    return false;
+
   uint64_t total_nodes = thread_info.nodes.load();
-  for (auto &ti : thread_data.thread_infos) total_nodes += ti.nodes.load();
+  for (auto &ti : thread_data.thread_infos)
+    total_nodes += ti.nodes.load();
   if (total_nodes >= thread_info.max_nodes_searched) {
-    if (thread_info.doing_datagen) thread_info.datagen_stop = true; else thread_data.stop = true;
+    if (thread_info.doing_datagen)
+      thread_info.datagen_stop = true;
+    else
+      thread_data.stop = true;
     return true;
   }
 
-   
   thread_info.time_checks++;
-  const uint16_t check_interval = 512;  
+  const uint16_t check_interval = 512;
   if (thread_info.time_checks >= check_interval) {
     thread_info.time_checks = 0;
     if (!thread_info.infinite_search && !thread_info.pondering) {
       uint64_t elapsed = time_elapsed(thread_info.start_time);
       thread_info.time_manager.update_node_count(total_nodes);
-      bool in_trouble = false;  
-      if (thread_info.time_manager.should_stop(elapsed, thread_info.best_move_stable, in_trouble) ||
+      bool in_trouble = false;
+      if (thread_info.time_manager.should_stop(
+              elapsed, thread_info.best_move_stable, in_trouble) ||
           elapsed > thread_info.max_time) {
         thread_data.stop = true;
         return true;
@@ -152,7 +181,6 @@ bool has_non_pawn_material(const Position &position, int color) {
 }
 
 int16_t total_mat_color(const Position &position, int color) {
-   
 
   int m = 0;
   for (int i = 0; i < 5; i++) {
@@ -161,16 +189,63 @@ int16_t total_mat_color(const Position &position, int color) {
   return m;
 }
 
+// Derived from sacrifice/queensac_white and sacrifice/1_pawnsac_white
+int eval_sacrifice_patterns(const Position &position, int color) {
+  int bonus = 0;
+  int opp_color = color ^ 1;
+
+  // Piece counts
+  int my_q = pop_count(position.pieces_bb[PieceTypes::Queen] &
+                       position.colors_bb[color]);
+  int opp_q = pop_count(position.pieces_bb[PieceTypes::Queen] &
+                        position.colors_bb[opp_color]);
+  int my_r = pop_count(position.pieces_bb[PieceTypes::Rook] &
+                       position.colors_bb[color]);
+  int opp_r = pop_count(position.pieces_bb[PieceTypes::Rook] &
+                        position.colors_bb[opp_color]);
+  int my_l = pop_count((position.pieces_bb[PieceTypes::Knight] |
+                        position.pieces_bb[PieceTypes::Bishop]) &
+                       position.colors_bb[color]);
+  int opp_l = pop_count((position.pieces_bb[PieceTypes::Knight] |
+                         position.pieces_bb[PieceTypes::Bishop]) &
+                        position.colors_bb[opp_color]);
+  int my_p = pop_count(position.pieces_bb[PieceTypes::Pawn] &
+                       position.colors_bb[color]);
+  int opp_p = pop_count(position.pieces_bb[PieceTypes::Pawn] &
+                        position.colors_bb[opp_color]);
+
+  // Pattern 1: Queen Sacrifice (from queensac_white: 08 r*l*p3+ q1>=r=l=p*)
+  // We have no queen, they have at least 1. We have good pawn support (>=3).
+  // Rooks and Light pieces are equal (compensation is positional/pawn storm).
+  if (my_q == 0 && opp_q >= 1 && my_p >= 3) {
+    if (my_r == opp_r && my_l == opp_l) {
+      bonus += 8 * 10; // Scale 08 to 80cp
+    }
+  }
+
+  // Pattern 2: Pawn Sacrifice (from 1_pawnsac_white: 12 q1r1-l4-p* q=r=l=p1>=)
+  // We are down a pawn (or more), but have active pieces.
+  // q1, r1-, l4- : We have Queen, not too many heavy pieces.
+  if (my_q == 1 && my_r <= 1 && my_l <= 4) {
+    if (opp_q == my_q && opp_r == my_r && opp_p > my_p) {
+      bonus += 12 * 5; // Scale 12 to 60cp
+    }
+  }
+
+  return bonus;
+}
+
 int eval(Position &position, ThreadInfo &thread_info) {
   int color = position.color;
-  
-   
+
   if (thread_info.use_syzygy && tb_initialized) {
-  int tb_score = probe_wdl_tb(position, thread_info);
-    if (tb_score != ScoreNone) return tb_score;
+    int tb_score = probe_wdl_tb(position, thread_info);
+    if (tb_score != ScoreNone)
+      return tb_score;
   }
-  
-  int nnue_eval = thread_info.nnue_state.evaluate(color, thread_info.phase);
+
+  int hce_eval = material_eval(position);
+  hce_eval += eval_sacrifice_patterns(position, color);
 
   int bonus2 = 0, bonus3 = 0, bonus4 = 0, bonus5 = 0;
   bool our_side = (thread_info.search_ply % 2 == 0);
@@ -179,7 +254,6 @@ int eval(Position &position, ThreadInfo &thread_info) {
   int s_m = thread_info.game_hist[start_index].m_diff;
   int sacrifice_pattern = 0;
 
-   
   for (int idx = start_index + 2; idx < thread_info.game_ply - 4; idx += 2) {
     bool pattern = (thread_info.game_hist[idx].m_diff < s_m &&
                     thread_info.game_hist[idx + 1].m_diff > s_m &&
@@ -190,7 +264,7 @@ int eval(Position &position, ThreadInfo &thread_info) {
       sacrifice_pattern = s_m + thread_info.game_hist[idx + 4].m_diff;
       break;
     }
-     
+
     if ((thread_info.game_hist[idx].piece_moved == Pieces::WQueen ||
          thread_info.game_hist[idx].piece_moved == Pieces::BQueen ||
          thread_info.game_hist[idx].piece_moved == Pieces::WRook ||
@@ -199,7 +273,7 @@ int eval(Position &position, ThreadInfo &thread_info) {
       sacrifice_pattern = 3;
       break;
     }
-     
+
     if (idx < thread_info.game_ply - 6) {
       int sacrifice_count = 0;
       for (int i = idx; i < idx + 6 && i < thread_info.game_ply; i++) {
@@ -219,9 +293,9 @@ int eval(Position &position, ThreadInfo &thread_info) {
 
   if (sacrifice_pattern && total_material > 3000) {
     if (thread_info.search_ply % 2) {
-      bonus2 = -55 * (nnue_eval < -250 ? 3 : nnue_eval < 0 ? 2 : 1);
+      bonus2 = -55 * (hce_eval < -250 ? 3 : hce_eval < 0 ? 2 : 1);
     } else {
-      bonus2 = 55 * (nnue_eval > 250 ? 3 : nnue_eval > 0 ? 2 : 1);
+      bonus2 = 55 * (hce_eval > 250 ? 3 : hce_eval > 0 ? 2 : 1);
     }
     int king_pos = get_king_pos(position, color ^ 1);
     int king_file = get_file(king_pos);
@@ -234,21 +308,26 @@ int eval(Position &position, ThreadInfo &thread_info) {
     }
   }
 
-   
-  uint64_t center_squares = (1ULL << 27) | (1ULL << 28) | (1ULL << 35) | (1ULL << 36);
-  uint64_t extended_center = center_squares | (1ULL << 26) | (1ULL << 29) | (1ULL << 34) |
-                             (1ULL << 37) | (1ULL << 42) | (1ULL << 43) | (1ULL << 44) | (1ULL << 45);
+  uint64_t center_squares =
+      (1ULL << 27) | (1ULL << 28) | (1ULL << 35) | (1ULL << 36);
+  uint64_t extended_center = center_squares | (1ULL << 26) | (1ULL << 29) |
+                             (1ULL << 34) | (1ULL << 37) | (1ULL << 42) |
+                             (1ULL << 43) | (1ULL << 44) | (1ULL << 45);
   int center_control = 0;
-  if (position.pieces_bb[PieceTypes::Knight] & position.colors_bb[color] & extended_center)
+  if (position.pieces_bb[PieceTypes::Knight] & position.colors_bb[color] &
+      extended_center)
     center_control += 15;
-  if (position.pieces_bb[PieceTypes::Bishop] & position.colors_bb[color] & extended_center)
+  if (position.pieces_bb[PieceTypes::Bishop] & position.colors_bb[color] &
+      extended_center)
     center_control += 12;
-  if (position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color] & center_squares)
+  if (position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color] &
+      center_squares)
     center_control += 10;
 
   int mobility_bonus = 0;
   if (thread_info.game_ply < 20) {
-    uint64_t queen_bb = position.pieces_bb[PieceTypes::Queen] & position.colors_bb[color];
+    uint64_t queen_bb =
+        position.pieces_bb[PieceTypes::Queen] & position.colors_bb[color];
     if (queen_bb) {
       int queen_sq = get_lsb(queen_bb);
       int rank = get_rank(queen_sq);
@@ -260,8 +339,10 @@ int eval(Position &position, ThreadInfo &thread_info) {
     }
   }
 
-  uint64_t own_knights = position.pieces_bb[PieceTypes::Knight] & position.colors_bb[color];
-  uint64_t own_bishops = position.pieces_bb[PieceTypes::Bishop] & position.colors_bb[color];
+  uint64_t own_knights =
+      position.pieces_bb[PieceTypes::Knight] & position.colors_bb[color];
+  uint64_t own_bishops =
+      position.pieces_bb[PieceTypes::Bishop] & position.colors_bb[color];
   while (own_knights) {
     int sq = pop_lsb(own_knights);
     mobility_bonus +=
@@ -269,28 +350,35 @@ int eval(Position &position, ThreadInfo &thread_info) {
   }
   while (own_bishops) {
     int sq = pop_lsb(own_bishops);
-    mobility_bonus += pop_count(get_bishop_attacks(sq, position.colors_bb[0] | position.colors_bb[1]) & ~position.colors_bb[color]) / 4;
+    mobility_bonus +=
+        pop_count(get_bishop_attacks(sq, position.colors_bb[0] |
+                                             position.colors_bb[1]) &
+                  ~position.colors_bb[color]) /
+        4;
   }
 
   int positional_bonus = 0;
-  uint64_t home_ranks = color == Colors::White ? (Ranks[0] | Ranks[1]) : (Ranks[6] | Ranks[7]);
+  uint64_t home_ranks =
+      color == Colors::White ? (Ranks[0] | Ranks[1]) : (Ranks[6] | Ranks[7]);
   uint64_t undeveloped_pieces = position.colors_bb[color] &
-                                (position.pieces_bb[PieceTypes::Knight] | position.pieces_bb[PieceTypes::Bishop]) &
+                                (position.pieces_bb[PieceTypes::Knight] |
+                                 position.pieces_bb[PieceTypes::Bishop]) &
                                 home_ranks;
   int undeveloped_count = pop_count(undeveloped_pieces);
   if (thread_info.game_ply > 10 && undeveloped_count > 0) {
     positional_bonus -= undeveloped_count * 5;
   }
 
-  uint64_t own_rooks = position.pieces_bb[PieceTypes::Rook] & position.colors_bb[color];
+  uint64_t own_rooks =
+      position.pieces_bb[PieceTypes::Rook] & position.colors_bb[color];
   uint64_t pawns = position.pieces_bb[PieceTypes::Pawn];
   while (own_rooks) {
     int sq = pop_lsb(own_rooks);
     int f = get_file(sq);
     if (!(Files[f] & pawns)) {
-      positional_bonus += 12;  
+      positional_bonus += 12;
     } else if (!(Files[f] & pawns & position.colors_bb[color])) {
-      positional_bonus += 6;  
+      positional_bonus += 6;
     }
   }
 
@@ -307,31 +395,44 @@ int eval(Position &position, ThreadInfo &thread_info) {
   float multiplier = (800.0f + total_material / 24.0f) / 1024.0f;
   float phase_factor = 1.0f;
   switch (thread_info.phase) {
-    case PhaseTypes::Opening: phase_factor = thread_info.opening_aggressiveness; break;
-    case PhaseTypes::MiddleGame: phase_factor = thread_info.middlegame_aggressiveness; break;
-    case PhaseTypes::LateMiddleGame: phase_factor = thread_info.late_middlegame_aggressiveness; break;
-    case PhaseTypes::Endgame: phase_factor = thread_info.endgame_aggressiveness; break;
-    case PhaseTypes::Sacrifice: phase_factor = thread_info.middlegame_aggressiveness * 1.1f; break;
-    default: break;
+  case PhaseTypes::Opening:
+    phase_factor = thread_info.opening_aggressiveness;
+    break;
+  case PhaseTypes::MiddleGame:
+    phase_factor = thread_info.middlegame_aggressiveness;
+    break;
+  case PhaseTypes::LateMiddleGame:
+    phase_factor = thread_info.late_middlegame_aggressiveness;
+    break;
+  case PhaseTypes::Endgame:
+    phase_factor = thread_info.endgame_aggressiveness;
+    break;
+  case PhaseTypes::Sacrifice:
+    phase_factor = thread_info.middlegame_aggressiveness * 1.1f;
+    break;
+  default:
+    break;
   }
 
-  if (nnue_eval > 0 && total_material > 4000) {
+  if (hce_eval > 0 && total_material > 4000) {
     multiplier *= 1.15f * phase_factor;
-  } else if (nnue_eval < -100 && total_material > 4000) {
+  } else if (hce_eval < -100 && total_material > 4000) {
     multiplier *= 0.92f * phase_factor;
   } else {
     multiplier *= phase_factor;
   }
 
-  if (thread_info.is_human && thread_info.search_ply < 3 && thread_info.human_noise_sigma > 0) {
-     
-    int span = std::max(4, thread_info.human_noise_sigma / 4);  
-    int noise = (Random::dist(Random::rd) % (2 * span + 1)) - span;  
-    nnue_eval += noise;
+  if (thread_info.is_human && thread_info.search_ply < 3 &&
+      thread_info.human_noise_sigma > 0) {
+
+    int span = std::max(4, thread_info.human_noise_sigma / 4);
+    int noise = (Random::dist(Random::rd) % (2 * span + 1)) - span;
+    hce_eval += noise;
   }
 
-  nnue_eval = static_cast<int>(nnue_eval * multiplier);
-  return std::clamp(nnue_eval + bonus2 + bonus3 + bonus4 + bonus5, -MateScore, MateScore);
+  hce_eval = static_cast<int>(hce_eval * multiplier);
+  return std::clamp(hce_eval + bonus2 + bonus3 + bonus4 + bonus5, -MateScore,
+                    MateScore);
 }
 
 int correct_eval(const Position &position, ThreadInfo &thread_info, int eval) {
@@ -355,7 +456,7 @@ int correct_eval(const Position &position, ThreadInfo &thread_info, int eval) {
 }
 
 void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
-   
+
   if (!thread_info.game_hist.data()) {
     thread_data.stop = true;
     return;
@@ -363,13 +464,12 @@ void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
 
   if (thread_info.search_ply + 1 >= MaxSearchDepth ||
       thread_info.game_ply >= GameSize) {
-     
+
     thread_data.tb_hits.fetch_add(1);
     thread_data.stop = true;
     return;
   }
 
-   
   if (thread_info.game_ply < 0 || thread_info.game_ply >= GameSize) {
     thread_data.tb_hits.fetch_add(1);
     thread_data.stop = true;
@@ -378,14 +478,12 @@ void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
 
   ++thread_info.search_ply;
 
-   
   if (thread_info.search_ply > MaxSearchDepth - 2) {
     thread_data.tb_fails.fetch_add(1);
     thread_data.stop = true;
     return;
   }
 
-   
   const int gp = static_cast<int>(thread_info.game_ply);
   if (gp < 0 || gp >= GameSize) {
     thread_data.stop = true;
@@ -394,107 +492,90 @@ void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
 
   const int from_sq = static_cast<int>(extract_from(move));
   const int to_sq = static_cast<int>(extract_to(move));
-   
+
   if (!is_valid_square(from_sq) || !is_valid_square(to_sq)) {
-     
+
     thread_data.stop = true;
     return;
   }
 
-   
   thread_info.game_hist[gp].position_key = position.zobrist_key;
   thread_info.game_hist[gp].played_move = move;
   thread_info.game_hist[gp].piece_moved = position.board[from_sq];
   thread_info.game_hist[gp].is_cap = is_cap(position, move);
   thread_info.game_hist[gp].m_diff = material_eval(position);
 
-   
   if (thread_info.game_ply + 1 < GameSize)
     thread_info.game_ply++;
 }
 
 void ss_pop(ThreadInfo &thread_info) {
-   
+
   if (thread_info.search_ply <= 0 || thread_info.game_ply <= 0) {
-    return;  
+    return;
   }
 
-  if (thread_info.search_ply > MaxSearchDepth || thread_info.game_ply > GameSize) {
-    return;  
+  if (thread_info.search_ply > MaxSearchDepth ||
+      thread_info.game_ply > GameSize) {
+    return;
   }
 
   thread_info.search_ply--;
   thread_info.game_ply--;
-
-   
-  if (thread_info.nnue_state.m_curr >= thread_info.nnue_state.m_accumulator_stack) {
-    thread_info.nnue_state.pop();
-  }
 }
 
-bool material_draw(
-    const Position &position) {  
-                                 
-  for (int i : {0, 1, 6, 7, 8,
-                9}) {  
+bool material_draw(const Position &position) {
+
+  for (int i : {0, 1, 6, 7, 8, 9}) {
     if (position.material_count[i]) {
       return false;
     }
   }
   if (position.material_count[4] > 1 || position.material_count[2] > 2 ||
-      (position.material_count[2] &&
-       position.material_count[4])) {  
-                                       
+      (position.material_count[2] && position.material_count[4])) {
+
     return false;
   }
   if (position.material_count[5] > 1 || position.material_count[3] > 2 ||
-      (position.material_count[3] &&
-       position.material_count[5])) {  
-                                       
+      (position.material_count[3] && position.material_count[5])) {
+
     return false;
   }
   return true;
 }
 
-bool is_draw(const Position &position,
-             ThreadInfo &thread_info) {  
+bool is_draw(const Position &position, ThreadInfo &thread_info) {
 
   const uint64_t hash = position.zobrist_key;
   const int halfmoves = position.halfmoves;
   const int game_ply = thread_info.game_ply;
 
-   
   if (game_ply < 0 || game_ply > GameSize) {
-    return false;  
+    return false;
   }
 
-   
   if (!thread_info.game_hist.data()) {
-    return false;  
+    return false;
   }
 
-   
   int white_king = get_king_pos(position, Colors::White);
   int black_king = get_king_pos(position, Colors::Black);
   if (!is_valid_square(white_king) || !is_valid_square(black_king)) {
-    return false;  
+    return false;
   }
 
-   
   if (halfmoves >= 100) {
     return true;
   }
 
-   
   if (material_draw(position)) {
     return true;
   }
 
-   
   if (game_ply >= 2 && game_ply <= GameSize) {
     const int min_index = std::max(game_ply - halfmoves, 0);
     for (int i = game_ply - 2; i >= min_index && i < GameSize; i -= 2) {
-       
+
       if (i >= 0 && i < GameSize) {
         if (thread_info.game_hist[i].position_key == hash) {
           return true;
@@ -503,15 +584,14 @@ bool is_draw(const Position &position,
     }
   }
 
-   
   const int king_sq = get_king_pos(position, position.color);
   if (!is_valid_square(king_sq)) {
     return false;
   }
   if (!attacks_square(position, king_sq, position.color ^ 1)) {
-     
-     
-    uint64_t king_moves = KING_ATK_SAFE(king_sq) & ~position.colors_bb[position.color];
+
+    uint64_t king_moves =
+        KING_ATK_SAFE(king_sq) & ~position.colors_bb[position.color];
     bool has_safe_move = false;
     while (king_moves && !has_safe_move) {
       int to_sq = pop_lsb(king_moves);
@@ -520,60 +600,65 @@ bool is_draw(const Position &position,
       }
     }
     if (!has_safe_move) {
-       
-       
+
       std::array<Move, 32> limited_moves{};
       int move_count = 0;
-      
-       
-      uint64_t king_attacks = KING_ATK_SAFE(king_sq) & ~position.colors_bb[position.color];
+
+      uint64_t king_attacks =
+          KING_ATK_SAFE(king_sq) & ~position.colors_bb[position.color];
       while (king_attacks && move_count < 32) {
         int to = pop_lsb(king_attacks);
         if (!attacks_square(position, to, position.color ^ 1)) {
-          limited_moves[move_count++] = pack_move(king_sq, to, MoveTypes::Normal);
+          limited_moves[move_count++] =
+              pack_move(king_sq, to, MoveTypes::Normal);
         }
       }
-      
-       
+
       if (move_count == 0) {
-        for (int pt = PieceTypes::Pawn; pt <= PieceTypes::Queen && move_count < 32; ++pt) {
-          uint64_t pieces = position.pieces_bb[pt] & position.colors_bb[position.color];
+        for (int pt = PieceTypes::Pawn;
+             pt <= PieceTypes::Queen && move_count < 32; ++pt) {
+          uint64_t pieces =
+              position.pieces_bb[pt] & position.colors_bb[position.color];
           if (pieces) {
             int from = get_lsb(pieces);
-             
+
             uint64_t attacks = 0;
             if (pt == PieceTypes::Pawn) {
-              attacks = PAWN_ATK_SAFE(position.color, from) & position.colors_bb[position.color ^ 1];
+              attacks = PAWN_ATK_SAFE(position.color, from) &
+                        position.colors_bb[position.color ^ 1];
             } else if (pt == PieceTypes::Knight) {
               attacks = KNIGHT_ATK_SAFE(from);
-            } else if (pt == PieceTypes::Bishop || pt == PieceTypes::Rook || pt == PieceTypes::Queen) {
-              attacks = get_bishop_attacks(from, position.colors_bb[0] | position.colors_bb[1]);
+            } else if (pt == PieceTypes::Bishop || pt == PieceTypes::Rook ||
+                       pt == PieceTypes::Queen) {
+              attacks = get_bishop_attacks(from, position.colors_bb[0] |
+                                                     position.colors_bb[1]);
               if (pt == PieceTypes::Rook || pt == PieceTypes::Queen) {
-                attacks |= get_rook_attacks(from, position.colors_bb[0] | position.colors_bb[1]);
+                attacks |= get_rook_attacks(from, position.colors_bb[0] |
+                                                      position.colors_bb[1]);
               }
             } else if (pt == PieceTypes::King) {
               attacks = KING_ATK_SAFE(from);
             }
             attacks &= ~position.colors_bb[position.color];
-            
+
             while (attacks && move_count < 32) {
               int to = pop_lsb(attacks);
-              limited_moves[move_count++] = pack_move(from, to, MoveTypes::Normal);
+              limited_moves[move_count++] =
+                  pack_move(from, to, MoveTypes::Normal);
             }
           }
         }
       }
-      
-       
+
       bool has_legal_move = false;
       for (int i = 0; i < move_count && !has_legal_move; ++i) {
         if (is_legal(position, limited_moves[i])) {
           has_legal_move = true;
         }
       }
-      
+
       if (!has_legal_move) {
-        return true;  
+        return true;
       }
     }
   }
@@ -583,32 +668,28 @@ bool is_draw(const Position &position,
 
 int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
             std::vector<TTBucket> &TT, int qdepth = 0) {
-   
-  constexpr int MAX_QPLY = 32;     
-  constexpr int MAX_QDEPTH = 16;   
+
+  constexpr int MAX_QPLY = 32;
+  constexpr int MAX_QDEPTH = 16;
 
   auto eval_now = [&](Position &pos) {
     return correct_eval(pos, thread_info, eval(pos, thread_info));
   };
 
-   
   if (qdepth >= MAX_QDEPTH) {
     return eval_now(position);
   }
 
   int ply = thread_info.search_ply;
 
-   
   if (ply >= MaxSearchDepth - 4 || ply >= MAX_QPLY) {
     return eval_now(position);
   }
 
-   
   if (thread_info.game_ply < 0 || thread_info.game_ply > GameSize) {
     return eval_now(position);
   }
 
-   
   if (!thread_info.game_hist.data()) {
     return eval_now(position);
   }
@@ -627,26 +708,27 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
   }
 
   if (out_of_time(thread_info)) {
-    int nnue_eval = thread_info.nnue_state.evaluate(position.color,
-                                                    thread_info.phase);
-    return correct_eval(position, thread_info, nnue_eval);
+    int hce_eval = material_eval(position);
+    return correct_eval(position, thread_info, hce_eval);
   }
 
   if (thread_info.use_syzygy && tb_initialized) {
     int tb_score = probe_wdl_tb(position, thread_info);
-    if (tb_score != ScoreNone) return tb_score;
+    if (tb_score != ScoreNone)
+      return tb_score;
   }
 
-   
   int _hist_idx = thread_info.game_ply;
-  if (_hist_idx < 0) _hist_idx = 0;
-  if (_hist_idx >= GameSize) _hist_idx = GameSize - 1;
+  if (_hist_idx < 0)
+    _hist_idx = 0;
+  if (_hist_idx >= GameSize)
+    _hist_idx = GameSize - 1;
   GameHistory *ss = &(thread_info.game_hist[_hist_idx]);
 
   ++thread_info.nodes;
-  if (ply > thread_info.seldepth) thread_info.seldepth = ply;
+  if (ply > thread_info.seldepth)
+    thread_info.seldepth = ply;
 
-   
   if (ply >= MaxSearchDepth - 3 || ply >= MAX_QPLY - 2) {
     return eval_now(position);
   }
@@ -676,8 +758,8 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
     return tt_score;
   }
 
-  bool in_check = attacks_square(position, get_king_pos(position, position.color),
-                                 position.color ^ 1);
+  bool in_check = attacks_square(
+      position, get_king_pos(position, position.color), position.color ^ 1);
 
   int raw_eval = ScoreNone;
   int static_eval = ScoreNone;
@@ -724,7 +806,8 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
   if (!in_check && tt_move != MoveNone) {
     bool tt_is_cap = is_cap(position, tt_move);
     bool tt_is_promo = extract_type(tt_move) == MoveTypes::Promotion;
-    if (!tt_is_cap && !tt_is_promo) tt_move = MoveNone;
+    if (!tt_is_cap && !tt_is_promo)
+      tt_move = MoveNone;
   }
 
   static constexpr int PromoPieceTypes[] = {
@@ -732,19 +815,24 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
       PieceTypes::Queen};
 
   auto fallback_score = [&](int current_best) {
-    if (current_best != ScoreNone) return current_best;
-    if (!in_check && stand_pat != ScoreNone) return stand_pat;
+    if (current_best != ScoreNone)
+      return current_best;
+    if (!in_check && stand_pat != ScoreNone)
+      return stand_pat;
     return eval_now(position);
   };
 
   while (Move move =
              next_move(picker, position, thread_info, tt_move, !in_check)) {
-    if (!in_check && picker.stage > Stages::Captures) break;
-    if (!is_legal(position, move)) continue;
+    if (!in_check && picker.stage > Stages::Captures)
+      break;
+    if (!is_legal(position, move))
+      continue;
 
     int from_sq = extract_from(move);
     int to_sq = extract_to(move);
-    if (!is_valid_square(from_sq) || !is_valid_square(to_sq)) continue;
+    if (!is_valid_square(from_sq) || !is_valid_square(to_sq))
+      continue;
 
     if (!in_check && stand_pat != ScoreNone) {
       int captured_piece = position.board[to_sq];
@@ -754,19 +842,16 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
       int capture_value = MaterialValues[get_piece_type(captured_piece)];
       int promotion_gain = 0;
       if (extract_type(move) == MoveTypes::Promotion) {
-        promotion_gain =
-            MaterialValues[PromoPieceTypes[extract_promo(move)]] -
-            MaterialValues[PieceTypes::Pawn];
+        promotion_gain = MaterialValues[PromoPieceTypes[extract_promo(move)]] -
+                         MaterialValues[PieceTypes::Pawn];
       }
       int delta_margin = capture_value + promotion_gain + DELTA_MARGIN_BASE;
-      if (stand_pat + delta_margin < alpha) continue;
+      if (stand_pat + delta_margin < alpha)
+        continue;
     }
 
-     
     Position moved_position = position;
     make_move(moved_position, move);
-    auto *nnue_before = thread_info.nnue_state.m_curr;
-    update_nnue_state(thread_info, move, position, moved_position);
 
     int score = ScoreNone;
     bool can_recurse = (thread_info.search_ply + 1 < MaxSearchDepth - 4) &&
@@ -775,7 +860,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
                        (qdepth + 1 < MAX_QDEPTH);
 
     if (can_recurse) {
-       
+
       if (thread_info.game_ply >= 0 && thread_info.game_ply < GameSize &&
           thread_info.game_hist.data()) {
         ss_push(position, thread_info, move);
@@ -783,19 +868,12 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
                          qdepth + 1);
         ss_pop(thread_info);
       } else {
-         
         int leaf_eval = eval_now(moved_position);
         score = -leaf_eval;
-        if (thread_info.nnue_state.m_curr != nnue_before) {
-          thread_info.nnue_state.pop();
-        }
       }
     } else {
       int leaf_eval = eval_now(moved_position);
       score = -leaf_eval;
-      if (thread_info.nnue_state.m_curr != nnue_before) {
-        thread_info.nnue_state.pop();
-      }
     }
 
     thread_info.phase = saved_phase;
@@ -812,7 +890,8 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
       alpha = score;
       best_move = move;
       raised_alpha = true;
-      if (score >= beta) break;
+      if (score >= beta)
+        break;
     }
   }
 
@@ -838,8 +917,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
 
 template <bool is_pv>
 int search(int alpha, int beta, int depth, bool cutnode, Position &position,
-           ThreadInfo &thread_info,
-           std::vector<TTBucket> &TT) {  
+           ThreadInfo &thread_info, std::vector<TTBucket> &TT) {
 
   GameHistory *ss = &(thread_info.game_hist[thread_info.game_ply]);
 
@@ -856,11 +934,11 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   if (out_of_time(thread_info) || ply >= MaxSearchDepth - 1) {
-     
+
     return correct_eval(position, thread_info, eval(position, thread_info));
   }
 
-  if (ply && is_draw(position, thread_info)) {  
+  if (ply && is_draw(position, thread_info)) {
     int draw_score = 1 - (thread_info.nodes.load() & 3);
 
     int material = material_eval(position);
@@ -872,18 +950,14 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
 
     return draw_score;
-     
-     
   }
 
-   
   if (thread_info.max_depth > 0 && ply >= thread_info.max_depth) {
     return correct_eval(position, thread_info, eval(position, thread_info));
   }
 
   if (depth <= 0) {
-    return qsearch(alpha, beta, position, thread_info,
-                   TT);  
+    return qsearch(alpha, beta, position, thread_info, TT);
   }
   ++thread_info.nodes;
 
@@ -894,22 +968,20 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
   bool singular_search = (excluded_move != MoveNone);
 
-  if (!singular_search){
+  if (!singular_search) {
     thread_info.pv[pv_index] = MoveNone;
   }
 
-  thread_info.excluded_move =
-      MoveNone;  
-                 
+  thread_info.excluded_move = MoveNone;
+
   int score = ScoreNone;
 
   uint64_t hash = position.zobrist_key;
   uint8_t phase = thread_info.phase;
 
   int mate_distance = -Mate - ply;
-  if (mate_distance <
-      beta)  
-             
+  if (mate_distance < beta)
+
   {
     beta = mate_distance;
     if (alpha >= beta) {
@@ -923,7 +995,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   int entry_type = EntryTypes::None, tt_static_eval = ScoreNone,
       tt_score = ScoreNone, tt_move = MoveNone;
 
-  if (tt_hit && !singular_search) {  
+  if (tt_hit && !singular_search) {
     entry_type = entry.get_type();
     tt_static_eval = entry.static_eval;
     tt_score = score_from_tt(entry.score, ply);
@@ -931,8 +1003,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   if (tt_score != ScoreNone && !is_pv && entry.depth >= depth) {
-     
-     
+
     if ((entry_type == EntryTypes::Exact) ||
         (entry_type == EntryTypes::LBound && tt_score >= beta) ||
         (entry_type == EntryTypes::UBound && tt_score <= alpha)) {
@@ -943,7 +1014,6 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   uint64_t in_check =
       attacks_square(position, get_king_pos(position, color), color ^ 1);
 
-   
   int32_t static_eval;
   int32_t raw_eval;
 
@@ -971,7 +1041,6 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
   bool improving = false;
 
-   
   if (ply > 1 && thread_info.game_ply >= 2 && !in_check &&
       static_eval > (ss - 2)->static_eval) {
     improving = true;
@@ -987,37 +1056,40 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   if (!is_pv && !in_check && !singular_search) {
-     
-    if (thread_info.use_syzygy && tb_initialized && depth >= thread_info.syzygy_probe_depth) {
-      int piece_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
+
+    if (thread_info.use_syzygy && tb_initialized &&
+        depth >= thread_info.syzygy_probe_depth) {
+      int piece_count =
+          pop_count(position.colors_bb[0] | position.colors_bb[1]);
       int largest = TB_LARGEST ? (int)TB_LARGEST : 7;
-      if (piece_count <= std::min(thread_info.syzygy_probe_limit, largest) && !in_check && !is_pv) {
+      if (piece_count <= std::min(thread_info.syzygy_probe_limit, largest) &&
+          !in_check && !is_pv) {
         int tb_score = probe_wdl_tb(position, thread_info);
         if (tb_score != ScoreNone) {
-           
-          if (tb_score >= beta) return tb_score;  
-          if (tb_score <= alpha) return tb_score;  
+
+          if (tb_score >= beta)
+            return tb_score;
+          if (tb_score <= alpha)
+            return tb_score;
         }
       }
     }
 
-     
     if (depth <= RFPMaxDepth &&
         static_eval - RFPMargin * (depth - improving) >= beta) {
       return (static_eval + beta) / 2;
     }
     if (static_eval >= beta && depth >= NMPMinDepth &&
-        has_non_pawn_material(position, color) &&
-        thread_info.game_ply > 0 && (ss - 1)->played_move != MoveNone) {
+        has_non_pawn_material(position, color) && thread_info.game_ply > 0 &&
+        (ss - 1)->played_move != MoveNone) {
 
-       
       Position temp_pos = position;
-       
+
       make_move(temp_pos, MoveNone);
 
-       
-      if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
-        return ScoreNone;  
+      if (thread_info.search_ply >= MaxSearchDepth ||
+          thread_info.game_ply >= GameSize) {
+        return ScoreNone;
       }
       ss_push(position, thread_info, MoveNone);
 
@@ -1027,7 +1099,6 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
                              thread_info, TT);
 
       thread_info.search_ply--, thread_info.game_ply--;
-       
 
       if (score >= beta) {
         if (score > MateScore) {
@@ -1039,8 +1110,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   if ((is_pv || cutnode) && tt_move == MoveNone && depth > IIRMinDepth) {
-     
-     
+
     depth--;
   }
 
@@ -1055,7 +1125,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         (tt_move != MoveNone && SEE(position, tt_move, threshold) ? tt_move
                                                                   : MoveNone);
 
-    while (Move move = next_move(probcut_p, position, thread_info, p_tt_move, true)) {
+    while (Move move =
+               next_move(probcut_p, position, thread_info, p_tt_move, true)) {
 
       if (probcut_p.stage > Stages::Captures) {
         break;
@@ -1064,15 +1135,13 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         continue;
       }
 
-       
       Position moved_position = position;
-       
+
       make_move(moved_position, move);
-      update_nnue_state(thread_info, move, position, moved_position);
-      
-       
-      if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
-        return ScoreNone;  
+
+      if (thread_info.search_ply >= MaxSearchDepth ||
+          thread_info.game_ply >= GameSize) {
+        return ScoreNone;
       }
       ss_push(position, thread_info, move);
 
@@ -1101,56 +1170,65 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   MovePicker picker;
   init_picker(picker, position, -107, in_check, ss);
 
-  int best_score = ScoreNone, moves_played = 0;  
+  int best_score = ScoreNone, moves_played = 0;
   bool is_capture = false, skip = false;
-  
-   
-  if (thread_info.sacrifice_lookahead > 0 && thread_info.search_ply < thread_info.sacrifice_lookahead && !in_check) {
+
+  if (thread_info.sacrifice_lookahead > 0 &&
+      thread_info.search_ply < thread_info.sacrifice_lookahead && !in_check) {
     std::array<Move, ListSize> moves;
-    uint64_t checkers_local = attacks_square(position, get_king_pos(position, color), color ^ 1);
-    int nmoves_local = movegen(position, moves.data(), checkers_local, Generate::GenAll);
-   
-  int lookahead_cap = std::clamp(thread_info.sacrifice_lookahead, 0, 1);
+    uint64_t checkers_local =
+        attacks_square(position, get_king_pos(position, color), color ^ 1);
+    int nmoves_local =
+        movegen(position, moves.data(), checkers_local, Generate::GenAll);
+
+    int lookahead_cap = std::clamp(thread_info.sacrifice_lookahead, 0, 1);
 
     for (int i = 0; i < nmoves_local; i++) {
       Move m = moves[i];
-      if (!is_legal(position, m)) continue;
+      if (!is_legal(position, m))
+        continue;
 
-       
       bool isCapture = is_cap(position, m);
-      bool losing_exchange = !SEE(position, m, 0);  
-      if (!isCapture && !losing_exchange) continue;
+      bool losing_exchange = !SEE(position, m, 0);
+      if (!isCapture && !losing_exchange)
+        continue;
 
       Position test_position = position;
-       
+
       make_move(test_position, m);
 
-      int sacrifice_score = analyze_sacrifice(test_position, thread_info, lookahead_cap, 0, position.color);
-      if (sacrifice_score <= 0) continue;  
+      int sacrifice_score = analyze_sacrifice(test_position, thread_info,
+                                              lookahead_cap, 0, position.color);
+      if (sacrifice_score <= 0)
+        continue;
 
-       
-      int sac_extension = 1 + (thread_info.sacrifice_lookahead_aggressiveness >= 130 ? 2 : (thread_info.sacrifice_lookahead_aggressiveness >= 90 ? 1 : 0));
+      int sac_extension =
+          1 +
+          (thread_info.sacrifice_lookahead_aggressiveness >= 130
+               ? 2
+               : (thread_info.sacrifice_lookahead_aggressiveness >= 90 ? 1
+                                                                       : 0));
       sac_extension = std::clamp(sac_extension, 1, 3);
 
-       
       Position moved_position = position;
-       
+
       make_move(moved_position, m);
-      update_nnue_state(thread_info, m, position, moved_position);
-      
-       
-      if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
-        return ScoreNone;  
+
+      if (thread_info.search_ply >= MaxSearchDepth ||
+          thread_info.game_ply >= GameSize) {
+        return ScoreNone;
       }
       ss_push(position, thread_info, m);
 
-       
-      int probe_score = -search<false>(-alpha - 1, -alpha, std::max(1, depth - 1), false, moved_position, thread_info, TT);
+      int probe_score =
+          -search<false>(-alpha - 1, -alpha, std::max(1, depth - 1), false,
+                         moved_position, thread_info, TT);
       int score;
       if (probe_score > alpha && abs(probe_score) < MateScore) {
-         
+
         int extended_depth = std::min(depth + sac_extension, 126);
-        score = -search<true>(-beta, -alpha, extended_depth, false, moved_position, thread_info, TT);
+        score = -search<true>(-beta, -alpha, extended_depth, false,
+                              moved_position, thread_info, TT);
       } else {
         score = probe_score;
       }
@@ -1159,27 +1237,32 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       thread_info.phase = phase;
 
       if (abs(score) < MateScore && score > alpha) {
-         
+
         float phase_bonus = 0.0f;
         int move_number_local = (thread_info.game_ply / 2) + 1;
-        if (move_number_local < 10) phase_bonus = thread_info.opening_aggressiveness * 15.0f;
-        else if (move_number_local < 25) phase_bonus = thread_info.middlegame_aggressiveness * 20.0f;
-        else if (move_number_local < 40) phase_bonus = thread_info.late_middlegame_aggressiveness * 25.0f;
-        else phase_bonus = thread_info.endgame_aggressiveness * 15.0f;
+        if (move_number_local < 10)
+          phase_bonus = thread_info.opening_aggressiveness * 15.0f;
+        else if (move_number_local < 25)
+          phase_bonus = thread_info.middlegame_aggressiveness * 20.0f;
+        else if (move_number_local < 40)
+          phase_bonus = thread_info.late_middlegame_aggressiveness * 25.0f;
+        else
+          phase_bonus = thread_info.endgame_aggressiveness * 15.0f;
 
-        float aggr_factor_local = thread_info.sacrifice_lookahead_aggressiveness / 100.0f;
+        float aggr_factor_local =
+            thread_info.sacrifice_lookahead_aggressiveness / 100.0f;
         int bonus = static_cast<int>(phase_bonus * aggr_factor_local);
         score += bonus;
 
-         
         int piece_from = position.board[extract_from(m)];
         int to_sq = extract_to(m);
-        int hist_bonus = std::clamp(16 + sacrifice_score / 8, 8, 128);  
+        int hist_bonus = std::clamp(16 + sacrifice_score / 8, 8, 128);
         if (thread_info.attack_mode) {
-          hist_bonus = hist_bonus * 6 / 5 + 6;  
+          hist_bonus = hist_bonus * 6 / 5 + 6;
           hist_bonus = std::min(hist_bonus, 192);
         }
-        update_history(thread_info.HistoryScores[piece_from][to_sq], hist_bonus);
+        update_history(thread_info.HistoryScores[piece_from][to_sq],
+                       hist_bonus);
 
         if (score > best_score) {
           best_score = score;
@@ -1187,12 +1270,15 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
             alpha = score;
             best_move = m;
             raised_alpha = true;
-            if (is_pv) thread_info.pv[pv_index] = m;
-            if (score >= beta) break;
+            if (is_pv)
+              thread_info.pv[pv_index] = m;
+            if (score >= beta)
+              break;
           }
         }
       }
-      if (thread_data.stop || thread_info.datagen_stop) break;
+      if (thread_data.stop || thread_info.datagen_stop)
+        break;
     }
   }
 
@@ -1227,18 +1313,17 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     is_capture = is_cap(position, move);
     if (!is_capture && !is_pv && best_score > -MateScore) {
 
-       
       if (depth < LMPDepth &&
           moves_played >= LMPBase + depth * depth / (2 - improving)) {
         skip = true;
       }
 
-       
       if (!in_check && depth < FPDepth && picker.stage > Stages::Captures) {
         int fp_margin = FPMargin1 + FPMargin2 * depth;
-        if (thread_info.attack_mode) fp_margin += 60;  
+        if (thread_info.attack_mode)
+          fp_margin += 60;
         if (static_eval + fp_margin < alpha) {
-        skip = true;
+          skip = true;
         }
       }
 
@@ -1253,15 +1338,13 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
           is_capture ? SeePruningQuietMargin : (depth * SeePruningNoisyMargin);
 
       if (!SEE(position, move, depth * margin)) {
-         
-         
+
         continue;
       }
     }
 
     int extension = 0;
 
-     
     if (!root && ply < thread_info.current_iter * 2) {
       if (!singular_search && depth >= SEDepth && move == tt_move &&
           abs(entry.score) < MateScore && entry.depth >= depth - 3 &&
@@ -1276,14 +1359,12 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
           if (!is_pv && sScore + SEDoubleExtMargin < sBeta &&
               ply < thread_info.current_iter) {
 
-             
             extension = 2 + (!is_capture && sScore < sBeta - 125);
           } else {
             extension = 1;
           }
         } else if (sBeta >= beta) {
-           
-           
+
           return sBeta;
         } else if (cutnode) {
           extension = -1;
@@ -1291,53 +1372,44 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       }
     }
 
-     
     Position moved_position = position;
     make_move(moved_position, move);
 
-    update_nnue_state(thread_info, move, position, moved_position);
-
-     
-    if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
-      return best_score;  
+    if (thread_info.search_ply >= MaxSearchDepth ||
+        thread_info.game_ply >= GameSize) {
+      return best_score;
     }
     ss_push(position, thread_info, move);
 
     bool full_search = false;
     int newdepth = std::min(depth - 1 + extension, 126);
 
-     
     if (depth >= LMRMinDepth && moves_played > is_pv) {
       int R = LMRTable[depth][moves_played];
       if (is_capture) {
-         
-         
+
         R /= 2;
       } else {
         R -= hist_score / 10000;
       }
 
-       
       R -= is_pv;
 
       R -= (tt_hit && entry.depth >= depth);
 
-       
       R += !improving;
 
       R += cutnode;
 
-      R -= (attacks_square(moved_position, get_king_pos(position, color ^ 1), color) != 0);
-
+      R -= (attacks_square(moved_position, get_king_pos(position, color ^ 1),
+                           color) != 0);
 
       if (thread_info.attack_mode && R > 0) {
         R = std::max(0, R - 1);
       }
 
-       
       R = std::clamp(R, 0, newdepth - 1);
 
-       
       score = -search<false>(-alpha - 1, -alpha, newdepth - R, true,
                              moved_position, thread_info, TT);
       if (score > alpha) {
@@ -1349,12 +1421,12 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       full_search = moves_played || !is_pv;
     }
     if (full_search) {
-       
+
       score = -search<false>(-alpha - 1, -alpha, newdepth, !cutnode,
                              moved_position, thread_info, TT);
     }
     if ((score > alpha || !moves_played) && is_pv) {
-       
+
       score = -search<true>(-beta, -alpha, newdepth, false, moved_position,
                             thread_info, TT);
     }
@@ -1363,7 +1435,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     thread_info.phase = phase;
 
     if (thread_data.stop || thread_info.datagen_stop) {
-       
+
       return best_score;
     }
 
@@ -1418,11 +1490,12 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     int piece = position.board[extract_from(best_move)],
         sq = extract_to(best_move);
 
-    int bonus = std::min((int)HistBonus * (depth - 1 + (best_score > beta + 125)), (int)HistMax);
+    int bonus = std::min(
+        (int)HistBonus * (depth - 1 + (best_score > beta + 125)), (int)HistMax);
 
     if (is_capture) {
       // Capture'lara daha az bonus - exchange yerine pozisyonel oyun
-      int capture_bonus = bonus / 2;  // %50 - capture'ları caydır
+      int capture_bonus = bonus / 2; // %50 - capture'ları caydır
       update_history(thread_info.CapHistScores[piece][sq], capture_bonus);
 
     } else {
@@ -1449,26 +1522,19 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
       for (int i = 0; i < num_quiets; i++) {
 
-         
         Move move = quiets[i];
 
         int piece_m = position.board[extract_from(move)],
             sq_m = extract_to(move);
 
-         
-        update_continuation_histories(
-            thread_info, piece_m, sq_m, -bonus,
-            their_last, their_piece,
-            our_last, our_piece,
-            ply4_last, ply4_piece);
+        update_continuation_histories(thread_info, piece_m, sq_m, -bonus,
+                                      their_last, their_piece, our_last,
+                                      our_piece, ply4_last, ply4_piece);
       }
 
-       
-      update_continuation_histories(
-          thread_info, piece, sq, bonus,
-          their_last, their_piece,
-          our_last, our_piece,
-          ply4_last, ply4_piece);
+      update_continuation_histories(thread_info, piece, sq, bonus, their_last,
+                                    their_piece, our_last, our_piece, ply4_last,
+                                    ply4_piece);
 
       thread_info.KillerMoves[ply] = best_move;
     }
@@ -1479,12 +1545,14 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       int piece_m = position.board[extract_from(move)], sq_m = extract_to(move);
 
       // Kötü capture'lara ağır penalty - exchange'den kaçın
-      int capture_penalty = bonus * 2;  // %200 - kötü capture'ları güçlü cezalandır
-      update_history(thread_info.CapHistScores[piece_m][sq_m], -capture_penalty);
+      int capture_penalty =
+          bonus * 2; // %200 - kötü capture'ları güçlü cezalandır
+      update_history(thread_info.CapHistScores[piece_m][sq_m],
+                     -capture_penalty);
     }
   }
 
-  if (best_score == ScoreNone) {  
+  if (best_score == ScoreNone) {
     return singular_search ? alpha : in_check ? (Mate + ply) : 0;
   }
 
@@ -1498,7 +1566,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       !(best_score >= beta && best_score <= ss->static_eval) &&
       !(!best_move && best_score >= ss->static_eval)) {
 
-    int bonus = std::clamp((best_score - ss->static_eval) * depth / 8, -256, 256);
+    int bonus =
+        std::clamp((best_score - ss->static_eval) * depth / 8, -256, 256);
 
     update_corrhist(
         thread_info.PawnCorrHist[color][get_corrhist_index(position.pawn_key)],
@@ -1513,7 +1582,6 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         bonus);
   }
 
-   
   if (!singular_search) {
     insert_entry(entry, hash, depth, best_move, raw_eval,
                  score_to_tt(best_score, ply), entry_type,
@@ -1538,9 +1606,8 @@ void print_pv(Position &position, ThreadInfo &thread_info) {
 
     Move best_move = thread_info.pv[indx];
 
-     
     MoveInfo moves;
-  int movelen = legal_movegen(temp_pos, moves.moves.data());
+    int movelen = legal_movegen(temp_pos, moves.moves.data());
 
     bool found_move = false;
 
@@ -1555,10 +1622,10 @@ void print_pv(Position &position, ThreadInfo &thread_info) {
       break;
     }
 
-  {
-    std::string mv = internal_to_uci(temp_pos, best_move);
-    safe_printf("%s ", mv.c_str());
-  }
+    {
+      std::string mv = internal_to_uci(temp_pos, best_move);
+      safe_printf("%s ", mv.c_str());
+    }
 
     make_move(temp_pos, best_move);
 
@@ -1568,119 +1635,174 @@ void print_pv(Position &position, ThreadInfo &thread_info) {
   safe_printf("\n");
 }
 
-void iterative_deepen(
-    Position &position, ThreadInfo &thread_info,
-    std::vector<TTBucket> &TT) {  
+void iterative_deepen(Position &position, ThreadInfo &thread_info,
+                      std::vector<TTBucket> &TT) {
 
   thread_info.original_opt = thread_info.opt_time;
   thread_info.datagen_stop = false;
-  
-   
+
   int material = total_mat(position);
   int move_number = (thread_info.game_ply / 2) + 1;
-  
-   
+
   if (move_number < 15 && material > 4500) {
     thread_info.phase = PhaseTypes::Opening;
-  }
-  else if (move_number >= 15 && move_number < 30 && material > 4000) {
+  } else if (move_number >= 15 && move_number < 30 && material > 4000) {
     thread_info.phase = PhaseTypes::MiddleGame;
-  }
-  else if (material > 3000 && material <= 4000) {
+  } else if (material > 3000 && material <= 4000) {
     thread_info.phase = PhaseTypes::LateMiddleGame;
-  }
-  else if (material <= 3000) {
+  } else if (material <= 3000) {
     thread_info.phase = PhaseTypes::Endgame;
   }
-  
-  thread_info.nnue_state.reset_nnue(position, thread_info.phase);
+
   calculate(position);
   thread_info.nodes.store(0);
   thread_info.time_checks = 0;
-  thread_info.search_ply = 0;  
+  thread_info.search_ply = 0;
   thread_info.excluded_move = MoveNone;
   thread_info.best_moves = {0};
-  thread_info.best_scores = {ScoreNone, ScoreNone, ScoreNone, ScoreNone, ScoreNone};
+  thread_info.best_scores = {ScoreNone, ScoreNone, ScoreNone, ScoreNone,
+                             ScoreNone};
   thread_info.KillerMoves.fill(MoveNone);
-   
+
   bool tb_decisive_shortcut = false;
   if (thread_info.use_syzygy && tb_initialized) {
-     
+
     bool any_castling = false;
-    for (int c=0;c<2;c++) for (int s=0;s<2;s++) if (position.castling_squares[c][s] != SquareNone) any_castling = true;
-    if (any_castling) goto skip_tb_root;
-     
-    int piece_count = 0; for (int i=0;i<64;i++) if (position.board[i]) piece_count++;
+    for (int c = 0; c < 2; c++)
+      for (int s = 0; s < 2; s++)
+        if (position.castling_squares[c][s] != SquareNone)
+          any_castling = true;
+    if (any_castling)
+      goto skip_tb_root;
+
+    int piece_count = 0;
+    for (int i = 0; i < 64; i++)
+      if (position.board[i])
+        piece_count++;
     if (piece_count && TB_LARGEST && piece_count <= (int)TB_LARGEST) {
-      uint64_t white=0, black=0, kings=0, queens=0, rooks=0, bishops=0, knights=0, pawns=0;
-      for (int sq=0; sq<64; ++sq) {
-        int pc = position.board[sq]; if(!pc) continue; int pt = get_piece_type(pc); int c = get_color(pc); uint64_t bb=1ULL<<sq;
-        if (c==Colors::White) white|=bb; else black|=bb;
-        switch(pt){case PieceTypes::King: kings|=bb; break; case PieceTypes::Queen: queens|=bb; break; case PieceTypes::Rook: rooks|=bb; break; case PieceTypes::Bishop: bishops|=bb; break; case PieceTypes::Knight: knights|=bb; break; case PieceTypes::Pawn: pawns|=bb; break; default: break;}
+      uint64_t white = 0, black = 0, kings = 0, queens = 0, rooks = 0,
+               bishops = 0, knights = 0, pawns = 0;
+      for (int sq = 0; sq < 64; ++sq) {
+        int pc = position.board[sq];
+        if (!pc)
+          continue;
+        int pt = get_piece_type(pc);
+        int c = get_color(pc);
+        uint64_t bb = 1ULL << sq;
+        if (c == Colors::White)
+          white |= bb;
+        else
+          black |= bb;
+        switch (pt) {
+        case PieceTypes::King:
+          kings |= bb;
+          break;
+        case PieceTypes::Queen:
+          queens |= bb;
+          break;
+        case PieceTypes::Rook:
+          rooks |= bb;
+          break;
+        case PieceTypes::Bishop:
+          bishops |= bb;
+          break;
+        case PieceTypes::Knight:
+          knights |= bb;
+          break;
+        case PieceTypes::Pawn:
+          pawns |= bb;
+          break;
+        default:
+          break;
+        }
       }
-      unsigned ep = position.ep_square<64 ? (position.ep_square%8)+1 : 0;
-  unsigned rule50 = thread_info.syzygy_50_move_rule ? position.halfmoves : 0;
-      unsigned castling = 0;  
-      TbRootMoves tbMoves{}; int ok = 0;
-       
-      ok = tb_probe_root_dtz(kings|(queens|rooks|bishops|knights|pawns)&white,
-                             kings|(queens|rooks|bishops|knights|pawns)&black,
-                             kings, queens, rooks, bishops, knights, pawns,
-                             rule50, castling, ep, position.color==Colors::White,
-                             false, true, &tbMoves);
+      unsigned ep = position.ep_square < 64 ? (position.ep_square % 8) + 1 : 0;
+      unsigned rule50 =
+          thread_info.syzygy_50_move_rule ? position.halfmoves : 0;
+      unsigned castling = 0;
+      TbRootMoves tbMoves{};
+      int ok = 0;
+
+      ok = tb_probe_root_dtz(
+          kings | (queens | rooks | bishops | knights | pawns) & white,
+          kings | (queens | rooks | bishops | knights | pawns) & black, kings,
+          queens, rooks, bishops, knights, pawns, rule50, castling, ep,
+          position.color == Colors::White, false, true, &tbMoves);
       if (!ok) {
-        ok = tb_probe_root_wdl(kings|(queens|rooks|bishops|knights|pawns)&white,
-                               kings|(queens|rooks|bishops|knights|pawns)&black,
-                               kings, queens, rooks, bishops, knights, pawns,
-                               rule50, castling, ep, position.color==Colors::White,
-                               true, &tbMoves);
+        ok = tb_probe_root_wdl(
+            kings | (queens | rooks | bishops | knights | pawns) & white,
+            kings | (queens | rooks | bishops | knights | pawns) & black, kings,
+            queens, rooks, bishops, knights, pawns, rule50, castling, ep,
+            position.color == Colors::White, true, &tbMoves);
       }
       if (ok) {
-         
-        std::vector<std::pair<Move,int>> tbOrdered;
-        for (unsigned i=0; i<tbMoves.size; ++i) {
-          TbMove tm = tbMoves.moves[i].move; int from = TB_MOVE_FROM(tm); int to = TB_MOVE_TO(tm); int promo = TB_MOVE_PROMOTES(tm);
-          Move m = promo ? pack_move_promo(from,to,promo-1) : pack_move(from,to,MoveTypes::Normal);
+
+        std::vector<std::pair<Move, int>> tbOrdered;
+        for (unsigned i = 0; i < tbMoves.size; ++i) {
+          TbMove tm = tbMoves.moves[i].move;
+          int from = TB_MOVE_FROM(tm);
+          int to = TB_MOVE_TO(tm);
+          int promo = TB_MOVE_PROMOTES(tm);
+          Move m = promo ? pack_move_promo(from, to, promo - 1)
+                         : pack_move(from, to, MoveTypes::Normal);
           int wdl = TB_GET_WDL(tbMoves.moves[i].tbScore);
           int mapped;
-          switch(wdl){
-            case TB_WIN: mapped = TB_WIN_SCORE; break;
-            case TB_CURSED_WIN: mapped = TB_CURSED_WIN_SCORE; break;
-            case TB_DRAW: mapped = TB_DRAW_SCORE; break;
-            case TB_BLESSED_LOSS: mapped = TB_BLESSED_LOSS_SCORE; break;
-            case TB_LOSS: mapped = TB_LOSS_SCORE; break;
-            default: mapped = 0; break;
+          switch (wdl) {
+          case TB_WIN:
+            mapped = TB_WIN_SCORE;
+            break;
+          case TB_CURSED_WIN:
+            mapped = TB_CURSED_WIN_SCORE;
+            break;
+          case TB_DRAW:
+            mapped = TB_DRAW_SCORE;
+            break;
+          case TB_BLESSED_LOSS:
+            mapped = TB_BLESSED_LOSS_SCORE;
+            break;
+          case TB_LOSS:
+            mapped = TB_LOSS_SCORE;
+            break;
+          default:
+            mapped = 0;
+            break;
           }
           tbOrdered.emplace_back(m, mapped);
         }
-         
-        bool hasWin=false, hasLoss=false; for (auto &p: tbOrdered){ if (p.second > MateScore-1000) hasWin=true; if (p.second < -MateScore+1000) hasLoss=true; }
-        if (hasWin && !hasLoss && !thread_info.infinite_search) {
-           
-            thread_info.best_moves[0] = tbOrdered[0].first; thread_info.ponder_move = MoveNone; tb_decisive_shortcut = true;
-             
-            {
-              std::string bm = internal_to_uci(position, tbOrdered[0].first);
-              safe_printf("bestmove %s\n", bm.c_str());
-            }
-            return;
+
+        bool hasWin = false, hasLoss = false;
+        for (auto &p : tbOrdered) {
+          if (p.second > MateScore - 1000)
+            hasWin = true;
+          if (p.second < -MateScore + 1000)
+            hasLoss = true;
         }
-         
+        if (hasWin && !hasLoss && !thread_info.infinite_search) {
+
+          thread_info.best_moves[0] = tbOrdered[0].first;
+          thread_info.ponder_move = MoveNone;
+          tb_decisive_shortcut = true;
+
+          {
+            std::string bm = internal_to_uci(position, tbOrdered[0].first);
+            safe_printf("bestmove %s\n", bm.c_str());
+          }
+          return;
+        }
+
         thread_info.root_moves.clear();
-        for (auto &p: tbOrdered) thread_info.root_moves.push_back({p.first,0});
-         
-   
+        for (auto &p : tbOrdered)
+          thread_info.root_moves.push_back({p.first, 0});
       }
     }
   }
-skip_tb_root: ;
+skip_tb_root:;
 
-   
   thread_info.root_moves.reserve(ListSize);
   thread_info.root_moves.clear();
   {
     std::array<Move, ListSize> raw_root_moves;
-  int nmoves = legal_movegen(position, raw_root_moves.data());
+    int nmoves = legal_movegen(position, raw_root_moves.data());
     for (int i = 0; i < nmoves; i++) {
       thread_info.root_moves.push_back({raw_root_moves[i], 0});
     }
@@ -1694,98 +1816,104 @@ skip_tb_root: ;
   int last_completed_depth = 0;
 
   auto update_phase = [&](ThreadInfo &ti, Position &pos) {
-     
-    if (ti.thread_id != 0) return;
+    if (ti.thread_id != 0)
+      return;
 
     int total_material = total_mat(pos);
-    int root_eval = ti.best_scores[0];  
+    int root_eval = ti.best_scores[0];
     ti.prev_root_eval = ti.last_root_eval;
     ti.last_root_eval = root_eval;
     ti.root_completed_depth = last_completed_depth;
 
-     
     if (!ti.attack_mode) {
-      if (last_completed_depth >= 8 && root_eval >= ti.sacrifice_enter_cp && total_material >= 3200) {
-         
+      if (last_completed_depth >= 8 && root_eval >= ti.sacrifice_enter_cp &&
+          total_material >= 3200) {
+
         if (ti.prev_root_eval >= ti.sacrifice_enter_cp) {
           ti.attack_mode = true;
         }
       }
     } else {
-      bool drop = (ti.prev_root_eval - root_eval) >= ti.sacrifice_drop_threshold;
-      if (root_eval <= ti.sacrifice_exit_cp || total_material < ti.endgame_material || drop) {
+      bool drop =
+          (ti.prev_root_eval - root_eval) >= ti.sacrifice_drop_threshold;
+      if (root_eval <= ti.sacrifice_exit_cp ||
+          total_material < ti.endgame_material || drop) {
         ti.attack_mode = false;
       }
     }
 
-     
-    uint8_t desired_phase = ti.phase;  
+    uint8_t desired_phase = ti.phase;
 
-     
     if (ti.phase == PhaseTypes::Opening && ti.game_ply >= ti.opening_min_ply) {
       desired_phase = PhaseTypes::MiddleGame;
     }
 
-     
     if (ti.phase == PhaseTypes::Endgame) {
-      if (total_material > ti.end_recover_material && total_material > ti.endgame_material) {
-        desired_phase = PhaseTypes::LateMiddleGame;  
+      if (total_material > ti.end_recover_material &&
+          total_material > ti.endgame_material) {
+        desired_phase = PhaseTypes::LateMiddleGame;
       }
     }
-     
+
     else if (ti.phase == PhaseTypes::LateMiddleGame) {
       if (total_material > ti.mid_recover_material) {
         desired_phase = PhaseTypes::MiddleGame;
       }
     }
 
-     
     if (total_material <= ti.endgame_material) {
       desired_phase = PhaseTypes::Endgame;
     } else if (total_material <= ti.late_phase_material) {
-       
+
       if (desired_phase != PhaseTypes::Endgame)
         desired_phase = PhaseTypes::LateMiddleGame;
     } else {
-       
+
       if (ti.game_ply < ti.opening_min_ply)
         desired_phase = PhaseTypes::Opening;
       else
         desired_phase = PhaseTypes::MiddleGame;
     }
 
-     
     if (desired_phase != ti.phase) {
       ti.phase_hit_counts[desired_phase]++;
-       
+
       for (size_t i = 0; i < ti.phase_hit_counts.size(); ++i) {
-        if (i != desired_phase) ti.phase_hit_counts[i] = 0;
+        if (i != desired_phase)
+          ti.phase_hit_counts[i] = 0;
       }
       if (ti.phase_hit_counts[desired_phase] >= ti.phase_confirm_hits) {
         uint8_t old_phase = ti.phase;
         ti.phase = desired_phase;
-         
+
         auto physical_net = [](uint8_t ph) {
           switch (ph) {
-            case PhaseTypes::Opening:
-            case PhaseTypes::MiddleGame: return 0;  
-            case PhaseTypes::LateMiddleGame: return 1;  
-            case PhaseTypes::Endgame: return 2;  
-            case PhaseTypes::Sacrifice: return 2;  
-            default: return 0;
+          case PhaseTypes::Opening:
+          case PhaseTypes::MiddleGame:
+            return 0;
+          case PhaseTypes::LateMiddleGame:
+            return 1;
+          case PhaseTypes::Endgame:
+            return 2;
+          case PhaseTypes::Sacrifice:
+            return 2;
+          default:
+            return 0;
           }
         };
         if (physical_net(old_phase) != physical_net(ti.phase)) {
-          ti.nnue_state.reset_nnue(pos, ti.phase);
+          // HCE does not need reset
         }
       }
     } else {
-       
-      for (auto &c : ti.phase_hit_counts) c = 0;
+
+      for (auto &c : ti.phase_hit_counts)
+        c = 0;
     }
   };
-  int real_multi_pv = std::min<int>(thread_info.multipv, (int)thread_info.root_moves.size());
-  
+  int real_multi_pv =
+      std::min<int>(thread_info.multipv, (int)thread_info.root_moves.size());
+
   for (int depth = 1;; ++depth) {
     if (thread_data.stop) {
       break;
@@ -1797,9 +1925,10 @@ skip_tb_root: ;
       break;
     }
 
-  real_multi_pv = std::min<int>(thread_info.multipv, (int)thread_info.root_moves.size());
-    
-    for (thread_info.multipv_index = 0; 
+    real_multi_pv =
+        std::min<int>(thread_info.multipv, (int)thread_info.root_moves.size());
+
+    for (thread_info.multipv_index = 0;
          thread_info.multipv_index < real_multi_pv;
          thread_info.multipv_index++) {
 
@@ -1810,7 +1939,6 @@ skip_tb_root: ;
       score =
           search<true>(alpha, beta, depth, false, position, thread_info, TT);
 
-       
       while (score <= alpha || score >= beta || thread_data.stop ||
              thread_info.datagen_stop) {
 
@@ -1841,31 +1969,37 @@ skip_tb_root: ;
                           : thread_info.best_moves[thread_info.multipv_index];
 
           if (abs(score) <= MateScore) {
-       {
-    std::string pv_str = internal_to_uci(position, move);
-    safe_printf("info multipv %i depth %i seldepth %i score cp %i %s nodes %" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv %s\n",
-         thread_info.multipv_index + 1, depth, thread_info.seldepth,
-         score * 100 / NormalizationFactor, bound_string.c_str(), nodes,
-         nps, search_time, pv_str.c_str());
-       }
+            {
+              std::string pv_str = internal_to_uci(position, move);
+              safe_printf(
+                  "info multipv %i depth %i seldepth %i score cp %i %s nodes "
+                  "%" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv %s\n",
+                  thread_info.multipv_index + 1, depth, thread_info.seldepth,
+                  score * 100 / NormalizationFactor, bound_string.c_str(),
+                  nodes, nps, search_time, pv_str.c_str());
+            }
           } else if (score > MateScore) {
             int dist = (MateScore - score) / 2;
-       {
-    std::string pv_str = internal_to_uci(position, move);
-    safe_printf("info multipv %i depth %i seldepth %i score mate %i %s nodes %" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv %s\n",
-         thread_info.multipv_index + 1, depth, thread_info.seldepth,
-         dist, bound_string.c_str(), nodes, nps,
-         search_time, pv_str.c_str());
-       }
+            {
+              std::string pv_str = internal_to_uci(position, move);
+              safe_printf("info multipv %i depth %i seldepth %i score mate %i "
+                          "%s nodes %" PRIu64 " nps %" PRIi64 " time %" PRIi64
+                          " pv %s\n",
+                          thread_info.multipv_index + 1, depth,
+                          thread_info.seldepth, dist, bound_string.c_str(),
+                          nodes, nps, search_time, pv_str.c_str());
+            }
           } else {
             int dist = (Mate - score) / 2;
-       {
-    std::string pv_str = internal_to_uci(position, move);
-    safe_printf("info multipv %i depth %i seldepth %i score mate %i %s nodes %" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv %s\n",
-         thread_info.multipv_index + 1, depth, thread_info.seldepth,
-         dist, bound_string.c_str(), nodes, nps,
-         search_time, pv_str.c_str());
-       }
+            {
+              std::string pv_str = internal_to_uci(position, move);
+              safe_printf("info multipv %i depth %i seldepth %i score mate %i "
+                          "%s nodes %" PRIu64 " nps %" PRIi64 " time %" PRIi64
+                          " pv %s\n",
+                          thread_info.multipv_index + 1, depth,
+                          thread_info.seldepth, dist, bound_string.c_str(),
+                          nodes, nps, search_time, pv_str.c_str());
+            }
           }
         }
 
@@ -1901,7 +2035,7 @@ skip_tb_root: ;
 
       thread_info.best_moves[thread_info.multipv_index] = thread_info.pv[0];
 
-  if (thread_info.thread_id == 0) {
+      if (thread_info.thread_id == 0) {
 
         uint64_t nodes = thread_info.nodes.load();
 
@@ -1919,10 +2053,12 @@ skip_tb_root: ;
           nps = wezly;
         }
 
-        if (!thread_info.doing_datagen  ) {
-          safe_printf("info multipv %i depth %i seldepth %i score %s nodes %" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv ",
-                 thread_info.multipv_index + 1, depth, thread_info.seldepth,
-                 eval_string.c_str(), nodes, nps, search_time);
+        if (!thread_info.doing_datagen) {
+          safe_printf(
+              "info multipv %i depth %i seldepth %i score %s nodes %" PRIu64
+              " nps %" PRIi64 " time %" PRIi64 " pv ",
+              thread_info.multipv_index + 1, depth, thread_info.seldepth,
+              eval_string.c_str(), nodes, nps, search_time);
           print_pv(position, thread_info);
         }
 
@@ -1957,8 +2093,6 @@ skip_tb_root: ;
               find_root_move(thread_info, thread_info.best_moves[0])->nodes,
               bm_stability);
         }
-
-   
       }
 
       if (thread_data.stop || thread_info.datagen_stop) {
@@ -1967,21 +2101,20 @@ skip_tb_root: ;
 
       prev_best = thread_info.best_moves[0];
 
-  if (depth > 6 && thread_info.multipv_index == 0) {
+      if (depth > 6 && thread_info.multipv_index == 0) {
         alpha = score - 20, beta = score + 20;
       } else {
         alpha = ScoreNone, beta = -ScoreNone;
       }
     }
-    
+
     last_completed_depth = depth;
   }
 
-   
   update_phase(thread_info, position);
 
 finish:
-   
+
   if (thread_info.thread_id == 0 && !thread_info.doing_datagen) {
     thread_data.stop = true;
   }
@@ -2006,8 +2139,8 @@ finish:
       return MoveNone;
     }
 
-  auto ponder_pos_uptr = std::make_unique<Position>(root_position);
-  Position &ponder_position = *ponder_pos_uptr;
+    auto ponder_pos_uptr = std::make_unique<Position>(root_position);
+    Position &ponder_position = *ponder_pos_uptr;
     make_move(ponder_position, best_move);
 
     std::array<Move, ListSize> response_legal{};
@@ -2021,44 +2154,43 @@ finish:
     return MoveNone;
   };
 
-   
   if (thread_info.thread_id == 0) {
-     
+
     if (thread_info.pv[0] != MoveNone && thread_info.pv[1] != MoveNone) {
       thread_info.ponder_move = thread_info.pv[1];
     } else {
-       
-        auto temp_pos_uptr2 = std::make_unique<Position>(position);
-        Position &temp_pos = *temp_pos_uptr2;
+
+      auto temp_pos_uptr2 = std::make_unique<Position>(position);
+      Position &temp_pos = *temp_pos_uptr2;
       if (thread_info.best_moves[0] != MoveNone) {
         make_move(temp_pos, thread_info.best_moves[0]);
-        
-         
+
         std::array<Move, ListSize> responses;
-  int num_responses = legal_movegen(temp_pos, responses.data());
-        
+        int num_responses = legal_movegen(temp_pos, responses.data());
+
         if (num_responses > 0) {
-           
+
           Move best_response = responses[0];
           int best_score = -1000;
-          
+
           for (int i = 0; i < std::min(num_responses, 5); i++) {
             int score = 0;
-            if (is_cap(temp_pos, responses[i])) score += 100;
-            
+            if (is_cap(temp_pos, responses[i]))
+              score += 100;
+
             int to_square = extract_to(responses[i]);
             int file = to_square % 8;
             int rank = to_square / 8;
-            
-             
-            if (file >= 3 && file <= 4 && rank >= 3 && rank <= 4) score += 50;
-            
+
+            if (file >= 3 && file <= 4 && rank >= 3 && rank <= 4)
+              score += 50;
+
             if (score > best_score) {
               best_score = score;
               best_response = responses[i];
             }
           }
-          
+
           thread_info.ponder_move = best_response;
         } else {
           thread_info.ponder_move = MoveNone;
@@ -2066,52 +2198,79 @@ finish:
       }
     }
   }
-   
+
   if (thread_info.thread_id == 0 && thread_info.use_syzygy) {
     auto &pos = position;
     unsigned castling = 0;
-    if (pos.castling_squares[Colors::White][Sides::Kingside] != SquareNone) castling |= TB_CASTLING_K;
-    if (pos.castling_squares[Colors::White][Sides::Queenside] != SquareNone) castling |= TB_CASTLING_Q;
-    if (pos.castling_squares[Colors::Black][Sides::Kingside] != SquareNone) castling |= TB_CASTLING_k;
-    if (pos.castling_squares[Colors::Black][Sides::Queenside] != SquareNone) castling |= TB_CASTLING_q;
+    if (pos.castling_squares[Colors::White][Sides::Kingside] != SquareNone)
+      castling |= TB_CASTLING_K;
+    if (pos.castling_squares[Colors::White][Sides::Queenside] != SquareNone)
+      castling |= TB_CASTLING_Q;
+    if (pos.castling_squares[Colors::Black][Sides::Kingside] != SquareNone)
+      castling |= TB_CASTLING_k;
+    if (pos.castling_squares[Colors::Black][Sides::Queenside] != SquareNone)
+      castling |= TB_CASTLING_q;
     unsigned ep = pos.ep_square != SquareNone ? pos.ep_square : 0;
     unsigned tb_res = tb_probe_root(
-      pos.colors_bb[0], pos.colors_bb[1],
-      pos.pieces_bb[PieceTypes::King], pos.pieces_bb[PieceTypes::Queen],
-      pos.pieces_bb[PieceTypes::Rook], pos.pieces_bb[PieceTypes::Bishop],
-      pos.pieces_bb[PieceTypes::Knight], pos.pieces_bb[PieceTypes::Pawn],
-      pos.halfmoves, castling, ep, pos.color, nullptr);
+        pos.colors_bb[0], pos.colors_bb[1], pos.pieces_bb[PieceTypes::King],
+        pos.pieces_bb[PieceTypes::Queen], pos.pieces_bb[PieceTypes::Rook],
+        pos.pieces_bb[PieceTypes::Bishop], pos.pieces_bb[PieceTypes::Knight],
+        pos.pieces_bb[PieceTypes::Pawn], pos.halfmoves, castling, ep, pos.color,
+        nullptr);
     if (tb_res != TB_RESULT_FAILED) {
       int from = TB_MOVE_FROM(tb_res);
       int to = TB_MOVE_TO(tb_res);
       int tb_prom = TB_GET_PROMOTES(tb_res);
       uint8_t promo = 0;
       switch (tb_prom) {
-        case TB_PROMOTES_KNIGHT: promo = 0; break;
-        case TB_PROMOTES_BISHOP: promo = 1; break;
-        case TB_PROMOTES_ROOK:   promo = 2; break;
-        case TB_PROMOTES_QUEEN:  promo = 3; break;
-        default: promo = 0;
+      case TB_PROMOTES_KNIGHT:
+        promo = 0;
+        break;
+      case TB_PROMOTES_BISHOP:
+        promo = 1;
+        break;
+      case TB_PROMOTES_ROOK:
+        promo = 2;
+        break;
+      case TB_PROMOTES_QUEEN:
+        promo = 3;
+        break;
+      default:
+        promo = 0;
       }
-      Move best = promo ? pack_move_promo(from, to, promo) : pack_move(from, to, MoveTypes::Normal);
-      
-       
-      unsigned wdl = TB_GET_WDL(tb_res);
-      const char* wdl_str = "";
-      switch (wdl) {
-        case TB_WIN: wdl_str = "win"; break;
-        case TB_CURSED_WIN: wdl_str = "cursed win"; break;
-        case TB_DRAW: wdl_str = "draw"; break;
-        case TB_BLESSED_LOSS: wdl_str = "blessed loss"; break;
-        case TB_LOSS: wdl_str = "loss"; break;
-        default: wdl_str = "unknown"; break;
-      }
-  {
-    std::string tb_bm = internal_to_uci(pos, best);
-    safe_printf("info string tablebase hit: %s (%s)\n", tb_bm.c_str(), wdl_str);
-  }
+      Move best = promo ? pack_move_promo(from, to, promo)
+                        : pack_move(from, to, MoveTypes::Normal);
 
-      Move validated_ponder = validate_ponder_move(pos, best, thread_info.ponder_move);
+      unsigned wdl = TB_GET_WDL(tb_res);
+      const char *wdl_str = "";
+      switch (wdl) {
+      case TB_WIN:
+        wdl_str = "win";
+        break;
+      case TB_CURSED_WIN:
+        wdl_str = "cursed win";
+        break;
+      case TB_DRAW:
+        wdl_str = "draw";
+        break;
+      case TB_BLESSED_LOSS:
+        wdl_str = "blessed loss";
+        break;
+      case TB_LOSS:
+        wdl_str = "loss";
+        break;
+      default:
+        wdl_str = "unknown";
+        break;
+      }
+      {
+        std::string tb_bm = internal_to_uci(pos, best);
+        safe_printf("info string tablebase hit: %s (%s)\n", tb_bm.c_str(),
+                    wdl_str);
+      }
+
+      Move validated_ponder =
+          validate_ponder_move(pos, best, thread_info.ponder_move);
       thread_info.ponder_move = validated_ponder;
 
       if (thread_info.pondering && validated_ponder != MoveNone) {
@@ -2125,102 +2284,131 @@ finish:
       return;
     }
   }
-   
-   
-  if (thread_info.thread_id == 0 && !thread_info.doing_datagen && thread_info.variety > 0) {
-     
-    Move selected_move = thread_info.best_moves[0];  
+
+  if (thread_info.thread_id == 0 && !thread_info.doing_datagen &&
+      thread_info.variety > 0) {
+
+    Move selected_move = thread_info.best_moves[0];
     int best_score = thread_info.best_scores[0];
-    
-     
-    int variety_lines = real_multi_pv > 1 ? std::min<int>(real_multi_pv, 1 + (static_cast<int>(thread_info.variety) / 50)) : 1;
-    
-     
-    int base_threshold = (VARIETY_BASE_THRESHOLD - static_cast<int>(thread_info.variety)) * VARIETY_MULTIPLIER;  
-    if (base_threshold < 0) base_threshold = 0;
+
+    int variety_lines =
+        real_multi_pv > 1
+            ? std::min<int>(real_multi_pv,
+                            1 + (static_cast<int>(thread_info.variety) / 50))
+            : 1;
+
+    int base_threshold =
+        (VARIETY_BASE_THRESHOLD - static_cast<int>(thread_info.variety)) *
+        VARIETY_MULTIPLIER;
+    if (base_threshold < 0)
+      base_threshold = 0;
 
     if (variety_lines > 1) {
-       
+
       int threshold = base_threshold;
-       
-      int promo_adjust[32]; std::fill(std::begin(promo_adjust), std::end(promo_adjust), 0);
-      for (int i = 0; i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
+
+      int promo_adjust[32];
+      std::fill(std::begin(promo_adjust), std::end(promo_adjust), 0);
+      for (int i = 0;
+           i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
         Move move = thread_info.best_moves[i];
-        if (extract_type(move) == MoveTypes::Promotion && extract_promo(move) != Promos::Queen) {
-      auto temp_pos_uptr3 = std::make_unique<Position>(position);
-      Position &temp_pos = *temp_pos_uptr3;
+        if (extract_type(move) == MoveTypes::Promotion &&
+            extract_promo(move) != Promos::Queen) {
+          auto temp_pos_uptr3 = std::make_unique<Position>(position);
+          Position &temp_pos = *temp_pos_uptr3;
           make_move(temp_pos, move);
           int to = extract_to(move);
           int promo_type = extract_promo(move);
           int promo_bonus = 0;
-          if (!is_valid_square(to)) continue;
+          if (!is_valid_square(to))
+            continue;
           if (promo_type == Promos::Knight) {
             uint64_t knight_attacks = KNIGHT_ATK_SAFE(to);
-            uint64_t valuable_targets = (temp_pos.pieces_bb[PieceTypes::Queen] | temp_pos.pieces_bb[PieceTypes::Rook] | temp_pos.pieces_bb[PieceTypes::King]) & temp_pos.colors_bb[position.color ^ 1];
+            uint64_t valuable_targets = (temp_pos.pieces_bb[PieceTypes::Queen] |
+                                         temp_pos.pieces_bb[PieceTypes::Rook] |
+                                         temp_pos.pieces_bb[PieceTypes::King]) &
+                                        temp_pos.colors_bb[position.color ^ 1];
             int fork_count = 0;
-            while (valuable_targets) { int target_sq = pop_lsb(valuable_targets); if (knight_attacks & (1ULL << target_sq)) fork_count++; }
-            if (fork_count >= 2) promo_bonus = PROMO_BONUS_DOUBLE_FORK; else if (fork_count == 1) promo_bonus = PROMO_BONUS_SINGLE_FORK;
+            while (valuable_targets) {
+              int target_sq = pop_lsb(valuable_targets);
+              if (knight_attacks & (1ULL << target_sq))
+                fork_count++;
+            }
+            if (fork_count >= 2)
+              promo_bonus = PROMO_BONUS_DOUBLE_FORK;
+            else if (fork_count == 1)
+              promo_bonus = PROMO_BONUS_SINGLE_FORK;
           } else if (promo_type == Promos::Bishop) {
-            uint64_t bishop_attacks = get_bishop_attacks(to, temp_pos.colors_bb[0] | temp_pos.colors_bb[1]);
-            uint64_t central_diagonals = 0x8040201008040201ULL | 0x0102040810204080ULL;
+            uint64_t bishop_attacks = get_bishop_attacks(
+                to, temp_pos.colors_bb[0] | temp_pos.colors_bb[1]);
+            uint64_t central_diagonals =
+                0x8040201008040201ULL | 0x0102040810204080ULL;
             if (bishop_attacks & central_diagonals) {
               promo_bonus = 50;
-              if (pop_count(temp_pos.pieces_bb[PieceTypes::Bishop] & temp_pos.colors_bb[position.color]) > 1) promo_bonus += 50;
+              if (pop_count(temp_pos.pieces_bb[PieceTypes::Bishop] &
+                            temp_pos.colors_bb[position.color]) > 1)
+                promo_bonus += 50;
             }
           }
-          promo_bonus = (promo_bonus * static_cast<int>(thread_info.variety)) / 100;
+          promo_bonus =
+              (promo_bonus * static_cast<int>(thread_info.variety)) / 100;
           if (promo_bonus > 0) {
             int score_diff = best_score - thread_info.best_scores[i];
             if (score_diff <= threshold + promo_bonus) {
-              promo_adjust[i] = promo_bonus;  
+              promo_adjust[i] = promo_bonus;
             }
           }
         }
       }
-       
-       
-      for (int i = 0; i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
-        if (promo_adjust[i]) thread_info.best_scores[i] += promo_adjust[i];
+
+      for (int i = 0;
+           i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
+        if (promo_adjust[i])
+          thread_info.best_scores[i] += promo_adjust[i];
       }
-       
-       
+
     } else {
-       
-       
+
       if (thread_info.seldepth > 8 && std::abs(best_score) < 1200) {
-         
+
         std::array<Move, ListSize> legal_moves;
         int num_legal = legal_movegen(position, legal_moves.data());
-        struct AltCand { Move m; int score; int diff; };
-        std::vector<AltCand> alts; alts.reserve(num_legal);
+        struct AltCand {
+          Move m;
+          int score;
+          int diff;
+        };
+        std::vector<AltCand> alts;
+        alts.reserve(num_legal);
         for (int i = 0; i < num_legal; ++i) {
           Move m = legal_moves[i];
-          if (m == thread_info.best_moves[0]) continue;
-           
+          if (m == thread_info.best_moves[0])
+            continue;
+
           bool cap = is_cap(position, m);
-          if (cap && thread_info.variety < 40) continue;  
-           
+          if (cap && thread_info.variety < 40)
+            continue;
+
           int piece = position.board[extract_from(m)];
           int to = extract_to(m);
           int hist_score = thread_info.HistoryScores[piece][to];
-           
-           
+
           int diff = (thread_info.best_scores[0] / 4) - (hist_score / 4);
-           
-          int effective_window = base_threshold + (static_cast<int>(thread_info.variety) * 3) / 2;
+
+          int effective_window =
+              base_threshold + (static_cast<int>(thread_info.variety) * 3) / 2;
           if (diff <= effective_window) {
             alts.push_back({m, hist_score, diff});
           }
         }
         if (!alts.empty()) {
-           
+
           uint64_t total_w = 0;
-            std::vector<uint64_t> prefix(alts.size());
+          std::vector<uint64_t> prefix(alts.size());
           for (size_t i = 0; i < alts.size(); ++i) {
             int quality = std::max(1, 1000 - std::max(0, alts[i].diff));
-             
-             
-            double flatten = (100.0 - (thread_info.variety / 2.0)) / 100.0;  
+
+            double flatten = (100.0 - (thread_info.variety / 2.0)) / 100.0;
             double w = std::pow((double)quality, std::max(0.25, flatten));
             uint64_t iw = (uint64_t)std::max<double>(1.0, w);
             total_w += iw;
@@ -2229,36 +2417,41 @@ finish:
           if (total_w > 0) {
             uint64_t r = (uint64_t)Random::dist(Random::rd) % total_w;
             for (size_t i = 0; i < alts.size(); ++i) {
-              if (r < prefix[i]) { selected_move = alts[i].m; break; }
+              if (r < prefix[i]) {
+                selected_move = alts[i].m;
+                break;
+              }
             }
           }
         }
       }
     }
 
-     
     if (real_multi_pv > 1) {
-       
+
       std::vector<int> candidates;
       int threshold = base_threshold;
-      for (int i = 0; i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
+      for (int i = 0;
+           i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
         int score_diff = best_score - thread_info.best_scores[i];
-        if (score_diff <= threshold) candidates.push_back(i);
+        if (score_diff <= threshold)
+          candidates.push_back(i);
       }
       if (!candidates.empty()) {
         int variety_bias = static_cast<int>(thread_info.variety);
         int selection = 0;
         if (candidates.size() > 1 && variety_bias > 0) {
           int r = Random::dist(Random::rd) % 150;
-          if (r < variety_bias) selection = candidates[Random::dist(Random::rd) % candidates.size()];
+          if (r < variety_bias)
+            selection =
+                candidates[Random::dist(Random::rd) % candidates.size()];
         }
         selected_move = thread_info.best_moves[selection];
       }
     }
-    
-     
-  if (selected_move != thread_info.best_moves[0]) {
-       
+
+    if (selected_move != thread_info.best_moves[0]) {
+
       int selected_idx = 0;
       for (int i = 0; i < real_multi_pv; i++) {
         if (thread_info.best_moves[i] == selected_move) {
@@ -2266,78 +2459,98 @@ finish:
           break;
         }
       }
-      
-       
-      std::swap(thread_info.best_moves[0], thread_info.best_moves[selected_idx]);
-      std::swap(thread_info.best_scores[0], thread_info.best_scores[selected_idx]);
+
+      std::swap(thread_info.best_moves[0],
+                thread_info.best_moves[selected_idx]);
+      std::swap(thread_info.best_scores[0],
+                thread_info.best_scores[selected_idx]);
     }
-   
-   
   }
 
-   
-  if (thread_info.thread_id == 0 && thread_info.is_human && !thread_info.doing_datagen) {
-     
+  if (thread_info.thread_id == 0 && thread_info.is_human &&
+      !thread_info.doing_datagen) {
+
     bool can_weaken = !(thread_info.pondering && !thread_info.ponder_hit);
     if (can_weaken && thread_info.best_moves[0] != MoveNone) {
-       
+
       int true_top = thread_info.best_scores[0];
       for (int i = 1; i < 16 && thread_info.best_moves[i] != MoveNone; i++)
-        if (thread_info.best_scores[i] > true_top) true_top = thread_info.best_scores[i];
+        if (thread_info.best_scores[i] > true_top)
+          true_top = thread_info.best_scores[i];
 
       int base_margin = std::max(0, thread_info.human_value_margin);
-       
+
       int v = std::clamp<int>(thread_info.variety, 0, 150);
-      double v_norm = v / 150.0;                
-      double attenuation = 1.0 - 0.55 * v_norm;  
-      if (attenuation < 0.35) attenuation = 0.35;  
+      double v_norm = v / 150.0;
+      double attenuation = 1.0 - 0.55 * v_norm;
+      if (attenuation < 0.35)
+        attenuation = 0.35;
       int margin = (int)std::lround(base_margin * attenuation);
 
-       
       if (thread_info.human_elo <= 1600) {
-        double elo_scale = (thread_info.human_elo - HUMAN_ELO_MIN) / static_cast<double>(HUMAN_ELO_RANGE);  
-        if (elo_scale < 0) elo_scale = 0; if (elo_scale > 1) elo_scale = 1;
+        double elo_scale = (thread_info.human_elo - HUMAN_ELO_MIN) /
+                           static_cast<double>(HUMAN_ELO_RANGE);
+        if (elo_scale < 0)
+          elo_scale = 0;
+        if (elo_scale > 1)
+          elo_scale = 1;
         margin = (int)std::lround(margin * (0.75 + 0.25 * elo_scale));
       }
 
-      if (margin <= 0) margin = 1;  
+      if (margin <= 0)
+        margin = 1;
 
-       
       std::vector<int> cand;
       cand.reserve(16);
       for (int i = 0; i < 16 && thread_info.best_moves[i] != MoveNone; i++) {
         int diff = true_top - thread_info.best_scores[i];
-        if (diff >= 0 && diff <= margin) cand.push_back(i);
+        if (diff >= 0 && diff <= margin)
+          cand.push_back(i);
       }
       if (cand.size() > 1) {
-         
+
         if (thread_info.human_noise_sigma > 0) {
-          int extra = Random::dist(Random::rd) % (thread_info.human_noise_sigma + 1);
+          int extra =
+              Random::dist(Random::rd) % (thread_info.human_noise_sigma + 1);
           int widened = margin + extra;
-          for (int i = 0; i < 16 && thread_info.best_moves[i] != MoveNone; i++) {
-            if (std::find(cand.begin(), cand.end(), i) != cand.end()) continue;
+          for (int i = 0; i < 16 && thread_info.best_moves[i] != MoveNone;
+               i++) {
+            if (std::find(cand.begin(), cand.end(), i) != cand.end())
+              continue;
             int diff = true_top - thread_info.best_scores[i];
-            if (diff > margin && diff <= widened) cand.push_back(i);
+            if (diff > margin && diff <= widened)
+              cand.push_back(i);
           }
         }
-         
+
         int total_w = 0;
         for (int idx : cand) {
           int diff = true_top - thread_info.best_scores[idx];
-          int w = (margin - diff) + 5; if (w < 1) w = 1; total_w += w;
+          int w = (margin - diff) + 5;
+          if (w < 1)
+            w = 1;
+          total_w += w;
         }
-        if (total_w <= 0) total_w = (int)cand.size();
+        if (total_w <= 0)
+          total_w = (int)cand.size();
         int r = Random::dist(Random::rd) % total_w;
         int chosen_idx = cand[0];
         for (int idx : cand) {
           int diff = true_top - thread_info.best_scores[idx];
-          int w = (margin - diff) + 5; if (w < 1) w = 1;
-          if (r < w) { chosen_idx = idx; break; }
+          int w = (margin - diff) + 5;
+          if (w < 1)
+            w = 1;
+          if (r < w) {
+            chosen_idx = idx;
+            break;
+          }
           r -= w;
         }
         if (chosen_idx != 0) {
-          std::swap(thread_info.best_moves[0], thread_info.best_moves[chosen_idx]);
-          std::swap(thread_info.best_scores[0], thread_info.best_scores[chosen_idx]);
+          std::swap(thread_info.best_moves[0],
+                    thread_info.best_moves[chosen_idx]);
+          std::swap(thread_info.best_scores[0],
+                    thread_info.best_scores[chosen_idx]);
         }
       }
     }
@@ -2352,16 +2565,17 @@ finish:
     }
   }
 
-   
   if (thread_info.thread_id == 0 && !thread_info.doing_datagen &&
-      thread_info.best_moves[0] != MoveNone && (!thread_info.infinite_search || thread_data.stop)) {
+      thread_info.best_moves[0] != MoveNone &&
+      (!thread_info.infinite_search || thread_data.stop)) {
     bool can_output = true;
-     
+
     if (thread_info.pondering && !thread_info.ponder_hit && !thread_data.stop) {
       can_output = false;
     }
     if (can_output) {
-      Move validated_ponder = validate_ponder_move(position, thread_info.best_moves[0], thread_info.ponder_move);
+      Move validated_ponder = validate_ponder_move(
+          position, thread_info.best_moves[0], thread_info.ponder_move);
       thread_info.ponder_move = validated_ponder;
 
       if (validated_ponder != MoveNone) {
@@ -2382,7 +2596,6 @@ void search_position(Position &position, ThreadInfo &thread_info,
   thread_info.thread_id = 0;
   thread_info.nodes.store(0);
 
-
   reset_barrier.arrive_and_wait();
 
   for (size_t i = 0; i < thread_data.thread_infos.size(); i++) {
@@ -2390,7 +2603,6 @@ void search_position(Position &position, ThreadInfo &thread_info,
     thread_data.thread_infos[i].thread_id = i + 1;
   }
 
-   
   idle_barrier.arrive_and_wait();
 
   thread_data.stop = false;
@@ -2424,86 +2636,92 @@ void loop(int i) {
   }
 }
 
- 
-int analyze_sacrifice(Position &position, ThreadInfo &thread_info, int depth, int ply, int sacrificer_color) {
-   
-  if (depth < 0 || ply > 10) return 0;
-  
-   
-int64_t time_for_sacrifice = static_cast<int64_t>(
-    (thread_info.opt_time * thread_info.sacrifice_lookahead_time_multiplier) / 100);
-if (time_elapsed(thread_info.start_time) > time_for_sacrifice) return 0;
+int analyze_sacrifice(Position &position, ThreadInfo &thread_info, int depth,
+                      int ply, int sacrificer_color) {
 
-   
+  if (depth < 0 || ply > 10)
+    return 0;
+
+  int64_t time_for_sacrifice = static_cast<int64_t>(
+      (thread_info.opt_time * thread_info.sacrifice_lookahead_time_multiplier) /
+      100);
+  if (time_elapsed(thread_info.start_time) > time_for_sacrifice)
+    return 0;
+
   if (depth == 0) {
-    int mat = material_eval(position);  
-    if (position.color != sacrificer_color) mat = -mat;
-     
-    int stat = eval(position, thread_info);  
-     
-    if (position.color != sacrificer_color) stat = -stat;
-    int score = (mat * 3 + stat) / 4;  
+    int mat = material_eval(position);
+    if (position.color != sacrificer_color)
+      mat = -mat;
+
+    int stat = eval(position, thread_info);
+
+    if (position.color != sacrificer_color)
+      stat = -stat;
+    int score = (mat * 3 + stat) / 4;
     return score;
   }
 
-   
   std::array<Move, ListSize> moves;
-  uint64_t checkers = attacks_square(position, get_king_pos(position, position.color), position.color ^ 1);
+  uint64_t checkers = attacks_square(
+      position, get_king_pos(position, position.color), position.color ^ 1);
   int nmoves = movegen(position, moves.data(), checkers, Generate::GenAll);
 
-  int best = -1000000;  
-   
+  int best = -1000000;
+
   int considered = 0;
   for (int i = 0; i < nmoves && considered < 16; i++) {
     Move m = moves[i];
-    if (!is_legal(position, m)) continue;
+    if (!is_legal(position, m))
+      continue;
 
     Position np = position;
     int before_mat = material_eval(position);
     make_move(np, m);
-    update_nnue_state(thread_info, m, position, np);  
-    
-     
-    if (thread_info.search_ply >= MaxSearchDepth || thread_info.game_ply >= GameSize) {
-      return best;  
+
+    if (thread_info.search_ply >= MaxSearchDepth ||
+        thread_info.game_ply >= GameSize) {
+      return best;
     }
-    ss_push(position, thread_info, m);  
+    ss_push(position, thread_info, m);
 
     int after_mat = material_eval(np);
 
-     
     bool isCapture = is_cap(position, m);
     bool sacrificer_turn = (position.color == sacrificer_color);
     bool sacrificer_loses = false;
     if (sacrificer_turn) {
-       
-      if (sacrificer_color == Colors::White && after_mat < before_mat) sacrificer_loses = true;
-      if (sacrificer_color == Colors::Black && after_mat > before_mat) sacrificer_loses = true;
+
+      if (sacrificer_color == Colors::White && after_mat < before_mat)
+        sacrificer_loses = true;
+      if (sacrificer_color == Colors::Black && after_mat > before_mat)
+        sacrificer_loses = true;
     }
     if (!(isCapture || sacrificer_loses || ply == 0)) {
-      ss_pop(thread_info);  
-      continue;  
+      ss_pop(thread_info);
+      continue;
     }
 
     considered++;
-    int child = -analyze_sacrifice(np, thread_info, depth - 1, ply + 1, sacrificer_color);
-    if (child > best) best = child;
+    int child = -analyze_sacrifice(np, thread_info, depth - 1, ply + 1,
+                                   sacrificer_color);
+    if (child > best)
+      best = child;
 
-    ss_pop(thread_info);  
+    ss_pop(thread_info);
   }
 
   if (best == -1000000) {
-     
-    int mat = material_eval(position);  
-    if (position.color != sacrificer_color) mat = -mat;
+
+    int mat = material_eval(position);
+    if (position.color != sacrificer_color)
+      mat = -mat;
     return mat;
   }
-   
+
   int aggr_bonus = (thread_info.sacrifice_lookahead_aggressiveness - 100) * 2;
-  return best + aggr_bonus / 4;  
+  return best + aggr_bonus / 4;
 }
 
- 
 int calculate_material_change(const Position &position) {
-    return material_eval(position);
+  return material_eval(position);
 }

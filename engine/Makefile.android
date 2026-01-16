@@ -7,7 +7,7 @@ SOURCES := src/stallion.cpp \
            fathom/src/tbprobe.cpp \
            fathom/src/tbchess.cpp
 
-CXX := /Users/berkegulacar/Library/Android/sdk/ndk/29.0.13599879/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android35-clang++
+CXX := /Users/berkegulacar/Library/Android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android35-clang++
 CXXFLAGS := -O3 -std=c++23 -ffast-math -pthread -march=armv8-a
 
 LINKER := -lm -static-libstdc++

@@ -1,4 +1,5 @@
 #pragma once
+#include "bitboard.h"
 #include "defs.h"
 #include "params.h"
 #include "poly_random.h"
@@ -22,7 +23,7 @@ typedef unsigned __int128 uint128_t;
 
 struct BookEntry {
   uint64_t key;
-  Move move;
+  Action move;
   uint16_t weight;
   uint32_t learn;
 };
@@ -37,14 +38,14 @@ public:
   OpeningBook() : book_loaded(false) {}
 
   bool load_book(const std::string &path);
-  Move probe_book(uint64_t position_key, int min_weight = 1);
+  Action probe_book(uint64_t position_key, int min_weight = 1);
   bool is_loaded() const { return book_loaded; }
   void clear_book() {
     book_positions.clear();
     book_loaded = false;
   }
 
-  uint64_t polyglot_key(const Position &pos);
+  uint64_t polyglot_key(const BoardState &pos);
 
 private:
   bool load_polyglot_book(const std::string &filename);
@@ -74,11 +75,11 @@ struct TimeManager {
 
 struct ThreadInfoBase {
   uint16_t thread_id = 0;
-  std::array<GameHistory, GameSize> game_hist;
+  std::array<StateRecord, MaxGameLen> game_hist;
   uint16_t game_ply;
   uint16_t search_ply;
 
-  std::vector<RootMoveInfo> root_moves;
+  std::vector<RootAction> root_moves;
 
   std::chrono::steady_clock::time_point start_time;
 
@@ -95,7 +96,8 @@ struct ThreadInfoBase {
   MultiArray<int16_t, 14, 64> CapHistScores;
   MultiArray<int16_t, 2, 16384> PawnCorrHist;
   MultiArray<int16_t, 2, 2, 16384> NonPawnCorrHist;
-  std::array<Move, MaxSearchDepth + 1> KillerMoves;
+  MultiArray<Action, MaxSearchPly + 1, 2> KillerMoves; // 2 killer moves per ply
+  MultiArray<Action, 14, 64> CounterMoves;
 
   uint8_t current_iter;
 
@@ -103,11 +105,11 @@ struct ThreadInfoBase {
   uint16_t multipv_index;
   uint16_t variety = 150;
 
-  Move excluded_move;
-  std::array<Move, ListSize> best_moves;
-  std::array<int, ListSize> best_scores;
+  Action excluded_move;
+  std::array<Action, MaxActions> best_moves;
+  std::array<int, MaxActions> best_scores;
 
-  int max_iter_depth = MaxSearchDepth;
+  int max_iter_depth = MaxSearchPly;
   uint64_t max_nodes_searched = UINT64_MAX / 2;
   uint64_t opt_nodes_searched = UINT64_MAX / 2;
 
@@ -121,10 +123,10 @@ struct ThreadInfoBase {
   int human_depth_limit = 0;
   int human_elo = 3401;
 
-  std::array<Move, MaxSearchDepth * MaxSearchDepth> pv;
+  std::array<Action, MaxSearchPly * MaxSearchPly> pv;
   std::array<int, 5> pv_material;
 
-  Position position;
+  BoardState position;
 
   uint8_t searches = 0;
   uint8_t phase;
@@ -157,14 +159,14 @@ struct ThreadInfoBase {
   int opening_min_ply = 20;
 
   uint64_t max_move_time = 0;
-  uint64_t move_overhead = 30;
+  uint64_t move_overhead = 100;
 
   uint16_t max_depth = 0;
 
   uint64_t max_nodes = 0;
 
   bool pondering = false;
-  Move ponder_move = MoveNone;
+  Action ponder_move = MoveNone;
   bool ponder_hit = false;
   std::chrono::steady_clock::time_point ponder_start_time;
 
@@ -174,7 +176,7 @@ struct ThreadInfoBase {
   TimeManager time_manager;
   bool best_move_stable = false;
   int stability_counter = 0;
-  Move previous_best_move = MoveNone;
+  Action previous_best_move = MoveNone;
 
   OpeningBook opening_book;
   bool use_opening_book = false;
@@ -186,8 +188,6 @@ struct ThreadInfoBase {
   bool syzygy_50_move_rule = true;
   int book_min_weight = 0;
   int ponder_time_factor = 200;
-  bool cerberus_enabled = false; // Cerberus mode (3-Engine Hybrid)
-  int cerberus_multipv = 10;     // Number of moves to get from SF
 
   std::array<uint64_t, 32> recent_book_keys{};
   uint8_t recent_book_head = 0;
@@ -212,7 +212,7 @@ struct ThreadInfo : ThreadInfoBase {
   }
 };
 
-RootMoveInfo *find_root_move(ThreadInfo &thread_info, Move move) {
+RootAction *find_root_move(ThreadInfo &thread_info, Action move) {
   for (size_t i = 0; i < thread_info.root_moves.size(); i++) {
     if (thread_info.root_moves[i].move == move)
       return &thread_info.root_moves[i];
@@ -368,7 +368,7 @@ TTEntry probe_entry(uint64_t hash, bool &hit, uint8_t searches,
     return fallback_bucket.entries[0];
   }
 
-  uint32_t hash_key = get_hash_low_bits(hash);
+  uint32_t zobrist_key = get_hash_low_bits(hash);
   uint64_t idx = (uint128_t(hash) * uint128_t(size)) >> 64;
 
   if (idx >= size) {
@@ -387,7 +387,7 @@ TTEntry probe_entry(uint64_t hash, bool &hit, uint8_t searches,
     bool empty =
         entries[i].score == 0 && entries[i].get_type() == EntryTypes::None;
 
-    if (empty || entries[i].position_key == hash_key) {
+    if (empty || entries[i].position_key == zobrist_key) {
       hit = !empty;
       entries[i].age_bound = (searches << 2) | entries[i].get_type();
       return entries[i];
@@ -409,21 +409,21 @@ TTEntry probe_entry(uint64_t hash, bool &hit, uint8_t searches,
   return *worst;
 }
 
-void insert_entry(TTEntry &entry, uint64_t hash, int depth, Move best_move,
+void insert_entry(TTEntry &entry, uint64_t hash, int depth, Action best_move,
                   int32_t static_eval, int32_t score, uint8_t bound_type,
                   uint8_t searches) {
 
-  uint32_t hash_key = get_hash_low_bits(hash);
+  uint32_t zobrist_key = get_hash_low_bits(hash);
 
   if (TT_resizing.load(std::memory_order_acquire)) {
     static thread_local TTBucket fallback_bucket;
     TTEntry &fe = fallback_bucket.entries[0];
-    if (best_move != MoveNone || hash_key != fe.position_key)
+    if (best_move != MoveNone || zobrist_key != fe.position_key)
       fe.best_move = best_move;
-    if (fe.position_key == hash_key && (bound_type != EntryTypes::Exact) &&
+    if (fe.position_key == zobrist_key && (bound_type != EntryTypes::Exact) &&
         fe.depth > depth + 4)
       return;
-    fe.position_key = hash_key;
+    fe.position_key = zobrist_key;
     fe.depth = static_cast<uint8_t>(depth);
     fe.static_eval = static_eval;
     fe.score = score;
@@ -445,14 +445,14 @@ void insert_entry(TTEntry &entry, uint64_t hash, int depth, Move best_move,
   for (int i = 0; i < BucketEntries; i++) {
     bool empty =
         entries[i].score == 0 && entries[i].get_type() == EntryTypes::None;
-    if (empty || entries[i].position_key == hash_key) {
+    if (empty || entries[i].position_key == zobrist_key) {
       TTEntry &e = entries[i];
-      if (best_move != MoveNone || hash_key != e.position_key)
+      if (best_move != MoveNone || zobrist_key != e.position_key)
         e.best_move = best_move;
-      if (e.position_key == hash_key && (bound_type != EntryTypes::Exact) &&
+      if (e.position_key == zobrist_key && (bound_type != EntryTypes::Exact) &&
           e.depth > depth + 4)
         return;
-      e.position_key = hash_key;
+      e.position_key = zobrist_key;
       e.depth = static_cast<uint8_t>(depth);
       e.static_eval = static_eval;
       e.score = score;
@@ -472,7 +472,7 @@ void insert_entry(TTEntry &entry, uint64_t hash, int depth, Move best_move,
   }
 
   TTEntry &we = *worst;
-  we.position_key = hash_key;
+  we.position_key = zobrist_key;
   we.depth = static_cast<uint8_t>(depth);
   we.static_eval = static_eval;
   we.score = score;
@@ -481,7 +481,7 @@ void insert_entry(TTEntry &entry, uint64_t hash, int depth, Move best_move,
     we.best_move = best_move;
 }
 
-void calculate(Position &position) {
+void calculate(BoardState &position) {
 
   uint64_t hash = 0;
   uint64_t pawn_hash = 0;
@@ -608,7 +608,7 @@ bool OpeningBook::load_book(const std::string &path) {
   return load_polyglot_book(path);
 }
 
-Move OpeningBook::probe_book(uint64_t position_key, int min_weight) {
+Action OpeningBook::probe_book(uint64_t position_key, int min_weight) {
   if (!book_loaded || book_positions.empty())
     return MoveNone;
   auto it = book_positions.find(position_key);
@@ -637,7 +637,9 @@ Move OpeningBook::probe_book(uint64_t position_key, int min_weight) {
     return entries[0].move;
   }
 
-  uint32_t random_value = Random::dist(Random::rd) % total_weight;
+  std::mt19937 rng(Random::rd());
+  uint32_t random_value =
+      std::uniform_int_distribution<uint32_t>(0, total_weight - 1)(rng);
   uint32_t current_weight = 0;
 
   for (const auto *entry : filtered) {
@@ -675,7 +677,7 @@ bool OpeningBook::load_polyglot_book(const std::string &filename) {
     int to = (move & 0x3F);
     int promotion = ((move >> 12) & 0x7);
 
-    Move internal_move;
+    Action internal_move;
     if (promotion == 0) {
       internal_move = pack_move(from, to, MoveTypes::Normal);
     } else {
@@ -698,7 +700,7 @@ bool OpeningBook::load_polyglot_book(const std::string &filename) {
   return book_loaded;
 }
 
-uint64_t OpeningBook::polyglot_key(const Position &pos) {
+uint64_t OpeningBook::polyglot_key(const BoardState &pos) {
   uint64_t key = 0ULL;
 
   for (int sq = 0; sq < 64; ++sq) {
@@ -809,8 +811,14 @@ void TimeManager::initialize(uint64_t time_left, uint64_t increment,
                                  time_factor));
   }
 
-  max_time = std::min<uint64_t>(allocated_time * 8, time_left / 2);
-  panic_time = std::min<uint64_t>(allocated_time * 3, time_left / 4);
+  uint64_t reserved = std::max<uint64_t>(100, time_left / 20);
+  if (time_left > reserved)
+    time_left -= reserved;
+  else
+    time_left = 1;
+
+  max_time = std::min<uint64_t>(allocated_time * 5, time_left / 2);
+  panic_time = std::min<uint64_t>(allocated_time * 2, time_left / 4);
   soft_limit = allocated_time;
   hard_limit = max_time;
 
@@ -824,9 +832,9 @@ bool TimeManager::should_stop(uint64_t elapsed, bool best_move_stable,
   if (elapsed >= hard_limit)
     return true;
 
-  if (in_trouble && !use_panic_mode && elapsed < panic_time * 2) {
+  if (in_trouble && !use_panic_mode && elapsed < panic_time) {
     use_panic_mode = true;
-    soft_limit = panic_time * 2;
+    soft_limit = panic_time;
   }
 
   if (elapsed >= soft_limit) {
@@ -834,16 +842,16 @@ bool TimeManager::should_stop(uint64_t elapsed, bool best_move_stable,
       return true;
     }
 
-    soft_limit = std::min(soft_limit + allocated_time / 4, hard_limit);
+    soft_limit = std::min(soft_limit + allocated_time / 8, hard_limit);
   }
 
-  return false;
+  return elapsed >= hard_limit;
 }
 
 void TimeManager::update_node_count(uint64_t nodes) { nodes_searched = nodes; }
 
 void adjust_soft_limit(ThreadInfo &thread_info, uint64_t best_move_nodes,
-                       int bm_stability) noexcept {
+                       int bm_stability, int best_score) noexcept {
   uint64_t node_count = thread_info.nodes.load();
   if (node_count == 0)
     return;
@@ -856,13 +864,28 @@ void adjust_soft_limit(ThreadInfo &thread_info, uint64_t best_move_nodes,
     factor *= 1.5;
   }
 
+  // WDL Time Management Logic
+  // Convert Score to Win Probability
+  // Formula: P = 1 / (1 + e^(-A * score))
+  // A ~ -0.003
+  double win_rate = 1.0 / (1.0 + std::exp(WDL_A * best_score));
+
+  // Closeness to 50% (Draw/Unclear)
+  // 0.5 -> 1.0 (Max extension)
+  // 0.0 or 1.0 -> 0.0 (No extension)
+  double closeness = 1.0 - std::abs(win_rate - 0.5) * 2.0;
+
+  // Scale factor: Increase time if position is unclear/critical
+  // Bonus up to 50% extra time for perfectly unclear positions
+  double wdl_factor = 1.0 + closeness * 0.5;
+
   double node_factor = 1.0;
   if (node_count > 100000) {
     node_factor = std::min(2.0, node_count / 50000.0);
   }
 
   uint64_t new_time =
-      thread_info.original_opt * factor * bm_factor * node_factor;
+      thread_info.original_opt * factor * bm_factor * node_factor * wdl_factor;
   thread_info.opt_time = std::min<uint64_t>(new_time, thread_info.max_time);
 }
 

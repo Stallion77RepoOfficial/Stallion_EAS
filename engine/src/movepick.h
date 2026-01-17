@@ -7,7 +7,7 @@ constexpr uint8_t Captures = 2;
 constexpr uint8_t GenQuiets = 3;
 constexpr uint8_t Quiets = 4;
 constexpr uint8_t BadCaptures = 5;
-};  
+}; // namespace Stages
 
 struct MovePicker {
   int see_threshold;
@@ -18,19 +18,19 @@ struct MovePicker {
   MoveInfo captures;
   MoveInfo quiets;
   MoveInfo bad_captures;
-  GameHistory *ss;
+  StateRecord *ss;
 };
 
-void init_picker(MovePicker &picker, Position &position, int threshold,
-                 uint64_t checkers, GameHistory *ss) {
+void init_picker(MovePicker &picker, BoardState &position, int threshold,
+                 uint64_t checkers, StateRecord *ss) {
   picker.see_threshold = threshold;
   picker.stage = Stages::TT;
   picker.checkers = checkers;
   picker.ss = ss;
 }
 
-Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
-               Move tt_move, bool skip_quiets) {
+Action next_move(MovePicker &picker, BoardState &position,
+                 ThreadInfo &thread_info, Action tt_move, bool skip_quiets) {
 
   if (picker.stage == Stages::TT) {
     picker.stage++;
@@ -42,22 +42,22 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
 
   if (picker.stage == Stages::GenCaptures) {
 
-  picker.captures.len = movegen(position, picker.captures.moves.data(),
+    picker.captures.len = movegen(position, picker.captures.moves.data(),
                                   picker.checkers, Generate::GenCaptures);
 
     for (int i = 0; i < picker.captures.len; i++) {
-      Move move = picker.captures.moves[i];
+      Action move = picker.captures.moves[i];
 
       int from = extract_from(move), to = extract_to(move);
-      if (!is_valid_square(from) || !is_valid_square(to)) continue;
+      if (!is_valid_square(from) || !is_valid_square(to))
+        continue;
 
       if (extract_promo(move) == Promos::Queen) {
         picker.captures.scores[i] = QueenPromoScore;
       }
 
       else {
-        int from_piece = position.board[from],
-            to_piece = position.board[to];
+        int from_piece = position.board[from], to_piece = position.board[to];
 
         picker.captures.scores[i] = GoodCaptureBaseScore +
                                     SeeValues[get_piece_type(to_piece)] * 100 -
@@ -75,8 +75,9 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
   if (picker.stage == Stages::Captures) {
 
     while (picker.idx < picker.captures.len) {
-  Move move = get_next_move(picker.captures.moves.data(), picker.captures.scores.data(),
-                                picker.idx++, picker.captures.len);
+      Action move = get_next_move(picker.captures.moves.data(),
+                                  picker.captures.scores.data(), picker.idx++,
+                                  picker.captures.len);
       if (SEE(position, move, picker.see_threshold)) {
         return move;
       } else {
@@ -88,8 +89,8 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
   }
 
   if (picker.stage == Stages::GenQuiets) {
-  picker.quiets.len = movegen(position, picker.quiets.moves.data(), picker.checkers,
-                                Generate::GenQuiets);
+    picker.quiets.len = movegen(position, picker.quiets.moves.data(),
+                                picker.checkers, Generate::GenQuiets);
 
     int their_last = MoveNone;
     int their_piece = Pieces::Blank;
@@ -100,41 +101,44 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
     int ply4last = MoveNone;
     int ply4piece = Pieces::Blank;
 
-     
     if (thread_info.game_ply >= 1) {
       int idx = thread_info.game_ply - 1;
-      if (idx >= 0 && idx < GameSize) {
-        GameHistory &h1 = thread_info.game_hist[idx];
+      if (idx >= 0 && idx < MaxGameLen) {
+        StateRecord &h1 = thread_info.game_hist[idx];
         their_last = extract_to(h1.played_move);
         their_piece = h1.piece_moved;
       }
     }
     if (thread_info.game_ply >= 2) {
       int idx = thread_info.game_ply - 2;
-      if (idx >= 0 && idx < GameSize) {
-        GameHistory &h2 = thread_info.game_hist[idx];
+      if (idx >= 0 && idx < MaxGameLen) {
+        StateRecord &h2 = thread_info.game_hist[idx];
         our_last = extract_to(h2.played_move);
         our_piece = h2.piece_moved;
       }
     }
     if (thread_info.game_ply >= 4) {
       int idx = thread_info.game_ply - 4;
-      if (idx >= 0 && idx < GameSize) {
-        GameHistory &h4 = thread_info.game_hist[idx];
+      if (idx >= 0 && idx < MaxGameLen) {
+        StateRecord &h4 = thread_info.game_hist[idx];
         ply4last = extract_to(h4.played_move);
         ply4piece = h4.piece_moved;
       }
     }
 
     for (int i = 0; i < picker.quiets.len; i++) {
-      Move move = picker.quiets.moves[i];
+      Action move = picker.quiets.moves[i];
 
       int from = extract_from(move), to = extract_to(move);
-      if (!is_valid_square(from) || !is_valid_square(to)) continue;
+      if (!is_valid_square(from) || !is_valid_square(to))
+        continue;
 
-      if (move == thread_info.KillerMoves[thread_info.search_ply]) {
-         
+      // Check both killer moves
+      if (move == thread_info.KillerMoves[thread_info.search_ply][0]) {
         picker.quiets.scores[i] = KillerMoveScore;
+      } else if (move == thread_info.KillerMoves[thread_info.search_ply][1]) {
+        picker.quiets.scores[i] =
+            KillerMoveScore - 1000; // Second killer slightly lower
       }
 
       else {
@@ -155,6 +159,12 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
           picker.quiets.scores[i] +=
               thread_info.ContHistScores[ply4piece][ply4last][piece][to];
         }
+
+        if (their_piece != Pieces::Blank && their_last != MoveNone) {
+          Action counter = thread_info.CounterMoves[their_piece][their_last];
+          if (move == counter)
+            picker.quiets.scores[i] += 8000;
+        }
       }
     }
     picker.stage++;
@@ -165,8 +175,9 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
       picker.idx = 0;
       picker.stage++;
     } else {
-  return get_next_move(picker.quiets.moves.data(), picker.quiets.scores.data(),
-                           picker.idx++, picker.quiets.len);
+      return get_next_move(picker.quiets.moves.data(),
+                           picker.quiets.scores.data(), picker.idx++,
+                           picker.quiets.len);
     }
   }
 

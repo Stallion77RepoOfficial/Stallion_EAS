@@ -2,13 +2,14 @@
 #include "movepick.h"
 #include "params.h"
 #include "position.h"
+#include "pst.h"
 
 #include "../fathom/src/tbprobe.h"
 #include "utils.h"
 #include <memory>
 
-inline Move uci_to_internal(const Position &position, std::string uci) {
-  std::array<Move, ListSize> list;
+inline Action uci_to_internal(const BoardState &position, std::string uci) {
+  std::array<Action, MaxActions> list;
   int nmoves = legal_movegen(position, list.data());
 
   for (int i = 0; i < nmoves; i++) {
@@ -27,10 +28,10 @@ safe_elapsed(const std::chrono::steady_clock::time_point &start) {
   return ms ? ms : 1;
 }
 
-int analyze_sacrifice(Position &position, ThreadInfo &thread_info, int depth,
+int analyze_sacrifice(BoardState &position, ThreadInfo &thread_info, int depth,
                       int ply, int sacrificer_color);
 
-int probe_wdl_tb(Position &position, const ThreadInfo &thread_info) {
+int probe_wdl_tb(BoardState &position, const ThreadInfo &thread_info) {
 
   if (!tb_initialized || !thread_info.use_syzygy)
     return ScoreNone;
@@ -41,11 +42,11 @@ int probe_wdl_tb(Position &position, const ThreadInfo &thread_info) {
       return ScoreNone;
   }
 
-  int piece_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
+  int material_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
   int compiled_limit = TB_LARGEST ? (int)TB_LARGEST : 7;
-  if (piece_count > compiled_limit)
+  if (material_count > compiled_limit)
     return ScoreNone;
-  if (piece_count > thread_info.syzygy_probe_limit)
+  if (material_count > thread_info.syzygy_probe_limit)
     return ScoreNone;
 
   unsigned castling = 0;
@@ -82,13 +83,13 @@ int probe_wdl_tb(Position &position, const ThreadInfo &thread_info) {
   case TB_WIN:
     return TB_WIN_SCORE;
   case TB_CURSED_WIN:
-    return TB_CURSED_WIN_SCORE;
+    return TB_WIN_SCORE;
   case TB_DRAW:
-    return TB_DRAW_SCORE;
+    return 0;
   case TB_BLESSED_LOSS:
-    return TB_BLESSED_LOSS_SCORE;
+    return -TB_WIN_SCORE;
   case TB_LOSS:
-    return TB_LOSS_SCORE;
+    return -TB_WIN_SCORE;
   default:
     return ScoreNone;
   }
@@ -104,9 +105,9 @@ void update_corrhist(int16_t &entry, int score) {
 }
 
 inline void update_continuation_histories(ThreadInfo &thread_info, int piece,
-                                          int sq, int bonus, Move their_last,
-                                          int their_piece, Move our_last,
-                                          int our_piece, Move ply4_last,
+                                          int sq, int bonus, Action their_last,
+                                          int their_piece, Action our_last,
+                                          int our_piece, Action ply4_last,
                                           int ply4_piece) {
 
   update_history(thread_info.HistoryScores[piece][sq], bonus);
@@ -162,17 +163,43 @@ bool out_of_time(ThreadInfo &thread_info) {
   return false;
 }
 
-int16_t material_eval(const Position &position) {
-  int m = (position.material_count[0] - position.material_count[1]) * 100 +
-          (position.material_count[2] - position.material_count[3]) * 300 +
-          (position.material_count[4] - position.material_count[5]) * 300 +
-          (position.material_count[6] - position.material_count[7]) * 500 +
-          (position.material_count[8] - position.material_count[9]) * 900;
+int16_t material_eval(const BoardState &position) {
+  int m = 0;
+
+  // White Evaluation
+  for (int pt = 1; pt <= 5; pt++) {
+    int count = position.material_count[(pt - 1) * 2];
+    if (count > 0) {
+      m += count * MaterialBasis[pt];
+
+      // Imbalance calculation
+      for (int pt2 = 1; pt2 <= 5; pt2++) {
+        int total_count_pt2 = position.material_count[(pt2 - 1) * 2] +
+                              position.material_count[(pt2 - 1) * 2 + 1];
+        m += count * total_count_pt2 * QuadraticImbalance[pt][pt2];
+      }
+    }
+  }
+
+  // Black Evaluation
+  for (int pt = 1; pt <= 5; pt++) {
+    int count = position.material_count[(pt - 1) * 2 + 1];
+    if (count > 0) {
+      m -= count * MaterialBasis[pt];
+
+      // Imbalance calculation
+      for (int pt2 = 1; pt2 <= 5; pt2++) {
+        int total_count_pt2 = position.material_count[(pt2 - 1) * 2] +
+                              position.material_count[(pt2 - 1) * 2 + 1];
+        m -= count * total_count_pt2 * QuadraticImbalance[pt][pt2];
+      }
+    }
+  }
 
   return position.color ? -m : m;
 }
 
-bool has_non_pawn_material(const Position &position, int color) {
+bool has_non_pawn_material(const BoardState &position, int color) {
   int s_indx = 2 + color;
   return (position.material_count[s_indx] ||
           position.material_count[s_indx + 2] ||
@@ -180,7 +207,7 @@ bool has_non_pawn_material(const Position &position, int color) {
           position.material_count[s_indx + 6]);
 }
 
-int16_t total_mat_color(const Position &position, int color) {
+int16_t total_mat_color(const BoardState &position, int color) {
 
   int m = 0;
   for (int i = 0; i < 5; i++) {
@@ -189,12 +216,129 @@ int16_t total_mat_color(const Position &position, int color) {
   return m;
 }
 
-// Derived from sacrifice/queensac_white and sacrifice/1_pawnsac_white
-int eval_sacrifice_patterns(const Position &position, int color) {
-  int bonus = 0;
+int eval_pst(const BoardState &position, int color) {
+  int score = 0;
+  int opp_color = color ^ 1;
+  int total_mat_val = total_mat(position);
+  bool is_endgame = total_mat_val < 1500;
+
+  uint64_t pawns =
+      position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color];
+  while (pawns) {
+    int sq = pop_lsb(pawns);
+    int idx = (color == Colors::White) ? sq : PST::mirror_square(sq);
+    score += PST::Pawn[idx];
+  }
+
+  uint64_t knights =
+      position.pieces_bb[PieceTypes::Knight] & position.colors_bb[color];
+  while (knights) {
+    int sq = pop_lsb(knights);
+    int idx = (color == Colors::White) ? sq : PST::mirror_square(sq);
+    score += PST::Knight[idx];
+  }
+
+  uint64_t bishops =
+      position.pieces_bb[PieceTypes::Bishop] & position.colors_bb[color];
+  while (bishops) {
+    int sq = pop_lsb(bishops);
+    int idx = (color == Colors::White) ? sq : PST::mirror_square(sq);
+    score += PST::Bishop[idx];
+  }
+
+  uint64_t rooks =
+      position.pieces_bb[PieceTypes::Rook] & position.colors_bb[color];
+  while (rooks) {
+    int sq = pop_lsb(rooks);
+    int idx = (color == Colors::White) ? sq : PST::mirror_square(sq);
+    score += PST::Rook[idx];
+  }
+
+  uint64_t queens =
+      position.pieces_bb[PieceTypes::Queen] & position.colors_bb[color];
+  while (queens) {
+    int sq = pop_lsb(queens);
+    int idx = (color == Colors::White) ? sq : PST::mirror_square(sq);
+    score += PST::Queen[idx];
+  }
+
+  int king_sq = get_king_pos(position, color);
+  if (is_valid_square(king_sq)) {
+    int idx = (color == Colors::White) ? king_sq : PST::mirror_square(king_sq);
+    score += is_endgame ? PST::KingEG[idx] : PST::KingMG[idx];
+  }
+
+  return score;
+}
+
+int eval_king_tropism(const BoardState &position, int color) {
+  int score = 0;
+  int opp_color = color ^ 1;
+  int opp_king = get_king_pos(position, opp_color);
+  if (!is_valid_square(opp_king))
+    return 0;
+
+  int opp_k_rank = get_rank(opp_king);
+  int opp_k_file = get_file(opp_king);
+
+  uint64_t attackers = (position.pieces_bb[PieceTypes::Queen] |
+                        position.pieces_bb[PieceTypes::Rook] |
+                        position.pieces_bb[PieceTypes::Knight]) &
+                       position.colors_bb[color];
+  while (attackers) {
+    int sq = pop_lsb(attackers);
+    int dist = std::max(abs(get_rank(sq) - opp_k_rank),
+                        abs(get_file(sq) - opp_k_file));
+    score += (8 - dist) * 3;
+  }
+
+  return score;
+}
+
+int eval_threats(const BoardState &position, int color) {
+  int score = 0;
   int opp_color = color ^ 1;
 
-  // Piece counts
+  uint64_t opp_pieces =
+      position.colors_bb[opp_color] & ~position.pieces_bb[PieceTypes::Pawn];
+  uint64_t my_pawn_attacks = 0;
+  uint64_t my_pawns =
+      position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color];
+  while (my_pawns) {
+    int sq = pop_lsb(my_pawns);
+    my_pawn_attacks |= PAWN_ATK_SAFE(color, sq);
+  }
+
+  uint64_t attacked_by_pawns = opp_pieces & my_pawn_attacks;
+  score += pop_count(attacked_by_pawns) * 20;
+
+  uint64_t my_minor_attacks = 0;
+  uint64_t minors = (position.pieces_bb[PieceTypes::Knight] |
+                     position.pieces_bb[PieceTypes::Bishop]) &
+                    position.colors_bb[color];
+  while (minors) {
+    int sq = pop_lsb(minors);
+    if (position.board[sq] ==
+        (color == Colors::White ? Pieces::WKnight : Pieces::BKnight)) {
+      my_minor_attacks |= KNIGHT_ATK_SAFE(sq);
+    } else {
+      my_minor_attacks |=
+          get_bishop_attacks(sq, position.colors_bb[0] | position.colors_bb[1]);
+    }
+  }
+
+  uint64_t opp_heavy = (position.pieces_bb[PieceTypes::Queen] |
+                        position.pieces_bb[PieceTypes::Rook]) &
+                       position.colors_bb[opp_color];
+  uint64_t attacked_heavy = opp_heavy & my_minor_attacks;
+  score += pop_count(attacked_heavy) * 30;
+
+  return score;
+}
+
+int eval_sacrifice_patterns(const BoardState &position, int color) {
+  int bonus = 0;
+  int opp_color = color ^ 1;
   int my_q = pop_count(position.pieces_bb[PieceTypes::Queen] &
                        position.colors_bb[color]);
   int opp_q = pop_count(position.pieces_bb[PieceTypes::Queen] &
@@ -213,29 +357,435 @@ int eval_sacrifice_patterns(const Position &position, int color) {
                        position.colors_bb[color]);
   int opp_p = pop_count(position.pieces_bb[PieceTypes::Pawn] &
                         position.colors_bb[opp_color]);
+  int p_diff = opp_p - my_p;
 
-  // Pattern 1: Queen Sacrifice (from queensac_white: 08 r*l*p3+ q1>=r=l=p*)
-  // We have no queen, they have at least 1. We have good pawn support (>=3).
-  // Rooks and Light pieces are equal (compensation is positional/pawn storm).
   if (my_q == 0 && opp_q >= 1 && my_p >= 3) {
-    if (my_r == opp_r && my_l == opp_l) {
-      bonus += 8 * 10; // Scale 08 to 80cp
-    }
+    if (my_r == opp_r && my_l == opp_l)
+      bonus += 80;
+    else if (my_r >= opp_r && my_l >= opp_l)
+      bonus += 60;
+    else if (my_l > opp_l)
+      bonus += 40;
   }
 
-  // Pattern 2: Pawn Sacrifice (from 1_pawnsac_white: 12 q1r1-l4-p* q=r=l=p1>=)
-  // We are down a pawn (or more), but have active pieces.
-  // q1, r1-, l4- : We have Queen, not too many heavy pieces.
-  if (my_q == 1 && my_r <= 1 && my_l <= 4) {
-    if (opp_q == my_q && opp_r == my_r && opp_p > my_p) {
-      bonus += 12 * 5; // Scale 12 to 60cp
-    }
+  if (p_diff >= 1 && p_diff <= 5 && my_q >= 1 && my_p >= 3) {
+    if (my_r == opp_r && my_l == opp_l)
+      bonus += 60 + (6 - p_diff) * 8;
+    else if (my_r >= opp_r - 1 && my_l >= opp_l - 1)
+      bonus += 40 + (6 - p_diff) * 5;
+    else if (my_l >= opp_l)
+      bonus += 25;
   }
+
+  if (my_q == 0 && my_l >= 3 && my_r >= 1 && my_p >= 4) {
+    if (opp_q >= 1)
+      bonus += 70;
+  }
+
+  if (my_r < opp_r && my_l > opp_l + 1 && my_p >= opp_p)
+    bonus += 50;
+  if (my_r == opp_r - 1 && my_l >= opp_l + 1 && my_p >= opp_p)
+    bonus += 40;
 
   return bonus;
 }
 
-int eval(Position &position, ThreadInfo &thread_info) {
+int eval_king_safety(const BoardState &position, int color) {
+  int score = 0;
+  int king_sq = get_king_pos(position, color);
+
+  if (!is_valid_square(king_sq))
+    return 0; // Don't return -MateScore - this corrupts eval and causes false
+              // mate detection
+
+  int king_file = get_file(king_sq);
+  int king_rank = get_rank(king_sq);
+  int opp_color = color ^ 1;
+
+  int forward =
+      (color == Colors::White) ? Directions::North : Directions::South;
+  for (int f = std::max(0, king_file - 1); f <= std::min(7, king_file + 1);
+       ++f) {
+    uint64_t file_bb = Files[f];
+    uint64_t my_pawns = position.pieces_bb[PieceTypes::Pawn] &
+                        position.colors_bb[color] & file_bb;
+
+    if (my_pawns) {
+      score += 20;
+      int pawn_sq =
+          (color == Colors::White) ? get_msb(my_pawns) : get_lsb(my_pawns);
+      int pawn_rank = get_rank(pawn_sq);
+      int dist = abs(pawn_rank - king_rank);
+      if (dist == 1)
+        score += 15;
+      else if (dist == 2)
+        score += 10;
+    } else {
+      score -= 30;
+      uint64_t opp_pawns = position.pieces_bb[PieceTypes::Pawn] &
+                           position.colors_bb[opp_color] & file_bb;
+      if (!opp_pawns) {
+        score -= 25;
+      }
+    }
+
+    // Pawn Storm Logic
+    // Check for opponent pawns on the king file and adjacent files
+    uint64_t opp_pawns_on_file = position.pieces_bb[PieceTypes::Pawn] &
+                                 position.colors_bb[opp_color] & file_bb;
+    if (opp_pawns_on_file) {
+      int opp_pawn_sq = (color == Colors::White) ? get_lsb(opp_pawns_on_file)
+                                                 : get_msb(opp_pawns_on_file);
+      int opp_pawn_rank = get_rank(opp_pawn_sq);
+      int dist_to_king = abs(opp_pawn_rank - king_rank);
+
+      // Indexing logic for PawnStormConfig
+      // dist 1 (rank 2) -> index 0
+      // dist 2 (rank 3) -> index 1
+      // dist 3 (rank 4) -> index 2
+      // dist 4+ (rank 5+) -> index 3
+      int storm_idx = std::clamp(dist_to_king - 1, 0, 3);
+      score -= PawnStormConfig[storm_idx];
+    }
+  }
+
+  if (total_mat(position) > PhaseMaterial::Endgame) {
+    if (king_file >= 3 && king_file <= 4)
+      score -= 50;
+    else if (king_file == 2 || king_file == 5)
+      score -= 25;
+
+    if (color == Colors::White && king_rank > 2)
+      score -= 40;
+    if (color == Colors::Black && king_rank < 5)
+      score -= 40;
+  }
+
+  int safe_squares = 0;
+  uint64_t king_attacks = KING_ATK_SAFE(king_sq);
+  while (king_attacks) {
+    int sq = pop_lsb(king_attacks);
+    if (!attacks_square(position, sq, opp_color)) {
+      safe_squares++;
+    }
+  }
+  if (safe_squares < 2)
+    score -= 60;
+  else if (safe_squares < 4)
+    score -= 20;
+
+  bool can_castle_ks =
+      position.castling_squares[color][Sides::Kingside] != SquareNone;
+  bool can_castle_qs =
+      position.castling_squares[color][Sides::Queenside] != SquareNone;
+
+  if (can_castle_ks || can_castle_qs)
+    score += 10;
+  if (!can_castle_ks && !can_castle_qs) {
+    if (king_file == 1 || king_file == 2 || king_file == 6 || king_file == 7) {
+      score += 30;
+    } else {
+      if (total_mat(position) > PhaseMaterial::LateMiddle)
+        score -= 30;
+    }
+  }
+
+  int king_start_sq = (color == Colors::White) ? 4 : 60;
+  if (king_sq != king_start_sq && (can_castle_ks || can_castle_qs)) {
+    score -= 60;
+  }
+
+  if (king_sq != king_start_sq) {
+    bool is_castled = (king_file == 1 || king_file == 2 || king_file == 6);
+    if (!is_castled && total_mat(position) > PhaseMaterial::LateMiddle) {
+      score -= 40;
+    }
+  }
+
+  // King Zone Attack Weights - evaluate enemy piece attacks on king zone
+  // Attack weights: Knight=2, Bishop=2, Rook=3, Queen=5
+  constexpr int AttackWeight[6] = {
+      0, 0, 2, 2, 3, 5}; // None, Pawn, Knight, Bishop, Rook, Queen
+
+  uint64_t king_zone = KING_ATK_SAFE(king_sq) | (1ULL << king_sq);
+  // Extend king zone forward
+  if (color == Colors::White && king_rank < 6) {
+    king_zone |= (KING_ATK_SAFE(king_sq) << 8) & ~Ranks[0];
+  } else if (color == Colors::Black && king_rank > 1) {
+    king_zone |= (KING_ATK_SAFE(king_sq) >> 8) & ~Ranks[7];
+  }
+
+  int attack_units = 0;
+  int attacker_count = 0;
+  uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
+
+  // Knight attacks
+  uint64_t opp_knights =
+      position.pieces_bb[PieceTypes::Knight] & position.colors_bb[opp_color];
+  while (opp_knights) {
+    int sq = pop_lsb(opp_knights);
+    if (KNIGHT_ATK_SAFE(sq) & king_zone) {
+      attack_units += AttackWeight[PieceTypes::Knight];
+      attacker_count++;
+    }
+  }
+
+  // Bishop attacks
+  uint64_t opp_bishops =
+      position.pieces_bb[PieceTypes::Bishop] & position.colors_bb[opp_color];
+  while (opp_bishops) {
+    int sq = pop_lsb(opp_bishops);
+    if (get_bishop_attacks(sq, occ) & king_zone) {
+      attack_units += AttackWeight[PieceTypes::Bishop];
+      attacker_count++;
+    }
+  }
+
+  // Rook attacks
+  uint64_t opp_rooks =
+      position.pieces_bb[PieceTypes::Rook] & position.colors_bb[opp_color];
+  while (opp_rooks) {
+    int sq = pop_lsb(opp_rooks);
+    if (get_rook_attacks(sq, occ) & king_zone) {
+      attack_units += AttackWeight[PieceTypes::Rook];
+      attacker_count++;
+    }
+  }
+
+  // Queen attacks
+  uint64_t opp_queens =
+      position.pieces_bb[PieceTypes::Queen] & position.colors_bb[opp_color];
+  while (opp_queens) {
+    int sq = pop_lsb(opp_queens);
+    if ((get_rook_attacks(sq, occ) | get_bishop_attacks(sq, occ)) & king_zone) {
+      attack_units += AttackWeight[PieceTypes::Queen];
+      attacker_count++;
+    }
+  }
+
+  // Apply king danger penalty based on attack units and attacker count
+  if (attacker_count >= 2) {
+    int danger = attack_units * attacker_count;
+    score -= danger * 4; // Scale factor
+  }
+
+  return score;
+}
+
+int eval_endgame(const BoardState &position, int color) {
+  int score = 0;
+  int opp_color = color ^ 1;
+  int total_mat_val = total_mat(position);
+
+  if (total_mat_val < 2000 && total_mat_color(position, color) >
+                                  total_mat_color(position, opp_color) + 200) {
+    int opp_king = get_king_pos(position, opp_color);
+    int my_king = get_king_pos(position, color);
+
+    if (is_valid_square(opp_king) && is_valid_square(my_king)) {
+      int opp_k_rank = get_rank(opp_king);
+      int opp_k_file = get_file(opp_king);
+      int center_dist = std::max(3 - opp_k_rank, opp_k_rank - 4) +
+                        std::max(3 - opp_k_file, opp_k_file - 4);
+      score += center_dist * 10;
+      int k_dist = std::max(abs(get_rank(my_king) - opp_k_rank),
+                            abs(get_file(my_king) - opp_k_file));
+      score += (14 - k_dist) * 5;
+    }
+  }
+
+  uint64_t my_pawns =
+      position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color];
+  while (my_pawns) {
+    int sq = pop_lsb(my_pawns);
+    int rank = get_rank(sq);
+    int relative_rank = (color == Colors::White) ? rank : (7 - rank);
+    score += relative_rank * relative_rank * 2;
+  }
+
+  return score;
+}
+
+int eval_positional(const BoardState &position, int color) {
+  int score = 0;
+  int opp_color = color ^ 1;
+  int my_bishops = pop_count(position.pieces_bb[PieceTypes::Bishop] &
+                             position.colors_bb[color]);
+  if (my_bishops >= 2)
+    score += 40;
+
+  uint64_t my_rooks =
+      position.pieces_bb[PieceTypes::Rook] & position.colors_bb[color];
+  uint64_t my_pawns =
+      position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color];
+  uint64_t opp_pawns =
+      position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[opp_color];
+  while (my_rooks) {
+    int sq = pop_lsb(my_rooks);
+    int file = get_file(sq);
+    uint64_t file_bb = Files[file];
+    bool my_pawn_on_file = (my_pawns & file_bb) != 0;
+    bool opp_pawn_on_file = (opp_pawns & file_bb) != 0;
+    if (!my_pawn_on_file && !opp_pawn_on_file)
+      score += 20;
+    else if (!my_pawn_on_file)
+      score += 10;
+  }
+
+  uint64_t pawns =
+      position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color];
+  while (pawns) {
+    int sq = pop_lsb(pawns);
+    int file = get_file(sq);
+    int rank = get_rank(sq);
+    int relative_rank = (color == Colors::White) ? rank : (7 - rank);
+
+    bool is_passed = true;
+    for (int f = std::max(0, file - 1); f <= std::min(7, file + 1); ++f) {
+      uint64_t ahead_mask = 0;
+      if (color == Colors::White) {
+        for (int r = rank + 1; r <= 7; ++r)
+          ahead_mask |= (1ULL << (f + r * 8));
+      } else {
+        for (int r = rank - 1; r >= 0; --r)
+          ahead_mask |= (1ULL << (f + r * 8));
+      }
+      if (opp_pawns & ahead_mask) {
+        is_passed = false;
+        break;
+      }
+    }
+
+    if (is_passed) {
+      score += 15 + relative_rank * relative_rank * 3;
+      int ahead_sq = sq + (color == Colors::White ? 8 : -8);
+      if (is_valid_square(ahead_sq) &&
+          position.board[ahead_sq] != Pieces::Blank) {
+        score -= 10;
+      }
+    }
+  }
+
+  pawns = position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color];
+  while (pawns) {
+    int sq = pop_lsb(pawns);
+    int file = get_file(sq);
+    bool has_neighbor = false;
+    if (file > 0 && (my_pawns & Files[file - 1]))
+      has_neighbor = true;
+    if (file < 7 && (my_pawns & Files[file + 1]))
+      has_neighbor = true;
+    if (!has_neighbor)
+      score -= 15;
+  }
+
+  // Space Evaluation
+  // Files C, D, E, F (Index 2, 3, 4, 5)
+  // Ranks 2, 3, 4 relatives (Rank 1 is back rank, 2,3,4 are space)
+  // White: Ranks 2, 3, 4 | Black: Ranks 5, 4, 3
+
+  uint64_t space_mask = 0;
+  if (color == Colors::White) {
+    space_mask = (Files[2] | Files[3] | Files[4] | Files[5]) &
+                 (Ranks[2] | Ranks[3] | Ranks[4]);
+  } else {
+    space_mask = (Files[2] | Files[3] | Files[4] | Files[5]) &
+                 (Ranks[5] | Ranks[4] | Ranks[3]);
+  }
+
+  // A square is "safe" if not attacked by opponent pawns
+  // And we control it (attack it) or occupy it.
+  // Simplified: Count safe squares behind our pawns or controlled by minor
+  // pieces. Here we use a simpler metric: If not attacked by enemy pawns and we
+  // have a piece or pawn there/attacking it.
+
+  // Efficient Space:
+  // 1. Get all squares in space_mask not attacked by enemy pawns.
+  // 2. Count how many of these we attack or occupy.
+
+  // Generating attacked by pawns bitboard
+  uint64_t opp_pawn_attacks = 0;
+  uint64_t opp_p =
+      position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[opp_color];
+  while (opp_p) {
+    int s = pop_lsb(opp_p);
+    opp_pawn_attacks |= PAWN_ATK_SAFE(opp_color, s);
+  }
+
+  uint64_t safe_space = space_mask & ~opp_pawn_attacks;
+
+  // We get bonus for safe_space squares we control/occupy.
+  // Generating our attacks is expensive, so we approximate by occupancy +
+  // central pawn push influence
+  uint64_t our_occupancy = position.colors_bb[color] & safe_space;
+  score += pop_count(our_occupancy) * SpaceWeight;
+
+  // Bonus for central pawns being advanced (blocked or not)
+  // Already somewhat covered by PST, but Space is about control.
+  // Let's stick to simple safe occupancy for now as per plan.
+
+  for (int file = 0; file < 8; ++file) {
+    int pawns_on_file = pop_count(my_pawns & Files[file]);
+    if (pawns_on_file > 1)
+      score -= (pawns_on_file - 1) * 10;
+  }
+
+  uint64_t my_knights =
+      position.pieces_bb[PieceTypes::Knight] & position.colors_bb[color];
+  while (my_knights) {
+    int sq = pop_lsb(my_knights);
+    int rank = get_rank(sq);
+    int file = get_file(sq);
+    int rel_rank = (color == Colors::White) ? rank : (7 - rank);
+
+    if (rel_rank >= 3 && rel_rank <= 5) {
+      int pawn_sq1 = sq + (color == Colors::White ? -9 : 7);
+      int pawn_sq2 = sq + (color == Colors::White ? -7 : 9);
+      bool pawn_support = false;
+      if (is_valid_square(pawn_sq1) &&
+          position.board[pawn_sq1] ==
+              (color == Colors::White ? Pieces::WPawn : Pieces::BPawn))
+        pawn_support = true;
+      if (is_valid_square(pawn_sq2) &&
+          position.board[pawn_sq2] ==
+              (color == Colors::White ? Pieces::WPawn : Pieces::BPawn))
+        pawn_support = true;
+
+      if (pawn_support) {
+        bool can_be_attacked = false;
+        if (file > 0) {
+          uint64_t left_file = Files[file - 1];
+          uint64_t ahead =
+              (color == Colors::White)
+                  ? (left_file & (Ranks[rank] | Ranks[rank + 1] |
+                                  (rank < 6 ? Ranks[rank + 2] : 0)))
+                  : (left_file & (Ranks[rank] | Ranks[rank - 1] |
+                                  (rank > 1 ? Ranks[rank - 2] : 0)));
+          if (opp_pawns & ahead)
+            can_be_attacked = true;
+        }
+        if (file < 7 && !can_be_attacked) {
+          uint64_t right_file = Files[file + 1];
+          uint64_t ahead =
+              (color == Colors::White)
+                  ? (right_file & (Ranks[rank] | Ranks[rank + 1] |
+                                   (rank < 6 ? Ranks[rank + 2] : 0)))
+                  : (right_file & (Ranks[rank] | Ranks[rank - 1] |
+                                   (rank > 1 ? Ranks[rank - 2] : 0)));
+          if (opp_pawns & ahead)
+            can_be_attacked = true;
+        }
+
+        if (!can_be_attacked)
+          score += 25;
+      }
+    }
+  }
+
+  return score;
+}
+
+int eval(BoardState &position, ThreadInfo &thread_info) {
   int color = position.color;
 
   if (thread_info.use_syzygy && tb_initialized) {
@@ -246,6 +796,22 @@ int eval(Position &position, ThreadInfo &thread_info) {
 
   int hce_eval = material_eval(position);
   hce_eval += eval_sacrifice_patterns(position, color);
+  hce_eval += eval_king_safety(position, color);
+  hce_eval -= eval_king_safety(position, color ^ 1);
+  hce_eval += eval_endgame(position, color);
+  hce_eval -= eval_endgame(position, color ^ 1);
+  hce_eval += eval_positional(position, color);
+  hce_eval -= eval_positional(position, color ^ 1);
+  hce_eval += eval_pst(position, color);
+  hce_eval -= eval_pst(position, color ^ 1);
+  hce_eval += eval_king_tropism(position, color);
+  hce_eval -= eval_king_tropism(position, color ^ 1);
+  hce_eval += eval_threats(position, color);
+  hce_eval -= eval_threats(position, color ^ 1);
+
+  // Tempo bonus - side to move has a small advantage
+  constexpr int TempoBonus = 12;
+  hce_eval += TempoBonus;
 
   int bonus2 = 0, bonus3 = 0, bonus4 = 0, bonus5 = 0;
   bool our_side = (thread_info.search_ply % 2 == 0);
@@ -435,7 +1001,8 @@ int eval(Position &position, ThreadInfo &thread_info) {
                     MateScore);
 }
 
-int correct_eval(const Position &position, ThreadInfo &thread_info, int eval) {
+int correct_eval(const BoardState &position, ThreadInfo &thread_info,
+                 int eval) {
 
   eval = eval * (HALFMOVE_SCALE_MAX - position.halfmoves) / HALFMOVE_SCALE_MAX;
 
@@ -455,22 +1022,22 @@ int correct_eval(const Position &position, ThreadInfo &thread_info, int eval) {
   return std::clamp(eval + (CorrWeight * corr / 512), -MateScore, MateScore);
 }
 
-void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
+void ss_push(BoardState &position, ThreadInfo &thread_info, Action move) {
 
   if (!thread_info.game_hist.data()) {
     thread_data.stop = true;
     return;
   }
 
-  if (thread_info.search_ply + 1 >= MaxSearchDepth ||
-      thread_info.game_ply >= GameSize) {
+  if (thread_info.search_ply + 1 >= MaxSearchPly ||
+      thread_info.game_ply >= MaxGameLen) {
 
     thread_data.tb_hits.fetch_add(1);
     thread_data.stop = true;
     return;
   }
 
-  if (thread_info.game_ply < 0 || thread_info.game_ply >= GameSize) {
+  if (thread_info.game_ply < 0 || thread_info.game_ply >= MaxGameLen) {
     thread_data.tb_hits.fetch_add(1);
     thread_data.stop = true;
     return;
@@ -478,14 +1045,14 @@ void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
 
   ++thread_info.search_ply;
 
-  if (thread_info.search_ply > MaxSearchDepth - 2) {
+  if (thread_info.search_ply > MaxSearchPly - 2) {
     thread_data.tb_fails.fetch_add(1);
     thread_data.stop = true;
     return;
   }
 
   const int gp = static_cast<int>(thread_info.game_ply);
-  if (gp < 0 || gp >= GameSize) {
+  if (gp < 0 || gp >= MaxGameLen) {
     thread_data.stop = true;
     return;
   }
@@ -505,7 +1072,7 @@ void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
   thread_info.game_hist[gp].is_cap = is_cap(position, move);
   thread_info.game_hist[gp].m_diff = material_eval(position);
 
-  if (thread_info.game_ply + 1 < GameSize)
+  if (thread_info.game_ply + 1 < MaxGameLen)
     thread_info.game_ply++;
 }
 
@@ -515,8 +1082,8 @@ void ss_pop(ThreadInfo &thread_info) {
     return;
   }
 
-  if (thread_info.search_ply > MaxSearchDepth ||
-      thread_info.game_ply > GameSize) {
+  if (thread_info.search_ply > MaxSearchPly ||
+      thread_info.game_ply > MaxGameLen) {
     return;
   }
 
@@ -524,7 +1091,7 @@ void ss_pop(ThreadInfo &thread_info) {
   thread_info.game_ply--;
 }
 
-bool material_draw(const Position &position) {
+bool material_draw(const BoardState &position) {
 
   for (int i : {0, 1, 6, 7, 8, 9}) {
     if (position.material_count[i]) {
@@ -544,13 +1111,13 @@ bool material_draw(const Position &position) {
   return true;
 }
 
-bool is_draw(const Position &position, ThreadInfo &thread_info) {
+bool is_draw(const BoardState &position, ThreadInfo &thread_info) {
 
   const uint64_t hash = position.zobrist_key;
   const int halfmoves = position.halfmoves;
   const int game_ply = thread_info.game_ply;
 
-  if (game_ply < 0 || game_ply > GameSize) {
+  if (game_ply < 0 || game_ply > MaxGameLen) {
     return false;
   }
 
@@ -572,11 +1139,11 @@ bool is_draw(const Position &position, ThreadInfo &thread_info) {
     return true;
   }
 
-  if (game_ply >= 2 && game_ply <= GameSize) {
+  if (game_ply >= 2 && game_ply <= MaxGameLen) {
     const int min_index = std::max(game_ply - halfmoves, 0);
-    for (int i = game_ply - 2; i >= min_index && i < GameSize; i -= 2) {
+    for (int i = game_ply - 2; i >= min_index && i < MaxGameLen; i -= 2) {
 
-      if (i >= 0 && i < GameSize) {
+      if (i >= 0 && i < MaxGameLen) {
         if (thread_info.game_hist[i].position_key == hash) {
           return true;
         }
@@ -601,7 +1168,7 @@ bool is_draw(const Position &position, ThreadInfo &thread_info) {
     }
     if (!has_safe_move) {
 
-      std::array<Move, 32> limited_moves{};
+      std::array<Action, 32> limited_moves{};
       int move_count = 0;
 
       uint64_t king_attacks =
@@ -666,13 +1233,13 @@ bool is_draw(const Position &position, ThreadInfo &thread_info) {
   return false;
 }
 
-int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
+int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread_info,
             std::vector<TTBucket> &TT, int qdepth = 0) {
 
   constexpr int MAX_QPLY = 32;
   constexpr int MAX_QDEPTH = 16;
 
-  auto eval_now = [&](Position &pos) {
+  auto eval_now = [&](BoardState &pos) {
     return correct_eval(pos, thread_info, eval(pos, thread_info));
   };
 
@@ -682,11 +1249,11 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
 
   int ply = thread_info.search_ply;
 
-  if (ply >= MaxSearchDepth - 4 || ply >= MAX_QPLY) {
+  if (ply >= MaxSearchPly - 4 || ply >= MAX_QPLY) {
     return eval_now(position);
   }
 
-  if (thread_info.game_ply < 0 || thread_info.game_ply > GameSize) {
+  if (thread_info.game_ply < 0 || thread_info.game_ply > MaxGameLen) {
     return eval_now(position);
   }
 
@@ -721,15 +1288,15 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
   int _hist_idx = thread_info.game_ply;
   if (_hist_idx < 0)
     _hist_idx = 0;
-  if (_hist_idx >= GameSize)
-    _hist_idx = GameSize - 1;
-  GameHistory *ss = &(thread_info.game_hist[_hist_idx]);
+  if (_hist_idx >= MaxGameLen)
+    _hist_idx = MaxGameLen - 1;
+  StateRecord *ss = &(thread_info.game_hist[_hist_idx]);
 
   ++thread_info.nodes;
   if (ply > thread_info.seldepth)
     thread_info.seldepth = ply;
 
-  if (ply >= MaxSearchDepth - 3 || ply >= MAX_QPLY - 2) {
+  if (ply >= MaxSearchPly - 3 || ply >= MAX_QPLY - 2) {
     return eval_now(position);
   }
 
@@ -742,7 +1309,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
   int entry_type = EntryTypes::None;
   int tt_static_eval = ScoreNone;
   int tt_score = ScoreNone;
-  Move tt_move = MoveNone;
+  Action tt_move = MoveNone;
 
   if (tt_hit) {
     entry_type = entry.get_type();
@@ -765,7 +1332,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
   int static_eval = ScoreNone;
   int stand_pat = ScoreNone;
   int best_score = ScoreNone;
-  Move best_move = MoveNone;
+  Action best_move = MoveNone;
   bool raised_alpha = false;
 
   if (!in_check) {
@@ -822,7 +1389,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
     return eval_now(position);
   };
 
-  while (Move move =
+  while (Action move =
              next_move(picker, position, thread_info, tt_move, !in_check)) {
     if (!in_check && picker.stage > Stages::Captures)
       break;
@@ -850,18 +1417,18 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
         continue;
     }
 
-    Position moved_position = position;
+    BoardState moved_position = position;
     make_move(moved_position, move);
 
     int score = ScoreNone;
-    bool can_recurse = (thread_info.search_ply + 1 < MaxSearchDepth - 4) &&
+    bool can_recurse = (thread_info.search_ply + 1 < MaxSearchPly - 4) &&
                        (thread_info.search_ply + 1 < MAX_QPLY - 2) &&
-                       (thread_info.game_ply < GameSize - 2) &&
+                       (thread_info.game_ply < MaxGameLen - 2) &&
                        (qdepth + 1 < MAX_QDEPTH);
 
     if (can_recurse) {
 
-      if (thread_info.game_ply >= 0 && thread_info.game_ply < GameSize &&
+      if (thread_info.game_ply >= 0 && thread_info.game_ply < MaxGameLen &&
           thread_info.game_hist.data()) {
         ss_push(position, thread_info, move);
         score = -qsearch(-beta, -alpha, moved_position, thread_info, TT,
@@ -899,7 +1466,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
 
   if (best_score == ScoreNone) {
     if (in_check) {
-      return Mate + ply;
+      return -MateScore + ply;
     }
     best_score = (stand_pat != ScoreNone) ? stand_pat : eval_now(position);
   }
@@ -916,10 +1483,10 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
 }
 
 template <bool is_pv>
-int search(int alpha, int beta, int depth, bool cutnode, Position &position,
+int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
            ThreadInfo &thread_info, std::vector<TTBucket> &TT) {
 
-  GameHistory *ss = &(thread_info.game_hist[thread_info.game_ply]);
+  StateRecord *ss = &(thread_info.game_hist[thread_info.game_ply]);
 
   if (!thread_info.search_ply) {
     thread_info.current_iter = depth;
@@ -927,13 +1494,13 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     thread_info.pv.fill(MoveNone);
   }
 
-  int ply = thread_info.search_ply, pv_index = ply * MaxSearchDepth;
+  int ply = thread_info.search_ply, pv_index = ply * MaxSearchPly;
 
   if (ply > thread_info.seldepth) {
     thread_info.seldepth = ply;
   }
 
-  if (out_of_time(thread_info) || ply >= MaxSearchDepth - 1) {
+  if (out_of_time(thread_info) || ply >= MaxSearchPly - 1) {
 
     return correct_eval(position, thread_info, eval(position, thread_info));
   }
@@ -963,8 +1530,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
   bool root = !ply, color = position.color, raised_alpha = false;
 
-  Move best_move = MoveNone;
-  Move excluded_move = thread_info.excluded_move;
+  Action best_move = MoveNone;
+  Action excluded_move = thread_info.excluded_move;
 
   bool singular_search = (excluded_move != MoveNone);
 
@@ -979,7 +1546,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   uint64_t hash = position.zobrist_key;
   uint8_t phase = thread_info.phase;
 
-  int mate_distance = -Mate - ply;
+  int mate_distance = MateScore - 1 - ply;
   if (mate_distance < beta)
 
   {
@@ -1059,10 +1626,10 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     if (thread_info.use_syzygy && tb_initialized &&
         depth >= thread_info.syzygy_probe_depth) {
-      int piece_count =
+      int material_count =
           pop_count(position.colors_bb[0] | position.colors_bb[1]);
       int largest = TB_LARGEST ? (int)TB_LARGEST : 7;
-      if (piece_count <= std::min(thread_info.syzygy_probe_limit, largest) &&
+      if (material_count <= std::min(thread_info.syzygy_probe_limit, largest) &&
           !in_check && !is_pv) {
         int tb_score = probe_wdl_tb(position, thread_info);
         if (tb_score != ScoreNone) {
@@ -1079,16 +1646,23 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         static_eval - RFPMargin * (depth - improving) >= beta) {
       return (static_eval + beta) / 2;
     }
+
+    if (!is_pv && depth <= 3 && static_eval + 300 * depth < alpha) {
+      int razor_score = qsearch(alpha, beta, position, thread_info, TT);
+      if (razor_score <= alpha)
+        return razor_score;
+    }
+
     if (static_eval >= beta && depth >= NMPMinDepth &&
         has_non_pawn_material(position, color) && thread_info.game_ply > 0 &&
         (ss - 1)->played_move != MoveNone) {
 
-      Position temp_pos = position;
+      BoardState temp_pos = position;
 
       make_move(temp_pos, MoveNone);
 
-      if (thread_info.search_ply >= MaxSearchDepth ||
-          thread_info.game_ply >= GameSize) {
+      if (thread_info.search_ply >= MaxSearchPly ||
+          thread_info.game_ply >= MaxGameLen) {
         return ScoreNone;
       }
       ss_push(position, thread_info, MoveNone);
@@ -1109,6 +1683,47 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
   }
 
+  // Multi-Cut Pruning (MC)
+  // If at a cut-node, multiple moves beat beta, prune early
+  constexpr int MultiCutDepth = 5;
+  constexpr int MultiCutMoves = 3; // Check first N moves
+  constexpr int MultiCutCuts = 2;  // Need M cuts to prune
+
+  if (!is_pv && !in_check && !singular_search && cutnode &&
+      depth >= MultiCutDepth && tt_move != MoveNone) {
+    int mc_cuts = 0;
+    int mc_moves = 0;
+
+    MovePicker mc_picker;
+    init_picker(mc_picker, position, 0, in_check, ss);
+
+    while (Action move =
+               next_move(mc_picker, position, thread_info, tt_move, false)) {
+      if (mc_moves >= MultiCutMoves)
+        break;
+      if (!is_legal(position, move))
+        continue;
+
+      mc_moves++;
+
+      BoardState mc_pos = position;
+      make_move(mc_pos, move);
+
+      ss_push(position, thread_info, move);
+      int mc_score = -search<false>(-beta, -beta + 1, depth - 4, false, mc_pos,
+                                    thread_info, TT);
+      ss_pop(thread_info);
+      thread_info.phase = phase;
+
+      if (mc_score >= beta) {
+        mc_cuts++;
+        if (mc_cuts >= MultiCutCuts) {
+          return beta; // Multi-cut prune
+        }
+      }
+    }
+  }
+
   if ((is_pv || cutnode) && tt_move == MoveNone && depth > IIRMinDepth) {
 
     depth--;
@@ -1121,11 +1736,11 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     int threshold = p_beta - static_eval;
     MovePicker probcut_p;
     init_picker(probcut_p, position, threshold, in_check, ss);
-    Move p_tt_move =
+    Action p_tt_move =
         (tt_move != MoveNone && SEE(position, tt_move, threshold) ? tt_move
                                                                   : MoveNone);
 
-    while (Move move =
+    while (Action move =
                next_move(probcut_p, position, thread_info, p_tt_move, true)) {
 
       if (probcut_p.stage > Stages::Captures) {
@@ -1135,12 +1750,12 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         continue;
       }
 
-      Position moved_position = position;
+      BoardState moved_position = position;
 
       make_move(moved_position, move);
 
-      if (thread_info.search_ply >= MaxSearchDepth ||
-          thread_info.game_ply >= GameSize) {
+      if (thread_info.search_ply >= MaxSearchPly ||
+          thread_info.game_ply >= MaxGameLen) {
         return ScoreNone;
       }
       ss_push(position, thread_info, move);
@@ -1161,11 +1776,12 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
   }
 
-  Move quiets[64];
+  Action quiets[64];
   int num_quiets = 0;
-  Move captures[64];
+  Action captures[64];
   int num_captures = 0;
-  thread_info.KillerMoves[ply + 1] = MoveNone;
+  thread_info.KillerMoves[ply + 1][0] = MoveNone;
+  thread_info.KillerMoves[ply + 1][1] = MoveNone;
 
   MovePicker picker;
   init_picker(picker, position, -107, in_check, ss);
@@ -1175,7 +1791,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
   if (thread_info.sacrifice_lookahead > 0 &&
       thread_info.search_ply < thread_info.sacrifice_lookahead && !in_check) {
-    std::array<Move, ListSize> moves;
+    std::array<Action, MaxActions> moves;
     uint64_t checkers_local =
         attacks_square(position, get_king_pos(position, color), color ^ 1);
     int nmoves_local =
@@ -1184,7 +1800,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     int lookahead_cap = std::clamp(thread_info.sacrifice_lookahead, 0, 1);
 
     for (int i = 0; i < nmoves_local; i++) {
-      Move m = moves[i];
+      Action m = moves[i];
       if (!is_legal(position, m))
         continue;
 
@@ -1193,7 +1809,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       if (!isCapture && !losing_exchange)
         continue;
 
-      Position test_position = position;
+      BoardState test_position = position;
 
       make_move(test_position, m);
 
@@ -1210,12 +1826,12 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
                                                                        : 0));
       sac_extension = std::clamp(sac_extension, 1, 3);
 
-      Position moved_position = position;
+      BoardState moved_position = position;
 
       make_move(moved_position, m);
 
-      if (thread_info.search_ply >= MaxSearchDepth ||
-          thread_info.game_ply >= GameSize) {
+      if (thread_info.search_ply >= MaxSearchPly ||
+          thread_info.game_ply >= MaxGameLen) {
         return ScoreNone;
       }
       ss_push(position, thread_info, m);
@@ -1282,7 +1898,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
   }
 
-  while (Move move = next_move(picker, position, thread_info, tt_move, skip)) {
+  while (Action move =
+             next_move(picker, position, thread_info, tt_move, skip)) {
 
     if (root) {
       bool pv_skip = false;
@@ -1372,11 +1989,19 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       }
     }
 
-    Position moved_position = position;
+    // History Extensions - extend for moves with very good history
+    constexpr int HistoryExtensionThreshold = 8000;
+    if (extension == 0 && !is_capture && depth >= 4) {
+      if (hist_score > HistoryExtensionThreshold) {
+        extension = 1;
+      }
+    }
+
+    BoardState moved_position = position;
     make_move(moved_position, move);
 
-    if (thread_info.search_ply >= MaxSearchDepth ||
-        thread_info.game_ply >= GameSize) {
+    if (thread_info.search_ply >= MaxSearchPly ||
+        thread_info.game_ply >= MaxGameLen) {
       return best_score;
     }
     ss_push(position, thread_info, move);
@@ -1453,15 +2078,17 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         alpha = score;
 
         if (score >= beta) {
+          // Still update PV before breaking - critical for mate moves
+          thread_info.pv[pv_index] = best_move;
           break;
         }
 
         else {
 
           thread_info.pv[pv_index] = best_move;
-          for (int n = 0; n < MaxSearchDepth + ply + 1; n++) {
+          for (int n = 0; n < MaxSearchPly + ply + 1; n++) {
             thread_info.pv[pv_index + 1 + n] =
-                thread_info.pv[pv_index + MaxSearchDepth + n];
+                thread_info.pv[pv_index + MaxSearchPly + n];
           }
         }
       }
@@ -1494,17 +2121,16 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         (int)HistBonus * (depth - 1 + (best_score > beta + 125)), (int)HistMax);
 
     if (is_capture) {
-      // Capture'lara daha az bonus - exchange yerine pozisyonel oyun
-      int capture_bonus = bonus / 2; // %50 - capture'ları caydır
+      int capture_bonus = bonus / 2;
       update_history(thread_info.CapHistScores[piece][sq], capture_bonus);
 
     } else {
 
-      Move their_last = MoveNone;
+      Action their_last = MoveNone;
       int their_piece = Pieces::Blank;
-      Move our_last = MoveNone;
+      Action our_last = MoveNone;
       int our_piece = Pieces::Blank;
-      Move ply4_last = MoveNone;
+      Action ply4_last = MoveNone;
       int ply4_piece = Pieces::Blank;
 
       if (thread_info.game_ply >= 1) {
@@ -1522,7 +2148,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
       for (int i = 0; i < num_quiets; i++) {
 
-        Move move = quiets[i];
+        Action move = quiets[i];
 
         int piece_m = position.board[extract_from(move)],
             sq_m = extract_to(move);
@@ -1536,24 +2162,30 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
                                     their_piece, our_last, our_piece, ply4_last,
                                     ply4_piece);
 
-      thread_info.KillerMoves[ply] = best_move;
+      // Update 2 killer moves - shift old to slot 1, new to slot 0
+      if (best_move != thread_info.KillerMoves[ply][0]) {
+        thread_info.KillerMoves[ply][1] = thread_info.KillerMoves[ply][0];
+        thread_info.KillerMoves[ply][0] = best_move;
+      }
+
+      if (their_piece != Pieces::Blank && their_last != MoveNone) {
+        thread_info.CounterMoves[their_piece][their_last] = best_move;
+      }
     }
 
     for (int i = 0; i < num_captures; i++) {
-      Move move = captures[i];
+      Action move = captures[i];
 
       int piece_m = position.board[extract_from(move)], sq_m = extract_to(move);
 
-      // Kötü capture'lara ağır penalty - exchange'den kaçın
-      int capture_penalty =
-          bonus * 2; // %200 - kötü capture'ları güçlü cezalandır
+      int capture_penalty = bonus * 2;
       update_history(thread_info.CapHistScores[piece_m][sq_m],
                      -capture_penalty);
     }
   }
 
   if (best_score == ScoreNone) {
-    return singular_search ? alpha : in_check ? (Mate + ply) : 0;
+    return singular_search ? alpha : in_check ? (-MateScore + ply) : 0;
   }
 
   entry_type = best_score >= beta ? EntryTypes::LBound
@@ -1591,9 +2223,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   return best_score;
 }
 
-void print_pv(Position &position, ThreadInfo &thread_info) {
-  auto temp_pos_uptr = std::make_unique<Position>(position);
-  Position &temp_pos = *temp_pos_uptr;
+void print_pv(BoardState &position, ThreadInfo &thread_info) {
+  auto temp_pos_uptr = std::make_unique<BoardState>(position);
+  BoardState &temp_pos = *temp_pos_uptr;
 
   int indx = 0;
 
@@ -1604,7 +2236,7 @@ void print_pv(Position &position, ThreadInfo &thread_info) {
           -material_eval(temp_pos);
     }
 
-    Move best_move = thread_info.pv[indx];
+    Action best_move = thread_info.pv[indx];
 
     MoveInfo moves;
     int movelen = legal_movegen(temp_pos, moves.moves.data());
@@ -1635,7 +2267,7 @@ void print_pv(Position &position, ThreadInfo &thread_info) {
   safe_printf("\n");
 }
 
-void iterative_deepen(Position &position, ThreadInfo &thread_info,
+void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
                       std::vector<TTBucket> &TT) {
 
   thread_info.original_opt = thread_info.opt_time;
@@ -1662,7 +2294,10 @@ void iterative_deepen(Position &position, ThreadInfo &thread_info,
   thread_info.best_moves = {0};
   thread_info.best_scores = {ScoreNone, ScoreNone, ScoreNone, ScoreNone,
                              ScoreNone};
-  thread_info.KillerMoves.fill(MoveNone);
+  for (auto &k : thread_info.KillerMoves) {
+    k[0] = MoveNone;
+    k[1] = MoveNone;
+  }
 
   bool tb_decisive_shortcut = false;
   if (thread_info.use_syzygy && tb_initialized) {
@@ -1675,11 +2310,11 @@ void iterative_deepen(Position &position, ThreadInfo &thread_info,
     if (any_castling)
       goto skip_tb_root;
 
-    int piece_count = 0;
+    int material_count = 0;
     for (int i = 0; i < 64; i++)
       if (position.board[i])
-        piece_count++;
-    if (piece_count && TB_LARGEST && piece_count <= (int)TB_LARGEST) {
+        material_count++;
+    if (material_count && TB_LARGEST && material_count <= (int)TB_LARGEST) {
       uint64_t white = 0, black = 0, kings = 0, queens = 0, rooks = 0,
                bishops = 0, knights = 0, pawns = 0;
       for (int sq = 0; sq < 64; ++sq) {
@@ -1737,14 +2372,14 @@ void iterative_deepen(Position &position, ThreadInfo &thread_info,
       }
       if (ok) {
 
-        std::vector<std::pair<Move, int>> tbOrdered;
+        std::vector<std::pair<Action, int>> tbOrdered;
         for (unsigned i = 0; i < tbMoves.size; ++i) {
           TbMove tm = tbMoves.moves[i].move;
           int from = TB_MOVE_FROM(tm);
           int to = TB_MOVE_TO(tm);
           int promo = TB_MOVE_PROMOTES(tm);
-          Move m = promo ? pack_move_promo(from, to, promo - 1)
-                         : pack_move(from, to, MoveTypes::Normal);
+          Action m = promo ? pack_move_promo(from, to, promo - 1)
+                           : pack_move(from, to, MoveTypes::Normal);
           int wdl = TB_GET_WDL(tbMoves.moves[i].tbScore);
           int mapped;
           switch (wdl) {
@@ -1752,16 +2387,16 @@ void iterative_deepen(Position &position, ThreadInfo &thread_info,
             mapped = TB_WIN_SCORE;
             break;
           case TB_CURSED_WIN:
-            mapped = TB_CURSED_WIN_SCORE;
+            mapped = TB_WIN_SCORE;
             break;
           case TB_DRAW:
-            mapped = TB_DRAW_SCORE;
+            mapped = 0;
             break;
           case TB_BLESSED_LOSS:
-            mapped = TB_BLESSED_LOSS_SCORE;
+            mapped = -TB_WIN_SCORE;
             break;
           case TB_LOSS:
-            mapped = TB_LOSS_SCORE;
+            mapped = -TB_WIN_SCORE;
             break;
           default:
             mapped = 0;
@@ -1798,24 +2433,24 @@ void iterative_deepen(Position &position, ThreadInfo &thread_info,
   }
 skip_tb_root:;
 
-  thread_info.root_moves.reserve(ListSize);
+  thread_info.root_moves.reserve(MaxActions);
   thread_info.root_moves.clear();
   {
-    std::array<Move, ListSize> raw_root_moves;
+    std::array<Action, MaxActions> raw_root_moves;
     int nmoves = legal_movegen(position, raw_root_moves.data());
     for (int i = 0; i < nmoves; i++) {
       thread_info.root_moves.push_back({raw_root_moves[i], 0});
     }
   }
 
-  Move prev_best = MoveNone;
+  Action prev_best = MoveNone;
   int alpha = ScoreNone, beta = -ScoreNone;
   int bm_stability = 0;
 
-  int target_depth = std::clamp(thread_info.max_iter_depth, 1, MaxSearchDepth);
+  int target_depth = std::clamp(thread_info.max_iter_depth, 1, MaxSearchPly);
   int last_completed_depth = 0;
 
-  auto update_phase = [&](ThreadInfo &ti, Position &pos) {
+  auto update_phase = [&](ThreadInfo &ti, BoardState &pos) {
     if (ti.thread_id != 0)
       return;
 
@@ -1883,27 +2518,7 @@ skip_tb_root:;
           ti.phase_hit_counts[i] = 0;
       }
       if (ti.phase_hit_counts[desired_phase] >= ti.phase_confirm_hits) {
-        uint8_t old_phase = ti.phase;
         ti.phase = desired_phase;
-
-        auto physical_net = [](uint8_t ph) {
-          switch (ph) {
-          case PhaseTypes::Opening:
-          case PhaseTypes::MiddleGame:
-            return 0;
-          case PhaseTypes::LateMiddleGame:
-            return 1;
-          case PhaseTypes::Endgame:
-            return 2;
-          case PhaseTypes::Sacrifice:
-            return 2;
-          default:
-            return 0;
-          }
-        };
-        if (physical_net(old_phase) != physical_net(ti.phase)) {
-          // HCE does not need reset
-        }
       }
     } else {
 
@@ -1918,8 +2533,8 @@ skip_tb_root:;
     if (thread_data.stop) {
       break;
     }
-    if (thread_info.infinite_search && depth > MaxSearchDepth) {
-      depth = MaxSearchDepth;
+    if (thread_info.infinite_search && depth > MaxSearchPly) {
+      depth = MaxSearchPly;
     }
     if (!thread_info.infinite_search && depth > target_depth) {
       break;
@@ -1964,11 +2579,11 @@ skip_tb_root:;
                             ? static_cast<int64_t>(nodes) * 1000 / search_time
                             : 123456789;
 
-          Move move = score <= alpha
-                          ? prev_best
-                          : thread_info.best_moves[thread_info.multipv_index];
+          Action move = score <= alpha
+                            ? prev_best
+                            : thread_info.best_moves[thread_info.multipv_index];
 
-          if (abs(score) <= MateScore) {
+          if (abs(score) < MateScore - MaxSearchPly) {
             {
               std::string pv_str = internal_to_uci(position, move);
               safe_printf(
@@ -1990,7 +2605,7 @@ skip_tb_root:;
                           nodes, nps, search_time, pv_str.c_str());
             }
           } else {
-            int dist = (Mate - score) / 2;
+            int dist = (-MateScore - score) / 2;
             {
               std::string pv_str = internal_to_uci(position, move);
               safe_printf("info multipv %i depth %i seldepth %i score mate %i "
@@ -2023,13 +2638,15 @@ skip_tb_root:;
 
       std::string eval_string;
 
-      if (abs(score) <= MateScore) {
+      if (abs(score) < MateScore - MaxSearchPly) {
         eval_string = "cp " + std::to_string(score * 100 / NormalizationFactor);
-      } else if (score > MateScore) {
-        int dist = (MateScore - score) / 2;
+      } else if (score > 0) {
+        // Positive mate score: we can deliver mate
+        int dist = (MateScore - score + 1) / 2;
         eval_string = "mate " + std::to_string(dist);
       } else {
-        int dist = (Mate - score) / 2;
+        // Negative mate score: we are getting mated
+        int dist = (-MateScore - score) / 2;
         eval_string = "mate " + std::to_string(dist);
       }
 
@@ -2091,7 +2708,7 @@ skip_tb_root:;
           adjust_soft_limit(
               thread_info,
               find_root_move(thread_info, thread_info.best_moves[0])->nodes,
-              bm_stability);
+              bm_stability, thread_info.best_scores[0]);
         }
       }
 
@@ -2120,13 +2737,14 @@ finish:
   }
   search_end_barrier.arrive_and_wait();
 
-  auto validate_ponder_move = [&](const Position &root_position, Move best_move,
-                                  Move ponder_candidate) -> Move {
+  auto validate_ponder_move = [&](const BoardState &root_position,
+                                  Action best_move,
+                                  Action ponder_candidate) -> Action {
     if (ponder_candidate == MoveNone || best_move == MoveNone) {
       return MoveNone;
     }
 
-    std::array<Move, ListSize> root_legal{};
+    std::array<Action, MaxActions> root_legal{};
     int root_count = legal_movegen(root_position, root_legal.data());
     bool best_is_legal = false;
     for (int i = 0; i < root_count; ++i) {
@@ -2139,11 +2757,11 @@ finish:
       return MoveNone;
     }
 
-    auto ponder_pos_uptr = std::make_unique<Position>(root_position);
-    Position &ponder_position = *ponder_pos_uptr;
+    auto ponder_pos_uptr = std::make_unique<BoardState>(root_position);
+    BoardState &ponder_position = *ponder_pos_uptr;
     make_move(ponder_position, best_move);
 
-    std::array<Move, ListSize> response_legal{};
+    std::array<Action, MaxActions> response_legal{};
     int response_count = legal_movegen(ponder_position, response_legal.data());
     for (int i = 0; i < response_count; ++i) {
       if (response_legal[i] == ponder_candidate) {
@@ -2160,17 +2778,17 @@ finish:
       thread_info.ponder_move = thread_info.pv[1];
     } else {
 
-      auto temp_pos_uptr2 = std::make_unique<Position>(position);
-      Position &temp_pos = *temp_pos_uptr2;
+      auto temp_pos_uptr2 = std::make_unique<BoardState>(position);
+      BoardState &temp_pos = *temp_pos_uptr2;
       if (thread_info.best_moves[0] != MoveNone) {
         make_move(temp_pos, thread_info.best_moves[0]);
 
-        std::array<Move, ListSize> responses;
+        std::array<Action, MaxActions> responses;
         int num_responses = legal_movegen(temp_pos, responses.data());
 
         if (num_responses > 0) {
 
-          Move best_response = responses[0];
+          Action best_response = responses[0];
           int best_score = -1000;
 
           for (int i = 0; i < std::min(num_responses, 5); i++) {
@@ -2238,8 +2856,8 @@ finish:
       default:
         promo = 0;
       }
-      Move best = promo ? pack_move_promo(from, to, promo)
-                        : pack_move(from, to, MoveTypes::Normal);
+      Action best = promo ? pack_move_promo(from, to, promo)
+                          : pack_move(from, to, MoveTypes::Normal);
 
       unsigned wdl = TB_GET_WDL(tb_res);
       const char *wdl_str = "";
@@ -2269,7 +2887,7 @@ finish:
                     wdl_str);
       }
 
-      Move validated_ponder =
+      Action validated_ponder =
           validate_ponder_move(pos, best, thread_info.ponder_move);
       thread_info.ponder_move = validated_ponder;
 
@@ -2288,7 +2906,7 @@ finish:
   if (thread_info.thread_id == 0 && !thread_info.doing_datagen &&
       thread_info.variety > 0) {
 
-    Move selected_move = thread_info.best_moves[0];
+    Action selected_move = thread_info.best_moves[0];
     int best_score = thread_info.best_scores[0];
 
     int variety_lines =
@@ -2311,11 +2929,11 @@ finish:
       std::fill(std::begin(promo_adjust), std::end(promo_adjust), 0);
       for (int i = 0;
            i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
-        Move move = thread_info.best_moves[i];
+        Action move = thread_info.best_moves[i];
         if (extract_type(move) == MoveTypes::Promotion &&
             extract_promo(move) != Promos::Queen) {
-          auto temp_pos_uptr3 = std::make_unique<Position>(position);
-          Position &temp_pos = *temp_pos_uptr3;
+          auto temp_pos_uptr3 = std::make_unique<BoardState>(position);
+          BoardState &temp_pos = *temp_pos_uptr3;
           make_move(temp_pos, move);
           int to = extract_to(move);
           int promo_type = extract_promo(move);
@@ -2371,17 +2989,17 @@ finish:
 
       if (thread_info.seldepth > 8 && std::abs(best_score) < 1200) {
 
-        std::array<Move, ListSize> legal_moves;
+        std::array<Action, MaxActions> legal_moves;
         int num_legal = legal_movegen(position, legal_moves.data());
         struct AltCand {
-          Move m;
+          Action m;
           int score;
           int diff;
         };
         std::vector<AltCand> alts;
         alts.reserve(num_legal);
         for (int i = 0; i < num_legal; ++i) {
-          Move m = legal_moves[i];
+          Action m = legal_moves[i];
           if (m == thread_info.best_moves[0])
             continue;
 
@@ -2557,7 +3175,7 @@ finish:
   }
 
   if (thread_info.thread_id == 0 && thread_info.best_moves[0] == MoveNone) {
-    std::array<Move, ListSize> legal_moves;
+    std::array<Action, MaxActions> legal_moves;
     int num_legal = legal_movegen(position, legal_moves.data());
     if (num_legal > 0) {
       thread_info.best_moves[0] = legal_moves[0];
@@ -2574,7 +3192,7 @@ finish:
       can_output = false;
     }
     if (can_output) {
-      Move validated_ponder = validate_ponder_move(
+      Action validated_ponder = validate_ponder_move(
           position, thread_info.best_moves[0], thread_info.ponder_move);
       thread_info.ponder_move = validated_ponder;
 
@@ -2590,7 +3208,7 @@ finish:
   }
 }
 
-void search_position(Position &position, ThreadInfo &thread_info,
+void search_position(BoardState &position, ThreadInfo &thread_info,
                      std::vector<TTBucket> &TT) {
   thread_info.position = position;
   thread_info.thread_id = 0;
@@ -2636,7 +3254,7 @@ void loop(int i) {
   }
 }
 
-int analyze_sacrifice(Position &position, ThreadInfo &thread_info, int depth,
+int analyze_sacrifice(BoardState &position, ThreadInfo &thread_info, int depth,
                       int ply, int sacrificer_color) {
 
   if (depth < 0 || ply > 10)
@@ -2661,7 +3279,7 @@ int analyze_sacrifice(Position &position, ThreadInfo &thread_info, int depth,
     return score;
   }
 
-  std::array<Move, ListSize> moves;
+  std::array<Action, MaxActions> moves;
   uint64_t checkers = attacks_square(
       position, get_king_pos(position, position.color), position.color ^ 1);
   int nmoves = movegen(position, moves.data(), checkers, Generate::GenAll);
@@ -2670,16 +3288,16 @@ int analyze_sacrifice(Position &position, ThreadInfo &thread_info, int depth,
 
   int considered = 0;
   for (int i = 0; i < nmoves && considered < 16; i++) {
-    Move m = moves[i];
+    Action m = moves[i];
     if (!is_legal(position, m))
       continue;
 
-    Position np = position;
+    BoardState np = position;
     int before_mat = material_eval(position);
     make_move(np, m);
 
-    if (thread_info.search_ply >= MaxSearchDepth ||
-        thread_info.game_ply >= GameSize) {
+    if (thread_info.search_ply >= MaxSearchPly ||
+        thread_info.game_ply >= MaxGameLen) {
       return best;
     }
     ss_push(position, thread_info, m);
@@ -2720,8 +3338,4 @@ int analyze_sacrifice(Position &position, ThreadInfo &thread_info, int depth,
 
   int aggr_bonus = (thread_info.sacrifice_lookahead_aggressiveness - 100) * 2;
   return best + aggr_bonus / 4;
-}
-
-int calculate_material_change(const Position &position) {
-  return material_eval(position);
 }

@@ -22,7 +22,7 @@ std::vector<std::string_view> collect_args(int argc, char* argv[]) {
 }
 
 std::optional<int> handle_cli_mode(const std::vector<std::string_view>& args,
-                                   Position& position,
+                                   BoardState& position,
                                    ThreadInfo& thread_info) {
     if (args.size() <= 1) {
         return std::nullopt;
@@ -63,7 +63,7 @@ std::optional<int> handle_cli_mode(const std::vector<std::string_view>& args,
 }   
 
 int main(int argc, char* argv[]) {
-    Position position;
+    BoardState position;
     auto thread_info = std::make_unique<ThreadInfo>();
     init_LMR();
     init_bbs();

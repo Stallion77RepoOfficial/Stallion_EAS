@@ -9,7 +9,7 @@
 namespace Colors {
 constexpr uint8_t White = 0;
 constexpr uint8_t Black = 1;
-};  
+}; // namespace Colors
 namespace Pieces {
 constexpr uint8_t Blank = 0;
 constexpr uint8_t WPawn = 2;
@@ -24,7 +24,7 @@ constexpr uint8_t WQueen = 10;
 constexpr uint8_t BQueen = 11;
 constexpr uint8_t WKing = 12;
 constexpr uint8_t BKing = 13;
-};  
+}; // namespace Pieces
 
 namespace PieceTypes {
 constexpr uint8_t PieceNone = 0;
@@ -34,14 +34,17 @@ constexpr uint8_t Bishop = 3;
 constexpr uint8_t Rook = 4;
 constexpr uint8_t Queen = 5;
 constexpr uint8_t King = 6;
-}  
+} // namespace PieceTypes
 
 namespace MoveTypes {
 constexpr int8_t Normal = 0;
 constexpr int8_t EnPassant = 1;
 constexpr int8_t Castling = 2;
 constexpr int8_t Promotion = 3;
-}  
+constexpr int8_t Standard = Normal;
+constexpr int8_t Castle = Castling;
+constexpr int8_t Promote = Promotion;
+} // namespace MoveTypes
 
 namespace Directions {
 constexpr int8_t North = 8;
@@ -52,25 +55,39 @@ constexpr int8_t Northeast = 9;
 constexpr int8_t Southeast = -7;
 constexpr int8_t Northwest = 7;
 constexpr int8_t Southwest = -9;
-}  
+constexpr int8_t Up = North;
+constexpr int8_t Down = South;
+constexpr int8_t Right = East;
+constexpr int8_t Left = West;
+constexpr int8_t UpRight = Northeast;
+constexpr int8_t DownRight = Southeast;
+constexpr int8_t UpLeft = Northwest;
+constexpr int8_t DownLeft = Southwest;
+constexpr int8_t Upeast = Northeast;
+constexpr int8_t Upwest = Northwest;
+constexpr int8_t Downeast = Southeast;
+constexpr int8_t Downwest = Southwest;
+} // namespace Directions
 namespace Sides {
 constexpr int8_t Kingside = 1;
 constexpr int8_t Queenside = 0;
-}  
+constexpr int8_t Short = Kingside;
+constexpr int8_t Long = Queenside;
+} // namespace Sides
 
 namespace EntryTypes {
 constexpr uint8_t None = 0;
 constexpr uint8_t UBound = 1;
 constexpr uint8_t LBound = 2;
 constexpr uint8_t Exact = 3;
-}  
+} // namespace EntryTypes
 
 namespace Promos {
 constexpr uint8_t Knight = 0;
 constexpr uint8_t Bishop = 1;
 constexpr uint8_t Rook = 2;
 constexpr uint8_t Queen = 3;
-}  
+} // namespace Promos
 
 namespace PhaseTypes {
 constexpr uint8_t Opening = 0;
@@ -78,7 +95,14 @@ constexpr uint8_t MiddleGame = 1;
 constexpr uint8_t LateMiddleGame = 2;
 constexpr uint8_t Endgame = 3;
 constexpr uint8_t Sacrifice = 4;
-}  
+} // namespace PhaseTypes
+
+namespace PhaseMaterial {
+constexpr int Opening = 6000;
+constexpr int Midgame = 4200;
+constexpr int LateMiddle = 3000;
+constexpr int Endgame = 1500;
+} // namespace PhaseMaterial
 
 constexpr int get_piece_type(int x) { return x / 2; }
 
@@ -98,14 +122,13 @@ constexpr int16_t GameSize = 2000;
 constexpr int32_t Mate = -32000;
 constexpr int32_t MateScore = 32000;
 constexpr int32_t ScoreNone = -32001;
- 
-constexpr int32_t TB_WIN_SCORE          = 20000;
-constexpr int32_t TB_CURSED_WIN_SCORE   = 18000;
-constexpr int32_t TB_DRAW_SCORE         = 0;
+
+constexpr int32_t TB_WIN_SCORE = 20000;
+constexpr int32_t TB_CURSED_WIN_SCORE = 18000;
+constexpr int32_t TB_DRAW_SCORE = 0;
 constexpr int32_t TB_BLESSED_LOSS_SCORE = -18000;
-constexpr int32_t TB_LOSS_SCORE         = -20000;
+constexpr int32_t TB_LOSS_SCORE = -20000;
 typedef uint16_t Move;
- 
 
 constexpr Move MoveNone = 0;
 constexpr int SquareNone = 255;
@@ -117,44 +140,42 @@ struct MoveInfo {
 };
 
 struct Position {
-  uint64_t zobrist_key;  
+  uint64_t zobrist_key;
   uint64_t pawn_key;
   std::array<uint64_t, 2> non_pawn_key;
-  std::array<uint8_t, 64> board;  
+  std::array<uint8_t, 64> board;
   std::array<uint64_t, 2> colors_bb;
   std::array<uint64_t, 7> pieces_bb;
-  std::array<uint8_t, 10> material_count;      
-  MultiArray<uint8_t, 2, 2> castling_squares;  
-  uint8_t ep_square;                           
-  bool color;                                  
+  std::array<uint8_t, 10> material_count;
+  MultiArray<uint8_t, 2, 2> castling_squares;
+  uint8_t ep_square;
+  bool color;
   uint8_t halfmoves;
 };
 
 constexpr int MaxSearchDepth = 256;
 
-struct GameHistory {  
-                      
-  uint64_t position_key = 0;  
-  Move played_move = MoveNone;       
-  uint8_t piece_moved = Pieces::Blank;  
-                        
-   
+struct GameHistory {
+
+  uint64_t position_key = 0;
+  Move played_move = MoveNone;
+  uint8_t piece_moved = Pieces::Blank;
+
   bool is_cap;
   int16_t m_diff;
   int32_t static_eval;
 };
 
- 
 constexpr int BucketEntries = 3;
 constexpr int MaxAge = 1 << 6;
 
 struct TTEntry {
-  uint32_t position_key;  
+  uint32_t position_key;
   int16_t static_eval;
-  int16_t score;      
-  Move best_move;     
-  uint8_t depth;      
-  uint8_t age_bound;  
+  int16_t score;
+  Move best_move;
+  uint8_t depth;
+  uint8_t age_bound;
 
   uint8_t get_type();
 
@@ -175,8 +196,26 @@ struct RootMoveInfo {
   uint64_t nodes;
 };
 
-constexpr std::array<int, 7> SeeValues = {
-    0, 100, 450, 450, 650, 1250, 10000};  
+// Type aliases for compatibility
+using Action = Move;
+using BoardState = Position;
+using StateRecord = GameHistory;
+using RootAction = RootMoveInfo;
+constexpr Move NoAction = MoveNone;
+constexpr int MaxActions = ListSize;
+constexpr int MaxSearchPly = MaxSearchDepth;
+constexpr int MaxGameLen = GameSize;
+
+// Namespace aliases for renamed namespaces
+namespace Kind = PieceTypes;
+namespace Dir = Directions;
+namespace ActionType = MoveTypes;
+namespace Side = Colors;
+namespace Wing = Sides;
+namespace Figure = Pieces;
+namespace Upgrade = Promos;
+
+constexpr std::array<int, 7> SeeValues = {0, 100, 450, 450, 650, 1250, 10000};
 
 constexpr std::array<int, 7> MaterialValues = {0,   100, 300,  300,
                                                500, 900, 10000};
@@ -184,16 +223,14 @@ constexpr std::array<int, 7> MaterialValues = {0,   100, 300,  300,
 constexpr int PhaseBound = 3500;
 
 namespace Random {
-  inline std::random_device rd;
-  inline std::uniform_int_distribution<int> dist(0, INT32_MAX);
-}
+inline std::random_device rd;
+inline std::uniform_int_distribution<int> dist(0, INT32_MAX);
+} // namespace Random
 
- 
 uint8_t flip_sq(uint8_t sq) { return sq ^ 56; }
 uint8_t get_color(uint8_t piece) { return piece & 1; }
 inline bool is_valid_square(int sq) { return sq >= 0 && sq < 64; }
 
- 
 void safe_printf(const char *fmt, ...);
 void safe_print_cerr(const std::string &s);
 
@@ -218,8 +255,7 @@ constexpr int32_t ep_index = 773;
 constexpr int32_t castling_index = 774;
 
 constexpr std::array<uint64_t, 778> zobrist_keys = {
-     
-     
+
     7266447313870364031ull,  4946485549665804864ull,  16945909448695747420ull,
     16394063075524226720ull, 4873882236456199058ull,  14877448043947020171ull,
     6740343660852211943ull,  13857871200353263164ull, 5249110015610582907ull,

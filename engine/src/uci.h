@@ -41,13 +41,13 @@ inline void compute_human_params(ThreadInfo &thread_info) {
   thread_info.human_depth_limit = depth_cap;
 }
 
-void run_thread(Position &position, ThreadInfo &thread_info, std::thread &s) {
+void run_thread(BoardState &position, ThreadInfo &thread_info, std::thread &s) {
 
   s = std::thread(search_position, std::ref(position), std::ref(thread_info),
                   std::ref(TT));
 }
 
-uint64_t perft(int depth, Position &position, bool first,
+uint64_t perft(int depth, BoardState &position, bool first,
                ThreadInfo &thread_info)
 
 {
@@ -56,7 +56,7 @@ uint64_t perft(int depth, Position &position, bool first,
       position, get_king_pos(position, position.color), position.color ^ 1);
 
   if (depth <= 1) {
-    std::array<Move, ListSize> list;
+    std::array<Action, MaxActions> list;
 
     int nmoves = legal_movegen(position, list.data());
 
@@ -71,14 +71,15 @@ uint64_t perft(int depth, Position &position, bool first,
   init_picker(picker, position, -107, checkers,
               &(thread_info.game_hist[thread_info.game_ply]));
 
-  while (Move move = next_move(picker, position, thread_info, MoveNone, false))
+  while (Action move =
+             next_move(picker, position, thread_info, MoveNone, false))
 
   {
     if (!is_legal(position, move)) {
       continue;
     }
 
-    Position new_position = position;
+    BoardState new_position = position;
     make_move(new_position, move);
 
     uint64_t nodes = perft(depth - 1, new_position, false, thread_info);
@@ -93,7 +94,7 @@ uint64_t perft(int depth, Position &position, bool first,
   return total_nodes;
 }
 
-void bench(Position &position, ThreadInfo &thread_info) {
+void bench(BoardState &position, ThreadInfo &thread_info) {
   std::vector<std::string> fens = {
       "2r2k2/8/4P1R1/1p6/8/P4K1N/7b/2B5 b - - 0 55",
       "2r4r/1p4k1/1Pnp4/3Qb1pq/8/4BpPp/5P2/2RR1BK1 w - - 0 42",
@@ -164,7 +165,7 @@ void bench(Position &position, ThreadInfo &thread_info) {
               (int64_t)(total_nodes * 1000 / time_elapsed(start)));
 }
 
-void uci(ThreadInfo &thread_info, Position &position) noexcept {
+void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
   setvbuf(stdin, NULL, _IONBF, 0);
   setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -767,12 +768,12 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       if (input_stream >> has_moves) {
 
         std::string moves;
-        Move last_move_played = MoveNone;
+        Action last_move_played = MoveNone;
         while (input_stream >> moves) {
-          Move move = uci_to_internal(position, moves);
+          Action move = uci_to_internal(position, moves);
           if (move == MoveNone)
             break;
-          if (thread_info.game_ply >= GameSize)
+          if (thread_info.game_ply >= MaxGameLen)
             break;
 
           thread_info.game_hist[thread_info.game_ply].position_key =
@@ -784,7 +785,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
               is_cap(position, move);
           thread_info.game_hist[thread_info.game_ply].m_diff =
               material_eval(position);
-          if (thread_info.game_ply + 1 < GameSize)
+          if (thread_info.game_ply + 1 < MaxGameLen)
             thread_info.game_ply++;
 
           make_move(position, move);
@@ -850,13 +851,13 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
       }
       thread_info.max_nodes_searched = UINT64_MAX / 2;
       if (thread_info.max_iter_depth != -1)
-        thread_info.max_iter_depth = MaxSearchDepth;
+        thread_info.max_iter_depth = MaxSearchPly;
 
       int color = position.color, time = INT32_MAX, increment = 0;
       std::string token;
       int movestogo = 0;
       int mate_in = 0;
-      std::vector<Move> searchmoves;
+      std::vector<Action> searchmoves;
 
       while (input_stream >> token) {
         if (token == "ponder") {
@@ -865,7 +866,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
         }
 
         if (token == "infinite") {
-          thread_info.max_iter_depth = MaxSearchDepth;
+          thread_info.max_iter_depth = MaxSearchPly;
           thread_info.max_time = UINT64_MAX;
           thread_info.opt_time = UINT64_MAX;
           thread_info.infinite_search = true;
@@ -881,12 +882,11 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
           input_stream >> movestogo;
         } else if (token == "mate") {
           input_stream >> mate_in;
-          thread_info.max_iter_depth =
-              std::min(mate_in * 2 + 1, MaxSearchDepth);
+          thread_info.max_iter_depth = std::min(mate_in * 2 + 1, MaxSearchPly);
         } else if (token == "searchmoves") {
           std::string move_str;
           while (input_stream >> move_str && move_str.length() >= 4) {
-            Move move = uci_to_internal(position, move_str);
+            Action move = uci_to_internal(position, move_str);
             if (move != MoveNone) {
               searchmoves.push_back(move);
             }
@@ -904,7 +904,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
         } else if (token == "depth") {
           int depth;
           input_stream >> depth;
-          thread_info.max_iter_depth = std::min(depth, MaxSearchDepth);
+          thread_info.max_iter_depth = std::min(depth, MaxSearchPly);
         } else if (token == "movetime") {
           int t;
           input_stream >> t;
@@ -961,7 +961,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
            thread_info.game_ply <= thread_info.book_depth_limit)) {
 
         uint64_t book_key = thread_info.opening_book.polyglot_key(position);
-        Move book_move = thread_info.opening_book.probe_book(
+        Action book_move = thread_info.opening_book.probe_book(
             book_key, thread_info.book_min_weight);
 
         if (book_move != MoveNone && thread_info.variety > 0) {
@@ -978,7 +978,9 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
             int skip_chance = (v * v) / 225;
             if (skip_chance > 100)
               skip_chance = 100;
-            if ((Random::dist(Random::rd) % 100) < skip_chance) {
+            std::mt19937 rng(Random::rd());
+            if ((std::uniform_int_distribution<int>(0, 99)(rng)) <
+                skip_chance) {
               book_move = MoveNone;
             }
           }
@@ -991,7 +993,7 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
 
         if (book_move != MoveNone) {
 
-          std::array<Move, ListSize> legal_moves;
+          std::array<Action, MaxActions> legal_moves;
           int num_legal = legal_movegen(position, legal_moves.data());
           bool is_legal = false;
           for (int i = 0; i < num_legal; i++) {
@@ -1028,7 +1030,6 @@ void uci(ThreadInfo &thread_info, Position &position) noexcept {
             std::min(thread_info.max_nodes_searched, thread_info.max_nodes);
       }
 
-      // Run search
       run_thread(position, thread_info, s);
     }
 

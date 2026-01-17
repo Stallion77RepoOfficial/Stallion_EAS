@@ -4,13 +4,12 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
- 
 
 namespace Generate {
 uint8_t GenQuiets = 0;
 uint8_t GenCaptures = 1;
 uint8_t GenAll = 2;
-}  
+} // namespace Generate
 
 constexpr int TTMoveScore = 10000000;
 constexpr int QueenPromoScore = 5000000;
@@ -74,8 +73,7 @@ void pawn_moves(const Position &position, uint64_t check_filter,
     }
 
     if (position.ep_square != SquareNone) {
-      uint64_t ep_targets =
-          PAWN_ATK_SAFE(color ^ 1, position.ep_square);
+      uint64_t ep_targets = PAWN_ATK_SAFE(color ^ 1, position.ep_square);
       uint64_t ep_captures = our_non_promos & ep_targets;
       while (ep_captures) {
         int from = pop_lsb(ep_captures);
@@ -94,14 +92,14 @@ void pawn_moves(const Position &position, uint64_t check_filter,
   uint64_t cap_right_promo = shift_pawns(our_promos & ~Files[7], right) &
                              position.colors_bb[color ^ 1] & check_filter;
 
-   
   auto safe_push = [&](Move m) {
-    if (move_list && key >= 0 && key < ListSize) move_list[key++] = m;
+    if (move_list && key >= 0 && key < ListSize)
+      move_list[key++] = m;
   };
 
   while (move_promo) {
     int to = pop_lsb(move_promo);
-     
+
     for (int i = 0; i < 4; i++) {
       safe_push(pack_move_promo(to - (dir), to, i));
     }
@@ -123,8 +121,8 @@ void pawn_moves(const Position &position, uint64_t check_filter,
   }
 }
 
-int movegen(const Position &position, Move *move_list,
-            uint64_t checkers, int gen_type) {
+int movegen(const Position &position, Move *move_list, uint64_t checkers,
+            int gen_type) {
 
   uint8_t color = position.color, king_pos = get_king_pos(position, color);
   int opp_color = color ^ 1;
@@ -134,31 +132,34 @@ int movegen(const Position &position, Move *move_list,
 
   auto load_between_bb = [&](int from_sq, int to_sq, const char *context,
                              uint64_t &mask) -> bool {
-    if (!is_valid_square(from_sq) || !is_valid_square(to_sq) ||
-    from_sq >= 64 || to_sq >= 64) {
+    if (!is_valid_square(from_sq) || !is_valid_square(to_sq) || from_sq >= 64 ||
+        to_sq >= 64) {
 #ifndef NDEBUG
-  {
-    char _m_buf[128];
-    std::snprintf(_m_buf, sizeof(_m_buf), "[movegen] Invalid BetweenBBs indices %d -> %d in %s\n", from_sq, to_sq, context);
-    safe_print_cerr(std::string(_m_buf));
-  }
+      {
+        char _m_buf[128];
+        std::snprintf(_m_buf, sizeof(_m_buf),
+                      "[movegen] Invalid BetweenBBs indices %d -> %d in %s\n",
+                      from_sq, to_sq, context);
+        safe_print_cerr(std::string(_m_buf));
+      }
 #endif
-  return false;
+      return false;
     }
     int idx_local = from_sq * 64 + to_sq;
     assert(idx_local >= 0 && idx_local < 4096);
     if (idx_local < 0 || idx_local >= 4096) {
 #ifndef NDEBUG
-  {
-    char _m_buf2[128];
-    std::snprintf(_m_buf2, sizeof(_m_buf2), "[movegen] BetweenBBs index overflow %d -> %d in %s\n", from_sq, to_sq, context);
-    safe_print_cerr(std::string(_m_buf2));
-  }
+      {
+        char _m_buf2[128];
+        std::snprintf(_m_buf2, sizeof(_m_buf2),
+                      "[movegen] BetweenBBs index overflow %d -> %d in %s\n",
+                      from_sq, to_sq, context);
+        safe_print_cerr(std::string(_m_buf2));
+      }
 #endif
-  return false;
+      return false;
     }
-    mask = BetweenBBs[static_cast<size_t>(from_sq)]
-                         [static_cast<size_t>(to_sq)];
+    mask = BetweenBBs[static_cast<size_t>(from_sq)][static_cast<size_t>(to_sq)];
     return true;
   };
 
@@ -180,26 +181,27 @@ int movegen(const Position &position, Move *move_list,
   }
   uint64_t king_attacks = KING_ATK_SAFE(king_sq) & targets;
   while (king_attacks) {
-  if (move_list && idx < ListSize) move_list[idx++] =
-    pack_move(king_pos, pop_lsb(king_attacks), MoveTypes::Normal);
+    if (move_list && idx < ListSize)
+      move_list[idx++] =
+          pack_move(king_pos, pop_lsb(king_attacks), MoveTypes::Normal);
   }
 
   if (checkers) {
     if (checkers & (checkers - 1)) {
       return idx;
     }
-     
-     
+
     int checker_sq = get_lsb(checkers);
     if (!is_valid_square(checker_sq)) {
 #ifndef NDEBUG
-  {
-    char _m_buf3[80];
-    std::snprintf(_m_buf3, sizeof(_m_buf3), "[movegen] Invalid checker square %d\n", checker_sq);
-    safe_print_cerr(std::string(_m_buf3));
-  }
+      {
+        char _m_buf3[80];
+        std::snprintf(_m_buf3, sizeof(_m_buf3),
+                      "[movegen] Invalid checker square %d\n", checker_sq);
+        safe_print_cerr(std::string(_m_buf3));
+      }
 #endif
-  return idx;
+      return idx;
     }
     uint64_t between_mask = 0ULL;
     if (load_between_bb(king_sq, checker_sq, "single check", between_mask)) {
@@ -216,8 +218,10 @@ int movegen(const Position &position, Move *move_list,
     int from = pop_lsb(knights);
     uint64_t to = KNIGHT_ATK_SAFE(from) & targets & check_filter;
     while (to) {
-      if (move_list && idx < ListSize) move_list[idx++] = pack_move(from, pop_lsb(to), MoveTypes::Normal);
-      else pop_lsb(to);  
+      if (move_list && idx < ListSize)
+        move_list[idx++] = pack_move(from, pop_lsb(to), MoveTypes::Normal);
+      else
+        pop_lsb(to);
     }
   }
 
@@ -228,8 +232,10 @@ int movegen(const Position &position, Move *move_list,
     int from = pop_lsb(diagonals);
     uint64_t to = get_bishop_attacks(from, occ) & targets & check_filter;
     while (to) {
-      if (move_list && idx < ListSize) move_list[idx++] = pack_move(from, pop_lsb(to), MoveTypes::Normal);
-      else pop_lsb(to);
+      if (move_list && idx < ListSize)
+        move_list[idx++] = pack_move(from, pop_lsb(to), MoveTypes::Normal);
+      else
+        pop_lsb(to);
     }
   }
 
@@ -240,19 +246,18 @@ int movegen(const Position &position, Move *move_list,
     int from = pop_lsb(orthogonals);
     uint64_t to = get_rook_attacks(from, occ) & targets & check_filter;
     while (to) {
-      if (move_list && idx < ListSize) move_list[idx++] = pack_move(from, pop_lsb(to), MoveTypes::Normal);
-      else pop_lsb(to);
+      if (move_list && idx < ListSize)
+        move_list[idx++] = pack_move(from, pop_lsb(to), MoveTypes::Normal);
+      else
+        pop_lsb(to);
     }
   }
 
-  if (checkers ||
-      gen_type ==
-          Generate::GenCaptures) {  
-                                    
+  if (checkers || gen_type == Generate::GenCaptures) {
+
     return idx;
   }
-   
-   
+
   for (int side : {Sides::Queenside, Sides::Kingside}) {
 
     if (position.castling_squares[color][side] == SquareNone ||
@@ -267,8 +272,9 @@ int movegen(const Position &position, Move *move_list,
     }
 
     uint64_t castle_bb = 0ULL;
-    if (!load_between_bb(static_cast<int>(position.castling_squares[color][side]),
-                         rook_target, "castling rook path", castle_bb)) {
+    if (!load_between_bb(
+            static_cast<int>(position.castling_squares[color][side]),
+            rook_target, "castling rook path", castle_bb)) {
       continue;
     }
     uint64_t king_path = 0ULL;
@@ -307,7 +313,6 @@ int movegen(const Position &position, Move *move_list,
   return idx;
 }
 
- 
 int legal_movegen(const Position &position, Move *move_list) {
   uint64_t checkers = attacks_square(
       position, get_king_pos(position, position.color), position.color ^ 1);
@@ -328,25 +333,26 @@ bool SEE(Position &position, Move move, int threshold) {
 
   int stm = position.color, from = extract_from(move), to = extract_to(move);
 
-   
-  if (!is_valid_square(from) || !is_valid_square(to)) return false;
+  if (!is_valid_square(from) || !is_valid_square(to))
+    return false;
 
-   
-  if (from >= 64 || to >= 64 || from < 0 || to < 0) return false;
+  if (from >= 64 || to >= 64 || from < 0 || to < 0)
+    return false;
 
-   
-  if (position.board[from] == Pieces::Blank || position.board[to] == Pieces::Blank) {
-    if (position.board[from] == Pieces::Blank) return false;
+  if (position.board[from] == Pieces::Blank ||
+      position.board[to] == Pieces::Blank) {
+    if (position.board[from] == Pieces::Blank)
+      return false;
   }
 
-   
   int from_piece = position.board[from];
   int from_color = get_color(from_piece);
-  if (from_color != position.color) return false;
+  if (from_color != position.color)
+    return false;
 
   int gain = SeeValues[get_piece_type(position.board[to])] - threshold;
   if (gain < 0) {
-     
+
     return false;
   }
 
@@ -355,7 +361,6 @@ bool SEE(Position &position, Move move, int threshold) {
     return true;
   }
 
-   
   uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
                      position.pieces_bb[PieceTypes::Queen];
   uint64_t rooks = position.pieces_bb[PieceTypes::Rook] |
@@ -365,8 +370,8 @@ bool SEE(Position &position, Move move, int threshold) {
       (position.colors_bb[Colors::White] | position.colors_bb[Colors::Black]) -
       (1ull << from);
 
-   
-  if (!is_valid_square(to)) return false;
+  if (!is_valid_square(to))
+    return false;
 
   uint64_t all_attackers = attacks_square(position, to, occ);
 
@@ -381,15 +386,15 @@ bool SEE(Position &position, Move move, int threshold) {
       return stm != position.color;
     }
 
-     
     int attackerType = PieceTypes::PieceNone;
 
     for (int pt = PieceTypes::Pawn; pt <= PieceTypes::King; pt++) {
       uint64_t match = stm_attackers & position.pieces_bb[pt];
       if (match) {
-         
+
         int attacker_sq = get_lsb(match);
-        if (!is_valid_square(attacker_sq)) return false;
+        if (!is_valid_square(attacker_sq))
+          return false;
 
         occ -= get_lsb_bb(match);
         attackerType = pt;
@@ -398,10 +403,9 @@ bool SEE(Position &position, Move move, int threshold) {
     }
 
     if (attackerType == PieceTypes::PieceNone) {
-      return false;  
+      return false;
     }
 
-     
     if (attackerType == PieceTypes::Pawn ||
         attackerType == PieceTypes::Bishop ||
         attackerType == PieceTypes::Queen) {
@@ -420,10 +424,8 @@ bool SEE(Position &position, Move move, int threshold) {
   return true;
 }
 
- 
 void make_move(Position &position, Move move);
 
- 
 int evaluate_promotion_tactics(Position &position, Move move) {
   int from = extract_from(move);
   int to = extract_to(move);
@@ -434,211 +436,72 @@ int evaluate_promotion_tactics(Position &position, Move move) {
   if (!is_valid_square(from) || !is_valid_square(to)) {
     return 0;
   }
-  
-   
+
   auto temp_pos_uptr = std::make_unique<Position>(position);
   Position &temp_pos = *temp_pos_uptr;
   make_move(temp_pos, move);
-  
-   
+
   if (promo_type == Promos::Knight) {
     uint64_t knight_attacks = KNIGHT_ATK_SAFE(to);
-    
-     
+
     int fork_targets = 0;
-    uint64_t valuable_pieces = (temp_pos.pieces_bb[PieceTypes::Queen] | 
-                               temp_pos.pieces_bb[PieceTypes::Rook] |
-                               temp_pos.pieces_bb[PieceTypes::King]) &
+    uint64_t valuable_pieces = (temp_pos.pieces_bb[PieceTypes::Queen] |
+                                temp_pos.pieces_bb[PieceTypes::Rook] |
+                                temp_pos.pieces_bb[PieceTypes::King]) &
                                temp_pos.colors_bb[color ^ 1];
-                               
+
     while (valuable_pieces) {
       int piece_sq = pop_lsb(valuable_pieces);
       if (knight_attacks & (1ULL << piece_sq)) {
         fork_targets++;
       }
     }
-    
+
     if (fork_targets >= 2) {
-      bonus += 150;  
+      bonus += 150;
     } else if (fork_targets == 1) {
-      bonus += 50;   
+      bonus += 50;
     }
-    
-     
-    if (temp_pos.material_count[PieceTypes::Pawn] < 4 && 
-        !temp_pos.pieces_bb[PieceTypes::Queen] && 
+
+    if (temp_pos.material_count[PieceTypes::Pawn] < 4 &&
+        !temp_pos.pieces_bb[PieceTypes::Queen] &&
         !temp_pos.pieces_bb[PieceTypes::Rook]) {
       bonus += 25;
     }
   }
-  
-   
+
   if (promo_type == Promos::Bishop) {
-    uint64_t bishop_attacks = get_bishop_attacks(to, temp_pos.colors_bb[0] | temp_pos.colors_bb[1]);
-    
-     
+    uint64_t bishop_attacks =
+        get_bishop_attacks(to, temp_pos.colors_bb[0] | temp_pos.colors_bb[1]);
+
     uint64_t central_diagonals = 0x8040201008040201ULL | 0x0102040810204080ULL;
     if (bishop_attacks & central_diagonals) {
       bonus += 40;
     }
-    
-     
-    if (pop_count(temp_pos.pieces_bb[PieceTypes::Bishop] & temp_pos.colors_bb[color]) > 1) {
+
+    if (pop_count(temp_pos.pieces_bb[PieceTypes::Bishop] &
+                  temp_pos.colors_bb[color]) > 1) {
       bonus += 30;
     }
-    
-     
+
     uint64_t targets = bishop_attacks & temp_pos.colors_bb[color ^ 1];
     if (pop_count(targets) > 1) {
       bonus += 35;
     }
   }
-  
-   
+
   if (promo_type != Promos::Queen) {
     int king_pos = get_king_pos(temp_pos, color ^ 1);
     if (attacks_square(temp_pos, king_pos, color)) {
       bonus += 40;
     }
   }
-  
+
   return bonus;
 }
 
-void score_moves(Position &position, ThreadInfo &thread_info,
-                 MoveInfo &scored_moves, Move tt_move, int len) {
+Move get_next_move(Move *moves, int *scores, int start_idx, int len) {
 
-   
-  int ply = thread_info.search_ply;
-
-   
-  bool have_their = (ply >= 1) && (thread_info.game_ply > 0);
-  bool have_our = (ply >= 2) && (thread_info.game_ply > 1);
-
-  int their_last = MoveNone;
-  int their_piece = Pieces::Blank;
-  int our_last = MoveNone;
-  int our_piece = Pieces::Blank;
-
-  if (have_their) {
-    auto &h = thread_info.game_hist[thread_info.game_ply - 1];
-    their_last = extract_to(h.played_move);
-    their_piece = h.piece_moved;
-  }
-  if (have_our) {
-    auto &h2 = thread_info.game_hist[thread_info.game_ply - 2];
-    our_last = extract_to(h2.played_move);
-    our_piece = h2.piece_moved;
-  }
-
-  for (int idx = 0; idx < len; idx++) {
-    Move move = scored_moves.moves[idx];
-
-     
-    int from_sq = extract_from(move);
-    int to_sq = extract_to(move);
-    if (!is_valid_square(from_sq) || !is_valid_square(to_sq)) {
-       
-      scored_moves.scores[idx] = -100000000;
-      continue;
-    }
-
-    if (move == tt_move) {
-      scored_moves.scores[idx] = TTMoveScore;
-       
-    }
-
-    else if (extract_type(move) == MoveTypes::Promotion) {
-      int promo_type = extract_promo(move);
-      
-       
-      if (promo_type == Promos::Queen) {
-         
-        scored_moves.scores[idx] = QueenPromoScore;
-      } else {
-         
-        int base_score = QueenPromoScore - 1000000;  
-        
-         
-        if (thread_info.variety > 0) {
-          int tactical_bonus = evaluate_promotion_tactics(position, move);
-          
-           
-          int variety_factor = std::min<int>(150, static_cast<int>(thread_info.variety));
-          tactical_bonus = (tactical_bonus * variety_factor) / 100;
-          
-          base_score += tactical_bonus;
-          
-           
-          if (variety_factor > 100) {
-            base_score += (variety_factor - 100) * 500;
-          }
-        }
-        
-        scored_moves.scores[idx] = base_score;
-      }
-    }
-
-    else if (is_cap(position, move)) {
-       
-      int from_piece = position.board[from_sq];
-      int to_piece = position.board[to_sq];
-
-      scored_moves.scores[idx] = GoodCaptureBaseScore +
-                                 SeeValues[get_piece_type(to_piece)] * 100 -
-                                 SeeValues[get_piece_type(from_piece)] / 100 -
-                                 TTMoveScore * !SEE(position, move, -107);
-
-      int piece = from_piece, to = to_sq;
-
-       
-      if (piece >= 0 && piece < (int)std::size(thread_info.CapHistScores) &&
-          to >= 0 && to < 64) {
-        scored_moves.scores[idx] += thread_info.CapHistScores[piece][to];
-      }
-
-    }
-
-    else if (move == thread_info.KillerMoves[thread_info.search_ply]) {
-       
-      scored_moves.scores[idx] = KillerMoveScore;
-    }
-
-    else {
-       
-      int piece = position.board[from_sq], to = to_sq;
-      if (piece >= 0 && piece < (int)std::size(thread_info.HistoryScores) &&
-          to >= 0 && to < 64) {
-        scored_moves.scores[idx] = thread_info.HistoryScores[piece][to];
-      } else {
-        scored_moves.scores[idx] = 0;
-      }
-
-      if (ply > 0 && their_last != MoveNone) {
-         
-         
-        if (their_piece >= 0 && their_piece < (int)std::size(thread_info.ContHistScores) &&
-            their_last >= 0 && their_last < 64 && piece >= 0 && piece < (int)std::size(thread_info.ContHistScores[0][0]) &&
-            to >= 0 && to < 64) {
-          scored_moves.scores[idx] +=
-              thread_info.ContHistScores[their_piece][their_last][piece][to];
-        }
-      }
-      if (ply > 1 && our_last != MoveNone) {
-        if (our_piece >= 0 && our_piece < (int)std::size(thread_info.ContHistScores) &&
-            our_last >= 0 && our_last < 64 && piece >= 0 && piece < (int)std::size(thread_info.ContHistScores[0][0]) &&
-            to >= 0 && to < 64) {
-          scored_moves.scores[idx] +=
-              thread_info.ContHistScores[our_piece][our_last][piece][to];
-        }
-      }
-    }
-  }
-}
-
-Move get_next_move(Move *moves, int *scores, int start_idx,
-                   int len) {
-   
   int best_idx = start_idx, best_score = scores[start_idx];
   for (int i = start_idx + 1; i < len; i++) {
     if (scores[i] > best_score) {

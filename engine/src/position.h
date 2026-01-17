@@ -5,12 +5,12 @@
 #include <cstring>
 #include <sstream>
 
-struct Position;
+// struct BoardState;
 struct ThreadInfo;
 
-bool position_integrity_check(const Position &position);
+bool position_integrity_check(const BoardState &position);
 
-int16_t total_mat(const Position &position) {
+int16_t total_mat(const BoardState &position) {
   int m = (position.material_count[0] + position.material_count[1]) * 100 +
           (position.material_count[2] + position.material_count[3]) * 300 +
           (position.material_count[4] + position.material_count[5]) * 300 +
@@ -20,7 +20,7 @@ int16_t total_mat(const Position &position) {
   return m;
 }
 
-std::string internal_to_uci(const Position &position, Move move) {
+std::string internal_to_uci(const BoardState &position, Action move) {
 
   int from = extract_from(move), to = extract_to(move),
       promo = extract_promo(move);
@@ -51,12 +51,12 @@ std::string internal_to_uci(const Position &position, Move move) {
   return uci;
 }
 
-int get_king_pos(const Position &position, int color) {
+int get_king_pos(const BoardState &position, int color) {
   return get_lsb(position.colors_bb[color] &
                  position.pieces_bb[PieceTypes::King]);
 }
 
-void print_board(Position position) {
+void print_board(BoardState position) {
   for (int i = 56; i >= 0; i++) {
     safe_printf("+---+---+---+---+---+---+---+---+\n");
     for (int n = i; n != i + 8; n++) {
@@ -113,8 +113,8 @@ void print_board(Position position) {
   safe_printf("+---+---+---+---+---+---+---+---+\n\n");
 }
 
-void set_board(Position &position, ThreadInfo &thread_info, std::string f) {
-  position = Position{};
+void set_board(BoardState &position, ThreadInfo &thread_info, std::string f) {
+  position = BoardState{};
 
   generate_bb(f, position);
 
@@ -301,7 +301,7 @@ void set_board(Position &position, ThreadInfo &thread_info, std::string f) {
   position.halfmoves = halfmoves;
 }
 
-std::string export_fen(const Position &position,
+std::string export_fen(const BoardState &position,
                        const ThreadInfo &thread_info) {
 
   std::string fen = "";
@@ -429,7 +429,7 @@ std::string export_fen(const Position &position,
   return fen;
 }
 
-uint64_t attacks_square(const Position &position, int sq, int color) {
+uint64_t attacks_square(const BoardState &position, int sq, int color) {
 
   if (!is_valid_square(sq))
     return 0ULL;
@@ -458,7 +458,7 @@ uint64_t attacks_square(const Position &position, int sq, int color) {
   return attackers & position.colors_bb[color];
 }
 
-uint64_t attacks_square(const Position &position, int sq, int color,
+uint64_t attacks_square(const BoardState &position, int sq, int color,
                         uint64_t occ) {
 
   if (!is_valid_square(sq))
@@ -486,7 +486,7 @@ uint64_t attacks_square(const Position &position, int sq, int color,
   return attackers & position.colors_bb[color] & occ;
 }
 
-uint64_t attacks_square(const Position &position, int sq, uint64_t occ) {
+uint64_t attacks_square(const BoardState &position, int sq, uint64_t occ) {
 
   if (!is_valid_square(sq))
     return 0ULL;
@@ -511,7 +511,7 @@ uint64_t attacks_square(const Position &position, int sq, uint64_t occ) {
          (KING_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::King]);
 }
 
-uint64_t br_attacks_square(const Position &position, int sq, int color,
+uint64_t br_attacks_square(const BoardState &position, int sq, int color,
                            uint64_t occ) {
 
   if (!is_valid_square(sq))
@@ -528,9 +528,9 @@ uint64_t br_attacks_square(const Position &position, int sq, int color,
   return attackers & position.colors_bb[color] & occ;
 }
 
-bool is_queen_promo(Move move) { return extract_promo(move) == 3; }
+bool is_queen_promo(Action move) { return extract_promo(move) == 3; }
 
-bool is_cap(const Position &position, Move &move) {
+bool is_cap(const BoardState &position, Action &move) {
   if (extract_type(move) == MoveTypes::Castling) {
     return false;
   }
@@ -548,7 +548,7 @@ bool is_cap(const Position &position, Move &move) {
           is_queen_promo((move)));
 }
 
-void make_move(Position &position, Move move) {
+void make_move(BoardState &position, Action move) {
 
   if (!position_integrity_check(position)) {
     return;
@@ -753,7 +753,7 @@ void make_move(Position &position, Move move) {
   safe_TT_prefetch(temp_hash);
 }
 
-bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
+bool is_pseudo_legal(const BoardState &position, Action move, uint64_t checkers) {
   if (move == MoveNone) {
     return false;
   }
@@ -864,7 +864,7 @@ bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
   return (attacks & (1ull << to));
 }
 
-bool is_legal(const Position &position, Move move) {
+bool is_legal(const BoardState &position, Action move) {
   uint64_t occupied =
       position.colors_bb[Colors::White] | position.colors_bb[Colors::Black];
   int from = extract_from(move), to = extract_to(move), color = position.color,
@@ -912,7 +912,7 @@ bool is_legal(const Position &position, Move move) {
                             occupied ^ (1ull << from) ^ (1ull << to));
 }
 
-bool position_integrity_check(const Position &position) {
+bool position_integrity_check(const BoardState &position) {
 
   for (int sq = 0; sq < 64; sq++) {
     int piece = position.board[sq];

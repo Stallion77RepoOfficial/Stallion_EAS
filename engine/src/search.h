@@ -95,8 +95,6 @@ int probe_wdl_tb(BoardState &position, const ThreadInfo &thread_info) {
   }
 }
 
-constexpr int NormalizationFactor = 195;
-
 void update_history(int16_t &entry, int score) {
   entry += score - entry * abs(score) / 16384;
 }
@@ -166,13 +164,11 @@ bool out_of_time(ThreadInfo &thread_info) {
 int16_t material_eval(const BoardState &position) {
   int m = 0;
 
-  // White Evaluation
   for (int pt = 1; pt <= 5; pt++) {
     int count = position.material_count[(pt - 1) * 2];
     if (count > 0) {
       m += count * MaterialBasis[pt];
 
-      // Imbalance calculation
       for (int pt2 = 1; pt2 <= 5; pt2++) {
         int total_count_pt2 = position.material_count[(pt2 - 1) * 2] +
                               position.material_count[(pt2 - 1) * 2 + 1];
@@ -181,13 +177,11 @@ int16_t material_eval(const BoardState &position) {
     }
   }
 
-  // Black Evaluation
   for (int pt = 1; pt <= 5; pt++) {
     int count = position.material_count[(pt - 1) * 2 + 1];
     if (count > 0) {
       m -= count * MaterialBasis[pt];
 
-      // Imbalance calculation
       for (int pt2 = 1; pt2 <= 5; pt2++) {
         int total_count_pt2 = position.material_count[(pt2 - 1) * 2] +
                               position.material_count[(pt2 - 1) * 2 + 1];
@@ -281,15 +275,40 @@ int eval_king_tropism(const BoardState &position, int color) {
   int opp_k_rank = get_rank(opp_king);
   int opp_k_file = get_file(opp_king);
 
-  uint64_t attackers = (position.pieces_bb[PieceTypes::Queen] |
-                        position.pieces_bb[PieceTypes::Rook] |
-                        position.pieces_bb[PieceTypes::Knight]) &
-                       position.colors_bb[color];
-  while (attackers) {
-    int sq = pop_lsb(attackers);
+  uint64_t queens =
+      position.pieces_bb[PieceTypes::Queen] & position.colors_bb[color];
+  while (queens) {
+    int sq = pop_lsb(queens);
     int dist = std::max(abs(get_rank(sq) - opp_k_rank),
                         abs(get_file(sq) - opp_k_file));
-    score += (8 - dist) * 3;
+    score += (8 - dist) * TropismQueenWeight;
+  }
+
+  uint64_t rooks =
+      position.pieces_bb[PieceTypes::Rook] & position.colors_bb[color];
+  while (rooks) {
+    int sq = pop_lsb(rooks);
+    int dist = std::max(abs(get_rank(sq) - opp_k_rank),
+                        abs(get_file(sq) - opp_k_file));
+    score += (8 - dist) * TropismRookWeight;
+  }
+
+  uint64_t knights =
+      position.pieces_bb[PieceTypes::Knight] & position.colors_bb[color];
+  while (knights) {
+    int sq = pop_lsb(knights);
+    int dist = std::max(abs(get_rank(sq) - opp_k_rank),
+                        abs(get_file(sq) - opp_k_file));
+    score += (8 - dist) * TropismKnightWeight;
+  }
+
+  uint64_t bishops =
+      position.pieces_bb[PieceTypes::Bishop] & position.colors_bb[color];
+  while (bishops) {
+    int sq = pop_lsb(bishops);
+    int dist = std::max(abs(get_rank(sq) - opp_k_rank),
+                        abs(get_file(sq) - opp_k_file));
+    score += (8 - dist) * TropismBishopWeight;
   }
 
   return score;
@@ -298,6 +317,7 @@ int eval_king_tropism(const BoardState &position, int color) {
 int eval_threats(const BoardState &position, int color) {
   int score = 0;
   int opp_color = color ^ 1;
+  uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
 
   uint64_t opp_pieces =
       position.colors_bb[opp_color] & ~position.pieces_bb[PieceTypes::Pawn];
@@ -310,7 +330,7 @@ int eval_threats(const BoardState &position, int color) {
   }
 
   uint64_t attacked_by_pawns = opp_pieces & my_pawn_attacks;
-  score += pop_count(attacked_by_pawns) * 20;
+  score += pop_count(attacked_by_pawns) * ThreatPawnAttack;
 
   uint64_t my_minor_attacks = 0;
   uint64_t minors = (position.pieces_bb[PieceTypes::Knight] |
@@ -322,8 +342,7 @@ int eval_threats(const BoardState &position, int color) {
         (color == Colors::White ? Pieces::WKnight : Pieces::BKnight)) {
       my_minor_attacks |= KNIGHT_ATK_SAFE(sq);
     } else {
-      my_minor_attacks |=
-          get_bishop_attacks(sq, position.colors_bb[0] | position.colors_bb[1]);
+      my_minor_attacks |= get_bishop_attacks(sq, occ);
     }
   }
 
@@ -331,7 +350,28 @@ int eval_threats(const BoardState &position, int color) {
                         position.pieces_bb[PieceTypes::Rook]) &
                        position.colors_bb[opp_color];
   uint64_t attacked_heavy = opp_heavy & my_minor_attacks;
-  score += pop_count(attacked_heavy) * 30;
+  score += pop_count(attacked_heavy) * ThreatMinorOnHeavy;
+
+  uint64_t my_rook_attacks = 0;
+  uint64_t my_rooks =
+      position.pieces_bb[PieceTypes::Rook] & position.colors_bb[color];
+  while (my_rooks) {
+    int sq = pop_lsb(my_rooks);
+    my_rook_attacks |= get_rook_attacks(sq, occ);
+  }
+  uint64_t opp_queens =
+      position.pieces_bb[PieceTypes::Queen] & position.colors_bb[opp_color];
+  score += pop_count(opp_queens & my_rook_attacks) * ThreatRookOnQueen;
+
+  uint64_t opp_minors = (position.pieces_bb[PieceTypes::Knight] |
+                         position.pieces_bb[PieceTypes::Bishop]) &
+                        position.colors_bb[opp_color];
+  score += pop_count(opp_minors & my_rook_attacks) * ThreatRookOnMinor;
+
+  uint64_t hanging = opp_pieces & ~my_pawn_attacks;
+  uint64_t all_my_attacks = my_pawn_attacks | my_minor_attacks | my_rook_attacks;
+  uint64_t undefended_hanging = hanging & all_my_attacks;
+  score += pop_count(undefended_hanging) * ThreatHanging;
 
   return score;
 }
@@ -395,8 +435,7 @@ int eval_king_safety(const BoardState &position, int color) {
   int king_sq = get_king_pos(position, color);
 
   if (!is_valid_square(king_sq))
-    return 0; // Don't return -MateScore - this corrupts eval and causes false
-              // mate detection
+    return 0;
 
   int king_file = get_file(king_sq);
   int king_rank = get_rank(king_sq);
@@ -411,26 +450,24 @@ int eval_king_safety(const BoardState &position, int color) {
                         position.colors_bb[color] & file_bb;
 
     if (my_pawns) {
-      score += 20;
+      score += KSPawnShield;
       int pawn_sq =
           (color == Colors::White) ? get_msb(my_pawns) : get_lsb(my_pawns);
       int pawn_rank = get_rank(pawn_sq);
       int dist = abs(pawn_rank - king_rank);
       if (dist == 1)
-        score += 15;
+        score += KSPawnClose;
       else if (dist == 2)
-        score += 10;
+        score += KSPawnMed;
     } else {
-      score -= 30;
+      score += KSNoPawn;
       uint64_t opp_pawns = position.pieces_bb[PieceTypes::Pawn] &
                            position.colors_bb[opp_color] & file_bb;
       if (!opp_pawns) {
-        score -= 25;
+        score += KSOpenFile;
       }
     }
 
-    // Pawn Storm Logic
-    // Check for opponent pawns on the king file and adjacent files
     uint64_t opp_pawns_on_file = position.pieces_bb[PieceTypes::Pawn] &
                                  position.colors_bb[opp_color] & file_bb;
     if (opp_pawns_on_file) {
@@ -439,11 +476,6 @@ int eval_king_safety(const BoardState &position, int color) {
       int opp_pawn_rank = get_rank(opp_pawn_sq);
       int dist_to_king = abs(opp_pawn_rank - king_rank);
 
-      // Indexing logic for PawnStormConfig
-      // dist 1 (rank 2) -> index 0
-      // dist 2 (rank 3) -> index 1
-      // dist 3 (rank 4) -> index 2
-      // dist 4+ (rank 5+) -> index 3
       int storm_idx = std::clamp(dist_to_king - 1, 0, 3);
       score -= PawnStormConfig[storm_idx];
     }
@@ -451,14 +483,14 @@ int eval_king_safety(const BoardState &position, int color) {
 
   if (total_mat(position) > PhaseMaterial::Endgame) {
     if (king_file >= 3 && king_file <= 4)
-      score -= 50;
+      score += KSCentralKingMajor;
     else if (king_file == 2 || king_file == 5)
-      score -= 25;
+      score += KSCentralKingMinor;
 
     if (color == Colors::White && king_rank > 2)
-      score -= 40;
+      score += KSAdvancedKing;
     if (color == Colors::Black && king_rank < 5)
-      score -= 40;
+      score += KSAdvancedKing;
   }
 
   int safe_squares = 0;
@@ -470,9 +502,9 @@ int eval_king_safety(const BoardState &position, int color) {
     }
   }
   if (safe_squares < 2)
-    score -= 60;
+    score += KSSafeSqLow;
   else if (safe_squares < 4)
-    score -= 20;
+    score += KSSafeSqMed;
 
   bool can_castle_ks =
       position.castling_squares[color][Sides::Kingside] != SquareNone;
@@ -480,46 +512,58 @@ int eval_king_safety(const BoardState &position, int color) {
       position.castling_squares[color][Sides::Queenside] != SquareNone;
 
   if (can_castle_ks || can_castle_qs)
-    score += 10;
+    score += KSCastleBonus;
   if (!can_castle_ks && !can_castle_qs) {
     if (king_file == 1 || king_file == 2 || king_file == 6 || king_file == 7) {
-      score += 30;
+      score += KSCastledFlank;
     } else {
       if (total_mat(position) > PhaseMaterial::LateMiddle)
-        score -= 30;
+        score -= KSCastledFlank;
     }
   }
 
   int king_start_sq = (color == Colors::White) ? 4 : 60;
   if (king_sq != king_start_sq && (can_castle_ks || can_castle_qs)) {
-    score -= 60;
+    score += KSMovedKingCastle;
   }
 
   if (king_sq != king_start_sq) {
     bool is_castled = (king_file == 1 || king_file == 2 || king_file == 6);
     if (!is_castled && total_mat(position) > PhaseMaterial::LateMiddle) {
-      score -= 40;
+      score += KSUncastledKing;
     }
   }
 
-  // King Zone Attack Weights - evaluate enemy piece attacks on king zone
-  // Attack weights: Knight=2, Bishop=2, Rook=3, Queen=5
-  constexpr int AttackWeight[6] = {
-      0, 0, 2, 2, 3, 5}; // None, Pawn, Knight, Bishop, Rook, Queen
+  const int *AttackWeight = KZAttackWeight;
 
   uint64_t king_zone = KING_ATK_SAFE(king_sq) | (1ULL << king_sq);
-  // Extend king zone forward
   if (color == Colors::White && king_rank < 6) {
     king_zone |= (KING_ATK_SAFE(king_sq) << 8) & ~Ranks[0];
+    if (king_rank < 5)
+      king_zone |= (KING_ATK_SAFE(king_sq) << 16) & ~Ranks[0] & ~Ranks[1];
   } else if (color == Colors::Black && king_rank > 1) {
     king_zone |= (KING_ATK_SAFE(king_sq) >> 8) & ~Ranks[7];
+    if (king_rank > 2)
+      king_zone |= (KING_ATK_SAFE(king_sq) >> 16) & ~Ranks[7] & ~Ranks[6];
   }
 
   int attack_units = 0;
   int attacker_count = 0;
   uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
 
-  // Knight attacks
+  uint64_t opp_pawn_attacks_kz = 0;
+  uint64_t opp_p =
+      position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[opp_color];
+  while (opp_p) {
+    int sq = pop_lsb(opp_p);
+    uint64_t atk = PAWN_ATK_SAFE(opp_color, sq);
+    if (atk & king_zone) {
+      opp_pawn_attacks_kz |= atk;
+      attack_units += AttackWeight[PieceTypes::Pawn];
+      attacker_count++;
+    }
+  }
+
   uint64_t opp_knights =
       position.pieces_bb[PieceTypes::Knight] & position.colors_bb[opp_color];
   while (opp_knights) {
@@ -530,29 +574,34 @@ int eval_king_safety(const BoardState &position, int color) {
     }
   }
 
-  // Bishop attacks
   uint64_t opp_bishops =
       position.pieces_bb[PieceTypes::Bishop] & position.colors_bb[opp_color];
   while (opp_bishops) {
     int sq = pop_lsb(opp_bishops);
-    if (get_bishop_attacks(sq, occ) & king_zone) {
+    uint64_t batk = get_bishop_attacks(sq, occ);
+    if (batk & king_zone) {
       attack_units += AttackWeight[PieceTypes::Bishop];
       attacker_count++;
+      uint64_t xray = get_bishop_attacks(sq, occ ^ (batk & position.colors_bb[color]));
+      if (xray & king_zone & ~batk)
+        attack_units += KZBishopXray;
     }
   }
 
-  // Rook attacks
   uint64_t opp_rooks =
       position.pieces_bb[PieceTypes::Rook] & position.colors_bb[opp_color];
   while (opp_rooks) {
     int sq = pop_lsb(opp_rooks);
-    if (get_rook_attacks(sq, occ) & king_zone) {
+    uint64_t ratk = get_rook_attacks(sq, occ);
+    if (ratk & king_zone) {
       attack_units += AttackWeight[PieceTypes::Rook];
       attacker_count++;
+      uint64_t xray = get_rook_attacks(sq, occ ^ (ratk & position.colors_bb[color]));
+      if (xray & king_zone & ~ratk)
+        attack_units += KZRookXray;
     }
   }
 
-  // Queen attacks
   uint64_t opp_queens =
       position.pieces_bb[PieceTypes::Queen] & position.colors_bb[opp_color];
   while (opp_queens) {
@@ -563,11 +612,20 @@ int eval_king_safety(const BoardState &position, int color) {
     }
   }
 
-  // Apply king danger penalty based on attack units and attacker count
   if (attacker_count >= 2) {
     int danger = attack_units * attacker_count;
-    score -= danger * 4; // Scale factor
+    score -= danger * KZDangerMultiplier;
+
+    if (attacker_count >= 3)
+      score -= danger * KZMultiAttackerBonus;
+  } else if (attacker_count == 1 && attack_units >= KZSingleAttackerThreshold) {
+    score -= attack_units * KZSingleAttackerPenalty;
   }
+
+  int opp_queen_count = pop_count(position.pieces_bb[PieceTypes::Queen] &
+                                  position.colors_bb[opp_color]);
+  if (opp_queen_count == 0 && attacker_count >= 2)
+    score += KZNoQueenBonus;
 
   return score;
 }
@@ -577,8 +635,8 @@ int eval_endgame(const BoardState &position, int color) {
   int opp_color = color ^ 1;
   int total_mat_val = total_mat(position);
 
-  if (total_mat_val < 2000 && total_mat_color(position, color) >
-                                  total_mat_color(position, opp_color) + 200) {
+  if (total_mat_val < EGMaterialThreshold && total_mat_color(position, color) >
+                                  total_mat_color(position, opp_color) + EGMaterialAdvantage) {
     int opp_king = get_king_pos(position, opp_color);
     int my_king = get_king_pos(position, color);
 
@@ -587,10 +645,10 @@ int eval_endgame(const BoardState &position, int color) {
       int opp_k_file = get_file(opp_king);
       int center_dist = std::max(3 - opp_k_rank, opp_k_rank - 4) +
                         std::max(3 - opp_k_file, opp_k_file - 4);
-      score += center_dist * 10;
+      score += center_dist * EGCenterDist;
       int k_dist = std::max(abs(get_rank(my_king) - opp_k_rank),
                             abs(get_file(my_king) - opp_k_file));
-      score += (14 - k_dist) * 5;
+      score += (14 - k_dist) * EGKingDist;
     }
   }
 
@@ -600,7 +658,7 @@ int eval_endgame(const BoardState &position, int color) {
     int sq = pop_lsb(my_pawns);
     int rank = get_rank(sq);
     int relative_rank = (color == Colors::White) ? rank : (7 - rank);
-    score += relative_rank * relative_rank * 2;
+    score += relative_rank * relative_rank * EGPassedPawnRank;
   }
 
   return score;
@@ -612,7 +670,7 @@ int eval_positional(const BoardState &position, int color) {
   int my_bishops = pop_count(position.pieces_bb[PieceTypes::Bishop] &
                              position.colors_bb[color]);
   if (my_bishops >= 2)
-    score += 40;
+    score += BishopPairBonus;
 
   uint64_t my_rooks =
       position.pieces_bb[PieceTypes::Rook] & position.colors_bb[color];
@@ -627,9 +685,9 @@ int eval_positional(const BoardState &position, int color) {
     bool my_pawn_on_file = (my_pawns & file_bb) != 0;
     bool opp_pawn_on_file = (opp_pawns & file_bb) != 0;
     if (!my_pawn_on_file && !opp_pawn_on_file)
-      score += 20;
+      score += RookOpenFile;
     else if (!my_pawn_on_file)
-      score += 10;
+      score += RookSemiOpenFile;
   }
 
   uint64_t pawns =
@@ -657,12 +715,26 @@ int eval_positional(const BoardState &position, int color) {
     }
 
     if (is_passed) {
-      score += 15 + relative_rank * relative_rank * 3;
+      int pass_bonus = PassedPawnBase + relative_rank * relative_rank * PassedPawnRankMul;
       int ahead_sq = sq + (color == Colors::White ? 8 : -8);
       if (is_valid_square(ahead_sq) &&
           position.board[ahead_sq] != Pieces::Blank) {
-        score -= 10;
+        pass_bonus += PassedPawnBlocked;
       }
+      if (relative_rank >= PassedPawnKingProximityRank) {
+        int my_king_sq = get_king_pos(position, color);
+        int opp_king_sq = get_king_pos(position, opp_color);
+        if (is_valid_square(my_king_sq) && is_valid_square(opp_king_sq)) {
+          int promo_sq = (color == Colors::White) ? (file + 56) : file;
+          int my_dist = std::max(abs(get_rank(my_king_sq) - get_rank(promo_sq)),
+                                 abs(get_file(my_king_sq) - get_file(promo_sq)));
+          int opp_dist = std::max(abs(get_rank(opp_king_sq) - get_rank(promo_sq)),
+                                  abs(get_file(opp_king_sq) - get_file(promo_sq)));
+          if (opp_dist > my_dist + 1)
+            pass_bonus += PassedPawnKingProximity;
+        }
+      }
+      score += pass_bonus;
     }
   }
 
@@ -676,13 +748,8 @@ int eval_positional(const BoardState &position, int color) {
     if (file < 7 && (my_pawns & Files[file + 1]))
       has_neighbor = true;
     if (!has_neighbor)
-      score -= 15;
+      score += IsolatedPawnPenalty;
   }
-
-  // Space Evaluation
-  // Files C, D, E, F (Index 2, 3, 4, 5)
-  // Ranks 2, 3, 4 relatives (Rank 1 is back rank, 2,3,4 are space)
-  // White: Ranks 2, 3, 4 | Black: Ranks 5, 4, 3
 
   uint64_t space_mask = 0;
   if (color == Colors::White) {
@@ -693,17 +760,6 @@ int eval_positional(const BoardState &position, int color) {
                  (Ranks[5] | Ranks[4] | Ranks[3]);
   }
 
-  // A square is "safe" if not attacked by opponent pawns
-  // And we control it (attack it) or occupy it.
-  // Simplified: Count safe squares behind our pawns or controlled by minor
-  // pieces. Here we use a simpler metric: If not attacked by enemy pawns and we
-  // have a piece or pawn there/attacking it.
-
-  // Efficient Space:
-  // 1. Get all squares in space_mask not attacked by enemy pawns.
-  // 2. Count how many of these we attack or occupy.
-
-  // Generating attacked by pawns bitboard
   uint64_t opp_pawn_attacks = 0;
   uint64_t opp_p =
       position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[opp_color];
@@ -714,20 +770,13 @@ int eval_positional(const BoardState &position, int color) {
 
   uint64_t safe_space = space_mask & ~opp_pawn_attacks;
 
-  // We get bonus for safe_space squares we control/occupy.
-  // Generating our attacks is expensive, so we approximate by occupancy +
-  // central pawn push influence
   uint64_t our_occupancy = position.colors_bb[color] & safe_space;
   score += pop_count(our_occupancy) * SpaceWeight;
-
-  // Bonus for central pawns being advanced (blocked or not)
-  // Already somewhat covered by PST, but Space is about control.
-  // Let's stick to simple safe occupancy for now as per plan.
 
   for (int file = 0; file < 8; ++file) {
     int pawns_on_file = pop_count(my_pawns & Files[file]);
     if (pawns_on_file > 1)
-      score -= (pawns_on_file - 1) * 10;
+      score += (pawns_on_file - 1) * DoubledPawnPenalty;
   }
 
   uint64_t my_knights =
@@ -777,7 +826,7 @@ int eval_positional(const BoardState &position, int color) {
         }
 
         if (!can_be_attacked)
-          score += 25;
+          score += OutpostBonus;
       }
     }
   }
@@ -809,8 +858,6 @@ int eval(BoardState &position, ThreadInfo &thread_info) {
   hce_eval += eval_threats(position, color);
   hce_eval -= eval_threats(position, color ^ 1);
 
-  // Tempo bonus - side to move has a small advantage
-  constexpr int TempoBonus = 12;
   hce_eval += TempoBonus;
 
   int bonus2 = 0, bonus3 = 0, bonus4 = 0, bonus5 = 0;
@@ -857,20 +904,20 @@ int eval(BoardState &position, ThreadInfo &thread_info) {
 
   int total_material = total_mat(position);
 
-  if (sacrifice_pattern && total_material > 3000) {
+  if (sacrifice_pattern && total_material > SacMaterialThreshold) {
     if (thread_info.search_ply % 2) {
-      bonus2 = -55 * (hce_eval < -250 ? 3 : hce_eval < 0 ? 2 : 1);
+      bonus2 = -SacPatternBonus * (hce_eval < -250 ? 3 : hce_eval < 0 ? 2 : 1);
     } else {
-      bonus2 = 55 * (hce_eval > 250 ? 3 : hce_eval > 0 ? 2 : 1);
+      bonus2 = SacPatternBonus * (hce_eval > 250 ? 3 : hce_eval > 0 ? 2 : 1);
     }
     int king_pos = get_king_pos(position, color ^ 1);
     int king_file = get_file(king_pos);
     if ((king_file >= 4 && sacrifice_pattern == 3) ||
         (king_file < 4 && sacrifice_pattern == 3)) {
-      bonus2 += (thread_info.search_ply % 2) ? -25 : 25;
+      bonus2 += (thread_info.search_ply % 2) ? -SacKingFileBonus : SacKingFileBonus;
     }
     if (sacrifice_pattern == 4) {
-      bonus2 += (thread_info.search_ply % 2) ? -40 : 40;
+      bonus2 += (thread_info.search_ply % 2) ? -SacMultiBonus : SacMultiBonus;
     }
   }
 
@@ -882,13 +929,13 @@ int eval(BoardState &position, ThreadInfo &thread_info) {
   int center_control = 0;
   if (position.pieces_bb[PieceTypes::Knight] & position.colors_bb[color] &
       extended_center)
-    center_control += 15;
+    center_control += CenterKnight;
   if (position.pieces_bb[PieceTypes::Bishop] & position.colors_bb[color] &
       extended_center)
-    center_control += 12;
+    center_control += CenterBishop;
   if (position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color] &
       center_squares)
-    center_control += 10;
+    center_control += CenterPawn;
 
   int mobility_bonus = 0;
   if (thread_info.game_ply < 20) {
@@ -900,7 +947,7 @@ int eval(BoardState &position, ThreadInfo &thread_info) {
       int bonus_rank = color == Colors::White ? 3 : 4;
       if ((color == Colors::White && rank >= bonus_rank) ||
           (color == Colors::Black && rank <= bonus_rank)) {
-        mobility_bonus += 8;
+        mobility_bonus += MobilityEarlyQueenBonus;
       }
     }
   }
@@ -909,18 +956,34 @@ int eval(BoardState &position, ThreadInfo &thread_info) {
       position.pieces_bb[PieceTypes::Knight] & position.colors_bb[color];
   uint64_t own_bishops =
       position.pieces_bb[PieceTypes::Bishop] & position.colors_bb[color];
+  uint64_t own_rooks_mob =
+      position.pieces_bb[PieceTypes::Rook] & position.colors_bb[color];
+  uint64_t own_queens_mob =
+      position.pieces_bb[PieceTypes::Queen] & position.colors_bb[color];
+  uint64_t occ_mob = position.colors_bb[0] | position.colors_bb[1];
   while (own_knights) {
     int sq = pop_lsb(own_knights);
-    mobility_bonus +=
-        pop_count(KNIGHT_ATK_SAFE(sq) & ~position.colors_bb[color]) / 2;
+    int moves = pop_count(KNIGHT_ATK_SAFE(sq) & ~position.colors_bb[color]);
+    mobility_bonus += (moves - MobilityKnightBase);
   }
   while (own_bishops) {
     int sq = pop_lsb(own_bishops);
-    mobility_bonus +=
-        pop_count(get_bishop_attacks(sq, position.colors_bb[0] |
-                                             position.colors_bb[1]) &
-                  ~position.colors_bb[color]) /
-        4;
+    int moves = pop_count(get_bishop_attacks(sq, occ_mob) &
+                  ~position.colors_bb[color]);
+    mobility_bonus += (moves - MobilityBishopBase) * MobilityBishopMul / MobilityBishopDiv;
+  }
+  while (own_rooks_mob) {
+    int sq = pop_lsb(own_rooks_mob);
+    int moves = pop_count(get_rook_attacks(sq, occ_mob) &
+                  ~position.colors_bb[color]);
+    mobility_bonus += (moves - MobilityRookBase) * MobilityRookMul / MobilityRookDiv;
+  }
+  while (own_queens_mob) {
+    int sq = pop_lsb(own_queens_mob);
+    int moves = pop_count((get_rook_attacks(sq, occ_mob) |
+                           get_bishop_attacks(sq, occ_mob)) &
+                  ~position.colors_bb[color]);
+    mobility_bonus += (moves - MobilityQueenBase) / MobilityQueenDiv;
   }
 
   int positional_bonus = 0;
@@ -932,20 +995,7 @@ int eval(BoardState &position, ThreadInfo &thread_info) {
                                 home_ranks;
   int undeveloped_count = pop_count(undeveloped_pieces);
   if (thread_info.game_ply > 10 && undeveloped_count > 0) {
-    positional_bonus -= undeveloped_count * 5;
-  }
-
-  uint64_t own_rooks =
-      position.pieces_bb[PieceTypes::Rook] & position.colors_bb[color];
-  uint64_t pawns = position.pieces_bb[PieceTypes::Pawn];
-  while (own_rooks) {
-    int sq = pop_lsb(own_rooks);
-    int f = get_file(sq);
-    if (!(Files[f] & pawns)) {
-      positional_bonus += 12;
-    } else if (!(Files[f] & pawns & position.colors_bb[color])) {
-      positional_bonus += 6;
-    }
+    positional_bonus -= undeveloped_count * UndevelopedPenalty;
   }
 
   if (our_side) {
@@ -958,7 +1008,7 @@ int eval(BoardState &position, ThreadInfo &thread_info) {
     bonus5 = -positional_bonus;
   }
 
-  float multiplier = (800.0f + total_material / 24.0f) / 1024.0f;
+  float multiplier = (static_cast<float>(EvalMultBase) + total_material / static_cast<float>(EvalMultMatDiv)) / static_cast<float>(EvalMultNorm);
   float phase_factor = 1.0f;
   switch (thread_info.phase) {
   case PhaseTypes::Opening:
@@ -980,10 +1030,14 @@ int eval(BoardState &position, ThreadInfo &thread_info) {
     break;
   }
 
-  if (hce_eval > 0 && total_material > 4000) {
-    multiplier *= 1.15f * phase_factor;
-  } else if (hce_eval < -100 && total_material > 4000) {
-    multiplier *= 0.92f * phase_factor;
+  if (hce_eval > 0 && total_material > EvalWinningMatThreshold) {
+    multiplier *= (EvalWinningMul / 100.0f) * phase_factor;
+  } else if (hce_eval > 0 && total_material > EvalSlightWinMatThreshold) {
+    multiplier *= (EvalSlightWinMul / 100.0f) * phase_factor;
+  } else if (hce_eval < EvalLosingThreshold && total_material > EvalWinningMatThreshold) {
+    multiplier *= (EvalLosingMul / 100.0f) * phase_factor;
+  } else if (hce_eval < EvalSlightLoseThreshold && total_material > EvalWinningMatThreshold) {
+    multiplier *= (EvalSlightLoseMul / 100.0f) * phase_factor;
   } else {
     multiplier *= phase_factor;
   }
@@ -1511,10 +1565,12 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
     int material = material_eval(position);
 
     if (material < 0) {
-      draw_score += 50;
+      draw_score += DrawContemptMaterial;
     } else if (material > 0) {
-      draw_score -= 50;
+      draw_score -= DrawContemptMaterial;
     }
+
+    draw_score += Contempt;
 
     return draw_score;
   }
@@ -1647,7 +1703,7 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
       return (static_eval + beta) / 2;
     }
 
-    if (!is_pv && depth <= 3 && static_eval + 300 * depth < alpha) {
+    if (!is_pv && depth <= 3 && static_eval + RazorMargin * depth < alpha) {
       int razor_score = qsearch(alpha, beta, position, thread_info, TT);
       if (razor_score <= alpha)
         return razor_score;
@@ -1683,12 +1739,6 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
     }
   }
 
-  // Multi-Cut Pruning (MC)
-  // If at a cut-node, multiple moves beat beta, prune early
-  constexpr int MultiCutDepth = 5;
-  constexpr int MultiCutMoves = 3; // Check first N moves
-  constexpr int MultiCutCuts = 2;  // Need M cuts to prune
-
   if (!is_pv && !in_check && !singular_search && cutnode &&
       depth >= MultiCutDepth && tt_move != MoveNone) {
     int mc_cuts = 0;
@@ -1718,7 +1768,7 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
       if (mc_score >= beta) {
         mc_cuts++;
         if (mc_cuts >= MultiCutCuts) {
-          return beta; // Multi-cut prune
+          return beta;
         }
       }
     }
@@ -1729,7 +1779,7 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
     depth--;
   }
 
-  int p_beta = beta + 250;
+  int p_beta = beta + ProbCutMargin;
   if (depth >= 5 && abs(beta) < MateScore &&
       (!tt_hit || entry.depth + 4 <= depth || tt_score >= p_beta)) {
 
@@ -1874,8 +1924,8 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
         int to_sq = extract_to(m);
         int hist_bonus = std::clamp(16 + sacrifice_score / 8, 8, 128);
         if (thread_info.attack_mode) {
-          hist_bonus = hist_bonus * 6 / 5 + 6;
-          hist_bonus = std::min(hist_bonus, 192);
+          hist_bonus = hist_bonus * AttackModeHistMul / AttackModeHistDiv + AttackModeHistAdd;
+          hist_bonus = std::min(hist_bonus, AttackModeHistCap);
         }
         update_history(thread_info.HistoryScores[piece_from][to_sq],
                        hist_bonus);
@@ -1938,13 +1988,13 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
       if (!in_check && depth < FPDepth && picker.stage > Stages::Captures) {
         int fp_margin = FPMargin1 + FPMargin2 * depth;
         if (thread_info.attack_mode)
-          fp_margin += 60;
+          fp_margin += FPAttackModeBonus;
         if (static_eval + fp_margin < alpha) {
           skip = true;
         }
       }
 
-      if (!is_pv && !is_capture && depth < 4 && hist_score < -4096 * depth) {
+      if (!is_pv && !is_capture && depth < HistPruneDepth && hist_score < -HistPruneThreshold * depth) {
         skip = true;
       }
     }
@@ -1989,10 +2039,8 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
       }
     }
 
-    // History Extensions - extend for moves with very good history
-    constexpr int HistoryExtensionThreshold = 8000;
     if (extension == 0 && !is_capture && depth >= 4) {
-      if (hist_score > HistoryExtensionThreshold) {
+      if (hist_score > HistExtThreshold) {
         extension = 1;
       }
     }
@@ -2012,10 +2060,9 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
     if (depth >= LMRMinDepth && moves_played > is_pv) {
       int R = LMRTable[depth][moves_played];
       if (is_capture) {
-
         R /= 2;
       } else {
-        R -= hist_score / 10000;
+        R -= hist_score / 8192;
       }
 
       R -= is_pv;
@@ -2026,11 +2073,15 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
 
       R += cutnode;
 
-      R -= (attacks_square(moved_position, get_king_pos(position, color ^ 1),
-                           color) != 0);
+      bool gives_check = (attacks_square(moved_position,
+                           get_king_pos(position, color ^ 1), color) != 0);
+      R -= gives_check;
+
+      if (gives_check && depth >= 6)
+        R -= 1;
 
       if (thread_info.attack_mode && R > 0) {
-        R = std::max(0, R - 1);
+        R = std::max(0, R - 2);
       }
 
       R = std::clamp(R, 0, newdepth - 1);
@@ -2078,7 +2129,6 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
         alpha = score;
 
         if (score >= beta) {
-          // Still update PV before breaking - critical for mate moves
           thread_info.pv[pv_index] = best_move;
           break;
         }
@@ -2162,7 +2212,6 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
                                     their_piece, our_last, our_piece, ply4_last,
                                     ply4_piece);
 
-      // Update 2 killer moves - shift old to slot 1, new to slot 0
       if (best_move != thread_info.KillerMoves[ply][0]) {
         thread_info.KillerMoves[ply][1] = thread_info.KillerMoves[ply][0];
         thread_info.KillerMoves[ply][0] = best_move;
@@ -2461,18 +2510,18 @@ skip_tb_root:;
     ti.root_completed_depth = last_completed_depth;
 
     if (!ti.attack_mode) {
-      if (last_completed_depth >= 8 && root_eval >= ti.sacrifice_enter_cp &&
-          total_material >= 3200) {
+      if (last_completed_depth >= AttackModeEnterDepth && root_eval >= ti.sacrifice_enter_cp &&
+          total_material >= AttackModeMaterial) {
 
-        if (ti.prev_root_eval >= ti.sacrifice_enter_cp) {
+        if (ti.prev_root_eval >= ti.sacrifice_enter_cp - AttackModeEnterRelax) {
           ti.attack_mode = true;
         }
       }
     } else {
       bool drop =
-          (ti.prev_root_eval - root_eval) >= ti.sacrifice_drop_threshold;
-      if (root_eval <= ti.sacrifice_exit_cp ||
-          total_material < ti.endgame_material || drop) {
+          (ti.prev_root_eval - root_eval) >= ti.sacrifice_drop_threshold + AttackModeDropExtra;
+      if (root_eval <= ti.sacrifice_exit_cp - AttackModeExitRelax ||
+          total_material < ti.endgame_material - AttackModeMatExit || drop) {
         ti.attack_mode = false;
       }
     }
@@ -2641,11 +2690,9 @@ skip_tb_root:;
       if (abs(score) < MateScore - MaxSearchPly) {
         eval_string = "cp " + std::to_string(score * 100 / NormalizationFactor);
       } else if (score > 0) {
-        // Positive mate score: we can deliver mate
         int dist = (MateScore - score + 1) / 2;
         eval_string = "mate " + std::to_string(dist);
       } else {
-        // Negative mate score: we are getting mated
         int dist = (-MateScore - score) / 2;
         eval_string = "mate " + std::to_string(dist);
       }
@@ -2776,43 +2823,18 @@ finish:
 
     if (thread_info.pv[0] != MoveNone && thread_info.pv[1] != MoveNone) {
       thread_info.ponder_move = thread_info.pv[1];
-    } else {
-
+    } else if (thread_info.best_moves[0] != MoveNone) {
       auto temp_pos_uptr2 = std::make_unique<BoardState>(position);
       BoardState &temp_pos = *temp_pos_uptr2;
-      if (thread_info.best_moves[0] != MoveNone) {
-        make_move(temp_pos, thread_info.best_moves[0]);
+      make_move(temp_pos, thread_info.best_moves[0]);
 
-        std::array<Action, MaxActions> responses;
-        int num_responses = legal_movegen(temp_pos, responses.data());
-
-        if (num_responses > 0) {
-
-          Action best_response = responses[0];
-          int best_score = -1000;
-
-          for (int i = 0; i < std::min(num_responses, 5); i++) {
-            int score = 0;
-            if (is_cap(temp_pos, responses[i]))
-              score += 100;
-
-            int to_square = extract_to(responses[i]);
-            int file = to_square % 8;
-            int rank = to_square / 8;
-
-            if (file >= 3 && file <= 4 && rank >= 3 && rank <= 4)
-              score += 50;
-
-            if (score > best_score) {
-              best_score = score;
-              best_response = responses[i];
-            }
-          }
-
-          thread_info.ponder_move = best_response;
-        } else {
-          thread_info.ponder_move = MoveNone;
-        }
+      bool tt_hit = false;
+      TTEntry tt_entry = probe_entry(temp_pos.zobrist_key, tt_hit,
+                                     thread_info.searches, TT);
+      if (tt_hit && tt_entry.best_move != MoveNone) {
+        thread_info.ponder_move = tt_entry.best_move;
+      } else {
+        thread_info.ponder_move = MoveNone;
       }
     }
   }
@@ -2891,12 +2913,13 @@ finish:
           validate_ponder_move(pos, best, thread_info.ponder_move);
       thread_info.ponder_move = validated_ponder;
 
-      if (thread_info.pondering && validated_ponder != MoveNone) {
-        std::string tb_bm = internal_to_uci(pos, best);
-        std::string tb_pd = internal_to_uci(pos, validated_ponder);
+      std::string tb_bm = internal_to_uci(pos, best);
+      if (thread_info.use_ponder && validated_ponder != MoveNone) {
+        auto ponder_pos = std::make_unique<BoardState>(pos);
+        make_move(*ponder_pos, best);
+        std::string tb_pd = internal_to_uci(*ponder_pos, validated_ponder);
         safe_printf("bestmove %s ponder %s\n", tb_bm.c_str(), tb_pd.c_str());
       } else {
-        std::string tb_bm = internal_to_uci(pos, best);
         safe_printf("bestmove %s\n", tb_bm.c_str());
       }
       return;
@@ -3196,12 +3219,13 @@ finish:
           position, thread_info.best_moves[0], thread_info.ponder_move);
       thread_info.ponder_move = validated_ponder;
 
-      if (validated_ponder != MoveNone) {
-        std::string bm = internal_to_uci(position, thread_info.best_moves[0]);
-        std::string pd = internal_to_uci(position, validated_ponder);
+      std::string bm = internal_to_uci(position, thread_info.best_moves[0]);
+      if (thread_info.use_ponder && validated_ponder != MoveNone) {
+        auto ponder_pos = std::make_unique<BoardState>(position);
+        make_move(*ponder_pos, thread_info.best_moves[0]);
+        std::string pd = internal_to_uci(*ponder_pos, validated_ponder);
         safe_printf("bestmove %s ponder %s\n", bm.c_str(), pd.c_str());
       } else {
-        std::string bm = internal_to_uci(position, thread_info.best_moves[0]);
         safe_printf("bestmove %s\n", bm.c_str());
       }
     }

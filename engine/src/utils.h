@@ -96,7 +96,7 @@ struct ThreadInfoBase {
   MultiArray<int16_t, 14, 64> CapHistScores;
   MultiArray<int16_t, 2, 16384> PawnCorrHist;
   MultiArray<int16_t, 2, 2, 16384> NonPawnCorrHist;
-  MultiArray<Action, MaxSearchPly + 1, 2> KillerMoves; // 2 killer moves per ply
+  MultiArray<Action, MaxSearchPly + 1, 2> KillerMoves;
   MultiArray<Action, 14, 64> CounterMoves;
 
   uint8_t current_iter;
@@ -165,6 +165,7 @@ struct ThreadInfoBase {
 
   uint64_t max_nodes = 0;
 
+  bool use_ponder = true;
   bool pondering = false;
   Action ponder_move = MoveNone;
   bool ponder_hit = false;
@@ -864,19 +865,10 @@ void adjust_soft_limit(ThreadInfo &thread_info, uint64_t best_move_nodes,
     factor *= 1.5;
   }
 
-  // WDL Time Management Logic
-  // Convert Score to Win Probability
-  // Formula: P = 1 / (1 + e^(-A * score))
-  // A ~ -0.003
   double win_rate = 1.0 / (1.0 + std::exp(WDL_A * best_score));
 
-  // Closeness to 50% (Draw/Unclear)
-  // 0.5 -> 1.0 (Max extension)
-  // 0.0 or 1.0 -> 0.0 (No extension)
   double closeness = 1.0 - std::abs(win_rate - 0.5) * 2.0;
 
-  // Scale factor: Increase time if position is unclear/critical
-  // Bonus up to 50% extra time for perfectly unclear positions
   double wdl_factor = 1.0 + closeness * 0.5;
 
   double node_factor = 1.0;
@@ -887,10 +879,4 @@ void adjust_soft_limit(ThreadInfo &thread_info, uint64_t best_move_nodes,
   uint64_t new_time =
       thread_info.original_opt * factor * bm_factor * node_factor * wdl_factor;
   thread_info.opt_time = std::min<uint64_t>(new_time, thread_info.max_time);
-}
-
-inline uint64_t compute_move_overhead(uint64_t time_left,
-                                      uint64_t base_overhead) noexcept {
-  uint64_t dynamic = std::min<uint64_t>(50, time_left / 10);
-  return base_overhead + dynamic;
 }

@@ -9,7 +9,7 @@ namespace Generate {
 uint8_t GenQuiets = 0;
 uint8_t GenCaptures = 1;
 uint8_t GenAll = 2;
-} // namespace Generate
+} 
 
 constexpr int TTMoveScore = 10000000;
 constexpr int QueenPromoScore = 5000000;
@@ -134,29 +134,11 @@ int movegen(const Position &position, Move *move_list, uint64_t checkers,
                              uint64_t &mask) -> bool {
     if (!is_valid_square(from_sq) || !is_valid_square(to_sq) || from_sq >= 64 ||
         to_sq >= 64) {
-#ifndef NDEBUG
-      {
-        char _m_buf[128];
-        std::snprintf(_m_buf, sizeof(_m_buf),
-                      "[movegen] Invalid BetweenBBs indices %d -> %d in %s\n",
-                      from_sq, to_sq, context);
-        safe_print_cerr(std::string(_m_buf));
-      }
-#endif
       return false;
     }
     int idx_local = from_sq * 64 + to_sq;
     assert(idx_local >= 0 && idx_local < 4096);
     if (idx_local < 0 || idx_local >= 4096) {
-#ifndef NDEBUG
-      {
-        char _m_buf2[128];
-        std::snprintf(_m_buf2, sizeof(_m_buf2),
-                      "[movegen] BetweenBBs index overflow %d -> %d in %s\n",
-                      from_sq, to_sq, context);
-        safe_print_cerr(std::string(_m_buf2));
-      }
-#endif
       return false;
     }
     mask = BetweenBBs[static_cast<size_t>(from_sq)][static_cast<size_t>(to_sq)];
@@ -193,14 +175,6 @@ int movegen(const Position &position, Move *move_list, uint64_t checkers,
 
     int checker_sq = get_lsb(checkers);
     if (!is_valid_square(checker_sq)) {
-#ifndef NDEBUG
-      {
-        char _m_buf3[80];
-        std::snprintf(_m_buf3, sizeof(_m_buf3),
-                      "[movegen] Invalid checker square %d\n", checker_sq);
-        safe_print_cerr(std::string(_m_buf3));
-      }
-#endif
       return idx;
     }
     uint64_t between_mask = 0ULL;

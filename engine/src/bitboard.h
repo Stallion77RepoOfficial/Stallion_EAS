@@ -245,17 +245,6 @@ int pop_lsb(uint64_t &bb) {
 
 uint64_t get_lsb_bb(uint64_t bb) { return bb & int64_t(-bb); }
 
-void print_bb(uint64_t bb) {
-  safe_printf("\n");
-  for (int rank = 7; rank >= 0; rank--) {
-    for (int file = 0; file < 8; file++) {
-      int sq = file + (rank << 3);
-      safe_printf("%i ", bool(bb & (1ull << sq)));
-    }
-    safe_printf("\n");
-  }
-}
-
 uint64_t set_occ(int idx, int size, uint64_t mask) {
   uint64_t occ = 0;
 
@@ -524,32 +513,6 @@ void update_bb(Position &pos, int from_piece, int from, int to_piece, int to,
     pos.colors_bb[color ^ 1] -= (1ull << capture_sq);
     pos.pieces_bb[capt_type] -= (1ull << capture_sq);
   }
-}
-
-void print_bbs(const Position &pos) {
-  safe_printf("Pawn bitboard:\n");
-  print_bb(pos.pieces_bb[PieceTypes::Pawn]);
-
-  safe_printf("Knight bitboard:\n");
-  print_bb(pos.pieces_bb[PieceTypes::Knight]);
-
-  safe_printf("Bishop bitboard:\n");
-  print_bb(pos.pieces_bb[PieceTypes::Bishop]);
-
-  safe_printf("Rook bitboard:\n");
-  print_bb(pos.pieces_bb[PieceTypes::Rook]);
-
-  safe_printf("Queen bitboard:\n");
-  print_bb(pos.pieces_bb[PieceTypes::Queen]);
-
-  safe_printf("King bitboard:\n");
-  print_bb(pos.pieces_bb[PieceTypes::King]);
-
-  safe_printf("White Piece bitboard:\n");
-  print_bb(pos.colors_bb[Colors::White]);
-
-  safe_printf("Black Piece bitboard:\n");
-  print_bb(pos.colors_bb[Colors::Black]);
 }
 
 uint64_t shift_pawns(uint64_t bb, int dir) {

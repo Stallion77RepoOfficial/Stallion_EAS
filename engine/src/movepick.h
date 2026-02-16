@@ -7,7 +7,7 @@ constexpr uint8_t Captures = 2;
 constexpr uint8_t GenQuiets = 3;
 constexpr uint8_t Quiets = 4;
 constexpr uint8_t BadCaptures = 5;
-}; // namespace Stages
+};
 
 struct MovePicker {
   int see_threshold;
@@ -133,12 +133,11 @@ Action next_move(MovePicker &picker, BoardState &position,
       if (!is_valid_square(from) || !is_valid_square(to))
         continue;
 
-      // Check both killer moves
       if (move == thread_info.KillerMoves[thread_info.search_ply][0]) {
         picker.quiets.scores[i] = KillerMoveScore;
       } else if (move == thread_info.KillerMoves[thread_info.search_ply][1]) {
         picker.quiets.scores[i] =
-            KillerMoveScore - 1000; // Second killer slightly lower
+            KillerMoveScore - 1000;
       }
 
       else {

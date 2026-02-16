@@ -1,4 +1,3 @@
-
 #pragma once
 
 #include <cstdint>
@@ -13,7 +12,6 @@ constexpr size_t REGISTER_SIZE = 16;
 constexpr size_t REGISTER_SIZE = 0;
 #endif
 
- 
 struct DummyVec { int dummy = 0; };
 
 auto inline int16_load(auto data) {

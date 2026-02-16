@@ -5,17 +5,16 @@
 #include <cstring>
 #include <sstream>
 
-// struct BoardState;
 struct ThreadInfo;
 
 bool position_integrity_check(const BoardState &position);
 
 int16_t total_mat(const BoardState &position) {
-  int m = (position.material_count[0] + position.material_count[1]) * 100 +
-          (position.material_count[2] + position.material_count[3]) * 300 +
-          (position.material_count[4] + position.material_count[5]) * 300 +
-          (position.material_count[6] + position.material_count[7]) * 500 +
-          (position.material_count[8] + position.material_count[9]) * 900;
+  int m = (position.material_count[0] + position.material_count[1]) * MaterialValues[PieceTypes::Pawn] +
+          (position.material_count[2] + position.material_count[3]) * MaterialValues[PieceTypes::Knight] +
+          (position.material_count[4] + position.material_count[5]) * MaterialValues[PieceTypes::Bishop] +
+          (position.material_count[6] + position.material_count[7]) * MaterialValues[PieceTypes::Rook] +
+          (position.material_count[8] + position.material_count[9]) * MaterialValues[PieceTypes::Queen];
 
   return m;
 }

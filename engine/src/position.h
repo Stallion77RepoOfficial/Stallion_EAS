@@ -10,11 +10,16 @@ struct ThreadInfo;
 bool position_integrity_check(const BoardState &position);
 
 int16_t total_mat(const BoardState &position) {
-  int m = (position.material_count[0] + position.material_count[1]) * MaterialValues[PieceTypes::Pawn] +
-          (position.material_count[2] + position.material_count[3]) * MaterialValues[PieceTypes::Knight] +
-          (position.material_count[4] + position.material_count[5]) * MaterialValues[PieceTypes::Bishop] +
-          (position.material_count[6] + position.material_count[7]) * MaterialValues[PieceTypes::Rook] +
-          (position.material_count[8] + position.material_count[9]) * MaterialValues[PieceTypes::Queen];
+  int m = (position.material_count[0] + position.material_count[1]) *
+              MaterialValues[PieceTypes::Pawn] +
+          (position.material_count[2] + position.material_count[3]) *
+              MaterialValues[PieceTypes::Knight] +
+          (position.material_count[4] + position.material_count[5]) *
+              MaterialValues[PieceTypes::Bishop] +
+          (position.material_count[6] + position.material_count[7]) *
+              MaterialValues[PieceTypes::Rook] +
+          (position.material_count[8] + position.material_count[9]) *
+              MaterialValues[PieceTypes::Queen];
 
   return m;
 }
@@ -60,51 +65,14 @@ void print_board(BoardState position) {
     safe_printf("+---+---+---+---+---+---+---+---+\n");
     for (int n = i; n != i + 8; n++) {
       safe_printf("| ");
-      if (position.board[n] == Pieces::Blank) {
+      if (position.board[n] == Pieces::Blank)
         safe_printf("  ");
-      } else {
-
-        switch (position.board[n]) {
-        case Pieces::WPawn:
-          safe_printf("P ");
-          break;
-        case Pieces::WKnight:
-          safe_printf("N ");
-          break;
-        case Pieces::WBishop:
-          safe_printf("B ");
-          break;
-        case Pieces::WRook:
-          safe_printf("R ");
-          break;
-        case Pieces::WQueen:
-          safe_printf("Q ");
-          break;
-        case Pieces::WKing:
-          safe_printf("K ");
-          break;
-        case Pieces::BPawn:
-          safe_printf("p ");
-          break;
-        case Pieces::BKnight:
-          safe_printf("n ");
-          break;
-        case Pieces::BBishop:
-          safe_printf("b ");
-          break;
-        case Pieces::BRook:
-          safe_printf("r ");
-          break;
-        case Pieces::BQueen:
-          safe_printf("q ");
-          break;
-        case Pieces::BKing:
-          safe_printf("k ");
-          break;
-        default:
-          safe_printf("# ");
-        }
-      }
+      else if (position.board[n] >= Pieces::WPawn &&
+               position.board[n] <= Pieces::BKing) {
+        static const char piece_display[] = "P N B R Q K p n b r q k ";
+        safe_printf("%.2s", piece_display + (position.board[n] - 2) * 2);
+      } else
+        safe_printf("# ");
     }
     safe_printf("|\n");
     i -= 8;
@@ -218,11 +186,8 @@ void set_board(BoardState &position, ThreadInfo &thread_info, std::string f) {
   std::string castling_rights;
   fen >> castling_rights;
 
-  for (int i = 0; i < 2; i++) {
-    for (int n = 0; n < 2; n++) {
-      position.castling_squares[i][n] = SquareNone;
-    }
-  }
+  for (auto &row : position.castling_squares)
+    row.fill(SquareNone);
 
   for (char right : castling_rights) {
     if (right == '-') {
@@ -237,11 +202,9 @@ void set_board(BoardState &position, ThreadInfo &thread_info, std::string f) {
     int base = 56 * color;
     int king_pos = get_king_pos(position, color);
 
-    if (right >= 'a' && right <= 'h') {
-
+    if (right >= 'a' && right <= 'h')
       square = (right - 'a') + base;
-    } else if (right == 'k') {
-
+    else if (right == 'k') {
       if (thread_data.is_frc) {
 
         square = base + 7;
@@ -251,11 +214,9 @@ void set_board(BoardState &position, ThreadInfo &thread_info, std::string f) {
             break;
           }
         }
-      } else {
+      } else
         square = base + 7;
-      }
     } else if (right == 'q') {
-
       if (thread_data.is_frc) {
 
         square = base;
@@ -265,13 +226,10 @@ void set_board(BoardState &position, ThreadInfo &thread_info, std::string f) {
             break;
           }
         }
-      } else {
+      } else
         square = base;
-      }
-    } else {
-
+    } else
       continue;
-    }
 
     if (!is_valid_square(square))
       continue;
@@ -297,7 +255,8 @@ void set_board(BoardState &position, ThreadInfo &thread_info, std::string f) {
     return;
   }
 
-  position.halfmoves = halfmoves;
+  position.halfmoves =
+      static_cast<uint8_t>(std::min(255, std::max(0, halfmoves)));
 }
 
 std::string export_fen(const BoardState &position,
@@ -317,51 +276,15 @@ std::string export_fen(const BoardState &position,
     }
 
     else if (position.board[pos] != Pieces::Blank) {
-
-      switch (position.board[pos]) {
-
-      case Pieces::WPawn:
-        fen += "P";
-        break;
-      case Pieces::WKnight:
-        fen += "N";
-        break;
-      case Pieces::WBishop:
-        fen += "B";
-        break;
-      case Pieces::WRook:
-        fen += "R";
-        break;
-      case Pieces::WQueen:
-        fen += "Q";
-        break;
-      case Pieces::WKing:
-        fen += "K";
-        break;
-      case Pieces::BPawn:
-        fen += "p";
-        break;
-      case Pieces::BKnight:
-        fen += "n";
-        break;
-      case Pieces::BBishop:
-        fen += "b";
-        break;
-      case Pieces::BRook:
-        fen += "r";
-        break;
-      case Pieces::BQueen:
-        fen += "q";
-        break;
-      case Pieces::BKing:
-        fen += "k";
-        break;
-      default:
+      static const char fen_piece[] = "  PNBRQKpnbrqk";
+      int pc = position.board[pos];
+      if (pc >= Pieces::WPawn && pc <= Pieces::BKing)
+        fen += fen_piece[pc];
+      else {
         safe_print_cerr(std::string("Error parsing board!"));
         print_board(position);
         std::exit(1);
       }
-
       subtracted = false;
     }
 
@@ -752,7 +675,8 @@ void make_move(BoardState &position, Action move) {
   safe_TT_prefetch(temp_hash);
 }
 
-bool is_pseudo_legal(const BoardState &position, Action move, uint64_t checkers) {
+bool is_pseudo_legal(const BoardState &position, Action move,
+                     uint64_t checkers) {
   if (move == MoveNone) {
     return false;
   }
@@ -798,7 +722,7 @@ bool is_pseudo_legal(const BoardState &position, Action move, uint64_t checkers)
     castle_bb &= ~(1ull << from) & ~(1ull << rook_square);
 
     return (!checkers && position.castling_squares[color][side] != SquareNone &&
-            !castle_bb);
+            !(occ & castle_bb));
   }
 
   if (type == MoveTypes::EnPassant) {
@@ -835,9 +759,11 @@ bool is_pseudo_legal(const BoardState &position, Action move, uint64_t checkers)
     uint64_t legal_to = 0;
 
     int dir = color == Colors::White ? Directions::North : Directions::South;
+    uint64_t start_rank =
+        color == Colors::White ? Ranks[2] : Ranks[5];
 
     legal_to |= (shift_pawns(square, dir) & empty_squares);
-    legal_to |= (shift_pawns(legal_to & Ranks[2], dir) & empty_squares);
+    legal_to |= (shift_pawns(legal_to & start_rank, dir) & empty_squares);
 
     legal_to |= (((shift_pawns(square & ~Files[0], dir - 1)) |
                   (shift_pawns(square & ~Files[7], dir + 1))) &
@@ -961,10 +887,6 @@ bool position_integrity_check(const BoardState &position) {
   }
 
   if (position.color != Colors::White && position.color != Colors::Black) {
-    return false;
-  }
-
-  if (position.halfmoves < 0 || position.halfmoves > 100) {
     return false;
   }
 

@@ -52,20 +52,24 @@ Action next_move(MovePicker &picker, BoardState &position,
       if (!is_valid_square(from) || !is_valid_square(to))
         continue;
 
-      if (extract_promo(move) == Promos::Queen) {
-        picker.captures.scores[i] = QueenPromoScore;
-      }
-
-      else {
+      if (extract_type(move) == MoveTypes::Promotion) {
+        if (extract_promo(move) == Promos::Queen) {
+          picker.captures.scores[i] = QueenPromoScore;
+        } else {
+          int from_piece = position.board[from];
+          picker.captures.scores[i] =
+              GoodCaptureBaseScore + evaluate_promotion_tactics(position, move);
+          if (from_piece >= Pieces::WPawn && from_piece <= Pieces::BKing) {
+            picker.captures.scores[i] +=
+                thread_info.CapHistScores[from_piece][to];
+          }
+        }
+      } else {
         int from_piece = position.board[from], to_piece = position.board[to];
-
         picker.captures.scores[i] = GoodCaptureBaseScore +
                                     SeeValues[get_piece_type(to_piece)] * 100 -
                                     SeeValues[get_piece_type(from_piece)] / 100;
-
-        int piece = position.board[from], to_sq = to;
-
-        picker.captures.scores[i] += thread_info.CapHistScores[piece][to_sq];
+        picker.captures.scores[i] += thread_info.CapHistScores[from_piece][to];
       }
     }
 

@@ -11,14 +11,7 @@
 namespace {
 
 std::vector<std::string_view> collect_args(int argc, char* argv[]) {
-    std::vector<std::string_view> args;
-    if (argc > 0) {
-        args.reserve(static_cast<size_t>(argc));
-    }
-    for (int i = 0; i < argc; ++i) {
-        args.emplace_back(argv[i]);
-    }
-    return args;
+    return std::vector<std::string_view>(argv, argv + argc);
 }
 
 std::optional<int> handle_cli_mode(const std::vector<std::string_view>& args,

@@ -26,33 +26,40 @@ struct CreateParam {
 #define TUNE_PARAM(name, value, min, max)                                      \
   CreateParam name(#name, value, min, max);
 
-TUNE_PARAM(NMPMinDepth, 2, 1, 5);
-TUNE_PARAM(NMPBase, 4, 1, 5);
-TUNE_PARAM(NMPDepthDiv, 3, 3, 9);
-TUNE_PARAM(NMPEvalDiv, 85, 50, 300);
-TUNE_PARAM(RFPMargin, 95, 50, 150);
-TUNE_PARAM(RFPMaxDepth, 9, 6, 12);
+TUNE_PARAM(NMPMinDepth, 1, 1, 5);
+TUNE_PARAM(NMPBase, 5, 1, 5);
+TUNE_PARAM(NMPDepthDiv, 9, 3, 9);
+TUNE_PARAM(NMPEvalDiv, 209, 50, 300);
+TUNE_PARAM(RFPMargin, 70, 50, 150);
+TUNE_PARAM(RFPMaxDepth, 8, 6, 12);
 TUNE_PARAM(LMRBase, 4, 1, 8);
-TUNE_PARAM(LMRRatio, 22, 15, 30);
-TUNE_PARAM(LMPBase, 3, 1, 5);
-TUNE_PARAM(LMPDepth, 7, 3, 7);
-TUNE_PARAM(SEDepth, 6, 4, 10);
-TUNE_PARAM(SEDoubleExtMargin, 22, 10, 30);
+TUNE_PARAM(LMRRatio, 16, 15, 30);
+TUNE_PARAM(LMPBase, 4, 1, 5);
+TUNE_PARAM(LMPDepth, 5, 3, 7);
+TUNE_PARAM(SEDepth, 7, 4, 10);
+TUNE_PARAM(SEDoubleExtMargin, 14, 10, 30);
 TUNE_PARAM(FPDepth, 8, 5, 11);
-TUNE_PARAM(FPMargin1, 175, 50, 200);
-TUNE_PARAM(FPMargin2, 225, 75, 300);
-TUNE_PARAM(IIRMinDepth, 3, 1, 5);
-TUNE_PARAM(SeePruningDepth, 8, 5, 11);
-TUNE_PARAM(SeePruningQuietMargin, -60, -110, -50);
-TUNE_PARAM(SeePruningNoisyMargin, -18, -50, -10);
-TUNE_PARAM(HistBonus, 310, 200, 400);
-TUNE_PARAM(HistMax, 2800, 1500, 3500);
-TUNE_PARAM(CorrWeight, 25, 10, 40);
-TUNE_PARAM(LMRMinDepth, 2, 2, 6);
-TUNE_PARAM(AspStartWindow, 16, 10, 30);
-TUNE_PARAM(NodeTmFactor1, 155, 100, 200);
-TUNE_PARAM(NodeTmFactor2, 185, 125, 225);
-TUNE_PARAM(BmFactor1, 160, 100, 200);
+TUNE_PARAM(FPMargin1, 190, 50, 200);
+TUNE_PARAM(FPMargin2, 262, 75, 300);
+TUNE_PARAM(IIRMinDepth, 4, 1, 5);
+TUNE_PARAM(SeePruningDepth, 7, 5, 11);
+TUNE_PARAM(SeePruningQuietMargin, -99, -110, -50);
+TUNE_PARAM(SeePruningNoisyMargin, -14, -50, -10);
+TUNE_PARAM(HistBonus, 251, 200, 400);
+TUNE_PARAM(HistMax, 2425, 1500, 3500);
+TUNE_PARAM(CorrWeight, 35, 10, 40);
+TUNE_PARAM(LMRMinDepth, 5, 2, 6);
+TUNE_PARAM(AspStartWindow, 15, 10, 30);
+TUNE_PARAM(NodeTmFactor1, 102, 100, 200);
+TUNE_PARAM(NodeTmFactor2, 134, 125, 225);
+TUNE_PARAM(BmFactor1, 109, 100, 200);
+TUNE_PARAM(RazorMargin, 140, 100, 500);
+TUNE_PARAM(ProbCutMargin, 191, 100, 500);
+TUNE_PARAM(MultiCutDepth, 4, 3, 10);
+TUNE_PARAM(MultiCutMoves, 6, 2, 8);
+TUNE_PARAM(MultiCutCuts, 3, 1, 5);
+TUNE_PARAM(HistPruneDepth, 4, 2, 8);
+TUNE_PARAM(HistPruneThreshold, 6196, 1000, 8000);
 
 int MaterialBasis[6] = {0, 210, 800, 840, 1300, 2600};
 
@@ -167,13 +174,6 @@ int SacMultiBonus = 40;
 int SacMaterialThreshold = 3000;
 
 int DrawContemptMaterial = 60;
-int RazorMargin = 250;
-int HistPruneDepth = 5;
-int HistPruneThreshold = 3500;
-int ProbCutMargin = 220;
-int MultiCutDepth = 5;
-int MultiCutMoves = 3;
-int MultiCutCuts = 2;
 int HistExtThreshold = 7000;
 int FPAttackModeBonus = 80;
 
@@ -207,8 +207,6 @@ void init_LMR() {
       double di = std::log(1.0 + static_cast<double>(i));
       double dn = std::log(1.0 + static_cast<double>(n));
       double val = (LMRBase / 10.0) + (di * dn) / (LMRRatio / 10.0);
-      if (val < 0.0)
-        val = 0.0;
       LMRTable[i][n] = static_cast<int>(val + 0.5);
     }
   }

@@ -36,12 +36,6 @@ int probe_wdl_tb(BoardState &position, const ThreadInfo &thread_info) {
   if (!tb_initialized || !thread_info.use_syzygy)
     return ScoreNone;
 
-  if (thread_info.syzygy_probe_depth > 0 && thread_info.max_iter_depth > 0) {
-    int remaining = thread_info.max_iter_depth - thread_info.search_ply;
-    if (remaining < thread_info.syzygy_probe_depth)
-      return ScoreNone;
-  }
-
   int material_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
   int compiled_limit = TB_LARGEST ? (int)TB_LARGEST : 7;
   if (material_count > compiled_limit)
@@ -198,6 +192,34 @@ bool has_non_pawn_material(const BoardState &position, int color) {
           position.material_count[s_indx + 2] ||
           position.material_count[s_indx + 4] ||
           position.material_count[s_indx + 6]);
+}
+
+int non_pawn_piece_count(const BoardState &position) {
+  return pop_count(position.pieces_bb[PieceTypes::Knight] |
+                   position.pieces_bb[PieceTypes::Bishop] |
+                   position.pieces_bb[PieceTypes::Rook] |
+                   position.pieces_bb[PieceTypes::Queen]);
+}
+
+bool is_endgame_reduction_zone(const BoardState &position,
+                               const ThreadInfo &thread_info,
+                               int total_material = -1) {
+  if (total_material < 0) {
+    total_material = total_mat(position);
+  }
+  return total_material <= thread_info.endgame_material;
+}
+
+bool is_zugzwang_prone(const BoardState &position, const ThreadInfo &thread_info,
+                       int total_material = -1) {
+  if (total_material < 0) {
+    total_material = total_mat(position);
+  }
+  int non_pawn = non_pawn_piece_count(position);
+  int pawns = pop_count(position.pieces_bb[PieceTypes::Pawn]);
+  return non_pawn == 0 ||
+         (non_pawn <= 2 &&
+          total_material <= (thread_info.endgame_material + 500) && pawns <= 6);
 }
 
 int16_t total_mat_color(const BoardState &position, int color) {
@@ -1158,82 +1180,30 @@ bool is_draw(const BoardState &position, ThreadInfo &thread_info) {
   if (!is_valid_square(king_sq)) {
     return false;
   }
+
+  // Exact stalemate detection: no legal moves while not in check.
   if (!attacks_square(position, king_sq, position.color ^ 1)) {
-
-    uint64_t king_moves =
-        KING_ATK_SAFE(king_sq) & ~position.colors_bb[position.color];
-    bool has_safe_move = false;
-    while (king_moves && !has_safe_move) {
-      int to_sq = pop_lsb(king_moves);
-      if (!attacks_square(position, to_sq, position.color ^ 1)) {
-        has_safe_move = true;
-      }
-    }
-    if (!has_safe_move) {
-
-      std::array<Action, 32> limited_moves{};
-      int move_count = 0;
-
-      uint64_t king_attacks =
-          KING_ATK_SAFE(king_sq) & ~position.colors_bb[position.color];
-      while (king_attacks && move_count < 32) {
-        int to = pop_lsb(king_attacks);
-        if (!attacks_square(position, to, position.color ^ 1)) {
-          limited_moves[move_count++] =
-              pack_move(king_sq, to, MoveTypes::Normal);
-        }
-      }
-
-      if (move_count == 0) {
-        for (int pt = PieceTypes::Pawn;
-             pt <= PieceTypes::Queen && move_count < 32; ++pt) {
-          uint64_t pieces =
-              position.pieces_bb[pt] & position.colors_bb[position.color];
-          if (pieces) {
-            int from = get_lsb(pieces);
-
-            uint64_t attacks = 0;
-            if (pt == PieceTypes::Pawn) {
-              attacks = PAWN_ATK_SAFE(position.color, from) &
-                        position.colors_bb[position.color ^ 1];
-            } else if (pt == PieceTypes::Knight) {
-              attacks = KNIGHT_ATK_SAFE(from);
-            } else if (pt == PieceTypes::Bishop || pt == PieceTypes::Rook ||
-                       pt == PieceTypes::Queen) {
-              attacks = get_bishop_attacks(from, position.colors_bb[0] |
-                                                     position.colors_bb[1]);
-              if (pt == PieceTypes::Rook || pt == PieceTypes::Queen) {
-                attacks |= get_rook_attacks(from, position.colors_bb[0] |
-                                                      position.colors_bb[1]);
-              }
-            } else if (pt == PieceTypes::King) {
-              attacks = KING_ATK_SAFE(from);
-            }
-            attacks &= ~position.colors_bb[position.color];
-
-            while (attacks && move_count < 32) {
-              int to = pop_lsb(attacks);
-              limited_moves[move_count++] =
-                  pack_move(from, to, MoveTypes::Normal);
-            }
-          }
-        }
-      }
-
-      bool has_legal_move = false;
-      for (int i = 0; i < move_count && !has_legal_move; ++i) {
-        if (is_legal(position, limited_moves[i])) {
-          has_legal_move = true;
-        }
-      }
-
-      if (!has_legal_move) {
-        return true;
-      }
+    std::array<Action, MaxActions> legal_moves{};
+    if (legal_movegen(position, legal_moves.data()) == 0) {
+      return true;
     }
   }
 
   return false;
+}
+
+inline int draw_score(const BoardState &position, ThreadInfo &thread_info) {
+  int score = 1 - (thread_info.nodes.load() & 3);
+  int material = material_eval(position);
+
+  if (material < 0) {
+    score += DrawContemptMaterial;
+  } else if (material > 0) {
+    score -= DrawContemptMaterial;
+  }
+
+  score += Contempt;
+  return score;
 }
 
 int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread_info,
@@ -1265,7 +1235,7 @@ int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread_info,
   }
 
   if (ply && is_draw(position, thread_info)) {
-    return eval_now(position);
+    return draw_score(position, thread_info);
   }
 
   MoveInfo legal_probe;
@@ -1492,6 +1462,7 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
            ThreadInfo &thread_info, std::vector<TTBucket> &TT) {
 
   StateRecord *ss = &(thread_info.game_hist[thread_info.game_ply]);
+  constexpr int StackSafeSearchPly = 80;
 
   if (!thread_info.search_ply) {
     thread_info.current_iter = depth;
@@ -1505,25 +1476,19 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
     thread_info.seldepth = ply;
   }
 
+  // Keep recursion stack within a safe bound for worker-thread stack sizes.
+  if (ply >= StackSafeSearchPly) {
+    return correct_eval(position, thread_info, eval(position, thread_info));
+  }
+  depth = std::min(depth, StackSafeSearchPly - ply);
+
   if (out_of_time(thread_info) || ply >= MaxSearchPly - 1) {
 
     return correct_eval(position, thread_info, eval(position, thread_info));
   }
 
   if (ply && is_draw(position, thread_info)) {
-    int draw_score = 1 - (thread_info.nodes.load() & 3);
-
-    int material = material_eval(position);
-
-    if (material < 0) {
-      draw_score += DrawContemptMaterial;
-    } else if (material > 0) {
-      draw_score -= DrawContemptMaterial;
-    }
-
-    draw_score += Contempt;
-
-    return draw_score;
+    return draw_score(position, thread_info);
   }
 
   if (thread_info.max_depth > 0 && ply >= thread_info.max_depth) {
@@ -1587,6 +1552,11 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
 
   uint64_t in_check =
       attacks_square(position, get_king_pos(position, color), color ^ 1);
+  int total_material_here = total_mat(position);
+  bool endgame_node =
+      is_endgame_reduction_zone(position, thread_info, total_material_here);
+  bool zugzwang_prone =
+      is_zugzwang_prone(position, thread_info, total_material_here);
 
   int32_t static_eval;
   int32_t raw_eval;
@@ -1649,18 +1619,19 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
       }
     }
 
-    if (depth <= RFPMaxDepth &&
+    if (!endgame_node && depth <= RFPMaxDepth &&
         static_eval - RFPMargin * (depth - improving) >= beta) {
       return (static_eval + beta) / 2;
     }
 
-    if (!is_pv && depth <= 3 && static_eval + RazorMargin * depth < alpha) {
+    if (!endgame_node && !is_pv && depth <= 3 &&
+        static_eval + RazorMargin * depth < alpha) {
       int razor_score = qsearch(alpha, beta, position, thread_info, TT);
       if (razor_score <= alpha)
         return razor_score;
     }
 
-    if (static_eval >= beta && depth >= NMPMinDepth &&
+    if (!zugzwang_prone && static_eval >= beta && depth >= NMPMinDepth &&
         has_non_pawn_material(position, color) && thread_info.game_ply > 0 &&
         (ss - 1)->played_move != MoveNone) {
 
@@ -1731,7 +1702,7 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
   }
 
   int p_beta = beta + ProbCutMargin;
-  if (depth >= 5 && abs(beta) < MateScore &&
+  if (!endgame_node && depth >= 5 && abs(beta) < MateScore &&
       (!tt_hit || entry.depth + 4 <= depth || tt_score >= p_beta)) {
 
     int threshold = p_beta - static_eval;
@@ -1937,12 +1908,13 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
     is_capture = is_cap(position, move);
     if (!is_capture && !is_pv && best_score > -MateScore) {
 
-      if (depth < LMPDepth &&
+      if (!endgame_node && depth < LMPDepth &&
           moves_played >= LMPBase + depth * depth / (2 - improving)) {
         skip = true;
       }
 
-      if (!in_check && depth < FPDepth && picker.stage > Stages::Captures) {
+      if (!endgame_node && !in_check && depth < FPDepth &&
+          picker.stage > Stages::Captures) {
         int fp_margin = FPMargin1 + FPMargin2 * depth;
         if (thread_info.attack_mode)
           fp_margin += FPAttackModeBonus;
@@ -1951,13 +1923,14 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
         }
       }
 
-      if (!is_pv && !is_capture && depth < HistPruneDepth &&
+      if (!endgame_node && !is_pv && !is_capture && depth < HistPruneDepth &&
           hist_score < -HistPruneThreshold * depth) {
         skip = true;
       }
     }
 
-    if (!root && best_score > -MateScore && depth < SeePruningDepth) {
+    if (!root && best_score > -MateScore && depth < SeePruningDepth &&
+        (!endgame_node || is_capture)) {
 
       int margin =
           is_capture ? SeePruningQuietMargin : (depth * SeePruningNoisyMargin);
@@ -2003,6 +1976,21 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
       }
     }
 
+    if (extension == 0 && !is_capture && endgame_node && depth >= 2) {
+      int from_sq = extract_from(move);
+      int to_sq = extract_to(move);
+      int moving_piece = position.board[from_sq];
+      if (is_valid_square(to_sq) &&
+          get_piece_type(moving_piece) == PieceTypes::Pawn) {
+        int rel_rank =
+            (position.color == Colors::White) ? get_rank(to_sq)
+                                              : (7 - get_rank(to_sq));
+        if (rel_rank >= 5) {
+          extension = 1;
+        }
+      }
+    }
+
     BoardState moved_position = position;
     make_move(moved_position, move);
 
@@ -2013,7 +2001,21 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
     ss_push(position, thread_info, move);
 
     bool full_search = false;
-    int newdepth = std::min(depth - 1 + extension, 126);
+    if (extension > 0) {
+      constexpr int MaxExtensionBudget = 10;
+      int remaining_extension_budget =
+          thread_info.current_iter + MaxExtensionBudget - (ply + depth);
+      if (remaining_extension_budget <= 0) {
+        extension = 0;
+      } else {
+        extension = std::min(extension, remaining_extension_budget);
+      }
+    }
+    auto clamp_child_depth = [&](int child_depth) {
+      int max_child_depth = std::max(0, depth - 1);
+      return std::clamp(child_depth, 0, max_child_depth);
+    };
+    int newdepth = clamp_child_depth(std::min(depth - 1 + extension, 126));
 
     if (depth >= LMRMinDepth && moves_played > is_pv) {
       int R = LMRTable[depth][moves_played];
@@ -2043,6 +2045,13 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
         R = std::max(0, R - 2);
       }
 
+      if (endgame_node && R > 0) {
+        R = std::max(0, R - 1);
+        if (zugzwang_prone && R > 0) {
+          R = std::max(0, R - 1);
+        }
+      }
+
       R = std::clamp(R, 0, newdepth - 1);
 
       score = -search<false>(-alpha - 1, -alpha, newdepth - R, true,
@@ -2051,6 +2060,7 @@ int search(int alpha, int beta, int depth, bool cutnode, BoardState &position,
         full_search = R > 0;
         newdepth += (score > (best_score + 60 + newdepth * 2));
         newdepth -= (score < best_score + newdepth && !root);
+        newdepth = clamp_child_depth(newdepth);
       }
     } else {
       full_search = moves_played || !is_pv;

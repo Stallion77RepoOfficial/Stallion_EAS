@@ -26,6 +26,10 @@ void init_picker(MovePicker &picker, BoardState &position, int threshold,
   picker.see_threshold = threshold;
   picker.stage = Stages::TT;
   picker.checkers = checkers;
+  picker.idx = 0;
+  picker.captures.len = 0;
+  picker.quiets.len = 0;
+  picker.bad_captures.len = 0;
   picker.ss = ss;
 }
 

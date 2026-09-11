@@ -1,3 +1,4 @@
+#pragma once
 #include "movegen.h"
 
 namespace Stages {
@@ -7,7 +8,7 @@ constexpr uint8_t Captures = 2;
 constexpr uint8_t GenQuiets = 3;
 constexpr uint8_t Quiets = 4;
 constexpr uint8_t BadCaptures = 5;
-};
+}
 
 struct MovePicker {
   int see_threshold;
@@ -21,8 +22,9 @@ struct MovePicker {
   StateRecord *ss;
 };
 
-void init_picker(MovePicker &picker, BoardState &position, int threshold,
-                 uint64_t checkers, StateRecord *ss) {
+inline void init_picker(MovePicker &picker, const Position &position, int threshold,
+                        uint64_t checkers, StateRecord *ss) {
+  (void)position;
   picker.see_threshold = threshold;
   picker.stage = Stages::TT;
   picker.checkers = checkers;
@@ -33,8 +35,8 @@ void init_picker(MovePicker &picker, BoardState &position, int threshold,
   picker.ss = ss;
 }
 
-Action next_move(MovePicker &picker, BoardState &position,
-                 ThreadInfo &thread_info, Action tt_move, bool skip_quiets) {
+inline Action next_move(MovePicker &picker, const Position &position,
+                        ThreadInfo &thread_info, Action tt_move, bool skip_quiets) {
 
   if (picker.stage == Stages::TT) {
     picker.stage++;
@@ -69,7 +71,10 @@ Action next_move(MovePicker &picker, BoardState &position,
           }
         }
       } else {
-        int from_piece = position.board[from], to_piece = position.board[to];
+        int from_piece = position.board[from];
+        int to_piece = (extract_type(move) == MoveTypes::EnPassant)
+                           ? (position.color == Colors::White ? Pieces::BPawn : Pieces::WPawn)
+                           : position.board[to];
         picker.captures.scores[i] = GoodCaptureBaseScore +
                                     SeeValues[get_piece_type(to_piece)] * 100 -
                                     SeeValues[get_piece_type(from_piece)] / 100;
@@ -100,37 +105,43 @@ Action next_move(MovePicker &picker, BoardState &position,
     picker.quiets.len = movegen(position, picker.quiets.moves.data(),
                                 picker.checkers, Generate::GenQuiets);
 
-    int their_last = MoveNone;
+    int their_last = SquareNone;
     int their_piece = Pieces::Blank;
 
-    int our_last = MoveNone;
+    int our_last = SquareNone;
     int our_piece = Pieces::Blank;
 
-    int ply4last = MoveNone;
+    int ply4last = SquareNone;
     int ply4piece = Pieces::Blank;
 
     if (thread_info.game_ply >= 1) {
       int idx = thread_info.game_ply - 1;
       if (idx >= 0 && idx < MaxGameLen) {
-        StateRecord &h1 = thread_info.game_hist[idx];
-        their_last = extract_to(h1.played_move);
-        their_piece = h1.piece_moved;
+        const StateRecord &h1 = thread_info.game_hist[idx];
+        if (h1.played_move != MoveNone) {
+          their_last = extract_to(h1.played_move);
+          their_piece = h1.piece_moved;
+        }
       }
     }
     if (thread_info.game_ply >= 2) {
       int idx = thread_info.game_ply - 2;
       if (idx >= 0 && idx < MaxGameLen) {
-        StateRecord &h2 = thread_info.game_hist[idx];
-        our_last = extract_to(h2.played_move);
-        our_piece = h2.piece_moved;
+        const StateRecord &h2 = thread_info.game_hist[idx];
+        if (h2.played_move != MoveNone) {
+          our_last = extract_to(h2.played_move);
+          our_piece = h2.piece_moved;
+        }
       }
     }
     if (thread_info.game_ply >= 4) {
       int idx = thread_info.game_ply - 4;
       if (idx >= 0 && idx < MaxGameLen) {
-        StateRecord &h4 = thread_info.game_hist[idx];
-        ply4last = extract_to(h4.played_move);
-        ply4piece = h4.piece_moved;
+        const StateRecord &h4 = thread_info.game_hist[idx];
+        if (h4.played_move != MoveNone) {
+          ply4last = extract_to(h4.played_move);
+          ply4piece = h4.piece_moved;
+        }
       }
     }
 
@@ -153,21 +164,21 @@ Action next_move(MovePicker &picker, BoardState &position,
         int piece = position.board[from];
         picker.quiets.scores[i] = thread_info.HistoryScores[piece][to];
 
-        if (their_last != MoveNone) {
+        if (their_last != SquareNone) {
           picker.quiets.scores[i] +=
               thread_info.ContHistScores[their_piece][their_last][piece][to];
         }
-        if (our_last != MoveNone) {
+        if (our_last != SquareNone) {
           picker.quiets.scores[i] +=
               thread_info.ContHistScores[our_piece][our_last][piece][to];
         }
 
-        if (ply4last != MoveNone) {
+        if (ply4last != SquareNone) {
           picker.quiets.scores[i] +=
               thread_info.ContHistScores[ply4piece][ply4last][piece][to];
         }
 
-        if (their_piece != Pieces::Blank && their_last != MoveNone) {
+        if (their_piece != Pieces::Blank && their_last != SquareNone) {
           Action counter = thread_info.CounterMoves[their_piece][their_last];
           if (move == counter)
             picker.quiets.scores[i] += 8000;

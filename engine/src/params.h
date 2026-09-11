@@ -188,20 +188,29 @@ int AttackModeHistDiv = 2;
 int AttackModeHistAdd = 10;
 int AttackModeHistCap = 256;
 
+int PhaseConfirmHits = 2;
+int SacrificeEnterCp = 250;
+int SacrificeExitCp = 170;
+int SacrificeDropThreshold = 120;
+int LatePhaseMaterial = 4200;
+int EndgameMaterial = 3000;
+int MidRecoverMaterial = 4500;
+int EndRecoverMaterial = 3300;
+int OpeningMinPly = 20;
+
 double WDL_A = -0.003;
-double WDL_B = 0.5;
 
 const int HUMAN_ELO_MIN = 500;
 const int HUMAN_ELO_RANGE = 1100;
 
-void print_params_for_ob() {
+inline void print_params_for_ob() {
   for (auto &param : params) {
     printf("%s, int, %d, %d, %d, %f, 0.002\n", param.name.c_str(), param.value,
            param.min, param.max, std::max(0.5, (param.max - param.min) / 20.0));
   }
 }
 
-void init_LMR() {
+inline void init_LMR() {
   for (int i = 0; i < 256; i++) {
     for (int n = 0; n < MaxActions; n++) {
       double di = std::log(1.0 + static_cast<double>(i));

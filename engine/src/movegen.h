@@ -6,9 +6,9 @@
 #include <cstdio>
 
 namespace Generate {
-uint8_t GenQuiets = 0;
-uint8_t GenCaptures = 1;
-uint8_t GenAll = 2;
+constexpr uint8_t GenQuiets = 0;
+constexpr uint8_t GenCaptures = 1;
+constexpr uint8_t GenAll = 2;
 } 
 
 constexpr int TTMoveScore = 10000000;
@@ -17,8 +17,8 @@ constexpr int GoodCaptureBaseScore = 2000000;
 constexpr int BadCaptureBaseScore = -2000000;
 constexpr int KillerMoveScore = 100000;
 
-void pawn_moves(const Position &position, uint64_t check_filter,
-                Move *move_list, int &key, int gen_type) {
+inline void pawn_moves(const Position &position, uint64_t check_filter,
+                       Move *move_list, int &key, int gen_type) {
 
   uint8_t color = position.color;
   uint64_t third_rank = color ? Ranks[5] : Ranks[2];
@@ -121,7 +121,7 @@ void pawn_moves(const Position &position, uint64_t check_filter,
   }
 }
 
-int movegen(const Position &position, Move *move_list, uint64_t checkers,
+inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
             int gen_type) {
 
   uint8_t color = position.color, king_pos = get_king_pos(position, color);
@@ -129,21 +129,6 @@ int movegen(const Position &position, Move *move_list, uint64_t checkers,
   int idx = 0;
   uint64_t stm_pieces = position.colors_bb[color],
            opp_pieces = position.colors_bb[color ^ 1];
-
-  auto load_between_bb = [&](int from_sq, int to_sq, const char *context,
-                             uint64_t &mask) -> bool {
-    if (!is_valid_square(from_sq) || !is_valid_square(to_sq) || from_sq >= 64 ||
-        to_sq >= 64) {
-      return false;
-    }
-    int idx_local = from_sq * 64 + to_sq;
-    assert(idx_local >= 0 && idx_local < 4096);
-    if (idx_local < 0 || idx_local >= 4096) {
-      return false;
-    }
-    mask = BetweenBBs[static_cast<size_t>(from_sq)][static_cast<size_t>(to_sq)];
-    return true;
-  };
 
   uint64_t targets = 0;
   if (gen_type != Generate::GenCaptures) {
@@ -155,7 +140,7 @@ int movegen(const Position &position, Move *move_list, uint64_t checkers,
   targets &= ~stm_pieces;
 
   uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
-  uint64_t check_filter = ~0;
+  uint64_t check_filter = ~0ULL;
 
   int king_sq = static_cast<int>(king_pos);
   if (!is_valid_square(king_sq)) {
@@ -177,12 +162,7 @@ int movegen(const Position &position, Move *move_list, uint64_t checkers,
     if (!is_valid_square(checker_sq)) {
       return idx;
     }
-    uint64_t between_mask = 0ULL;
-    if (load_between_bb(king_sq, checker_sq, "single check", between_mask)) {
-      check_filter = between_mask | (1ULL << checker_sq);
-    } else {
-      check_filter = (1ULL << checker_sq);
-    }
+    check_filter = BetweenBBs[king_sq][checker_sq];
   }
 
   pawn_moves(position, check_filter, move_list, idx, gen_type);
@@ -228,14 +208,12 @@ int movegen(const Position &position, Move *move_list, uint64_t checkers,
   }
 
   if (checkers || gen_type == Generate::GenCaptures) {
-
     return idx;
   }
 
   for (int side : {Sides::Queenside, Sides::Kingside}) {
-
-    if (position.castling_squares[color][side] == SquareNone ||
-        !is_valid_square(position.castling_squares[color][side])) {
+    int castling_sq = position.castling_squares[color][side];
+    if (castling_sq == SquareNone || !is_valid_square(castling_sq)) {
       continue;
     }
 
@@ -245,20 +223,8 @@ int movegen(const Position &position, Move *move_list, uint64_t checkers,
       continue;
     }
 
-    uint64_t castle_bb = 0ULL;
-    if (!load_between_bb(
-            static_cast<int>(position.castling_squares[color][side]),
-            rook_target, "castling rook path", castle_bb)) {
-      continue;
-    }
-    uint64_t king_path = 0ULL;
-    if (!load_between_bb(king_sq, king_target, "castling king path",
-                         king_path)) {
-      continue;
-    }
-    castle_bb |= king_path;
-    castle_bb &=
-        ~(1ull << king_pos) & ~(1ull << position.castling_squares[color][side]);
+    uint64_t castle_bb = (BetweenBBs[castling_sq][rook_target] | BetweenBBs[king_sq][king_target])
+                         & ~(1ull << king_pos) & ~(1ull << castling_sq);
 
     if (occ & castle_bb) {
       continue;
@@ -279,15 +245,14 @@ int movegen(const Position &position, Move *move_list, uint64_t checkers,
     if (!invalid) {
       if (move_list && idx < ListSize)
         move_list[idx++] =
-            pack_move(king_pos, position.castling_squares[color][side],
-                      MoveTypes::Castling);
+            pack_move(king_pos, castling_sq, MoveTypes::Castling);
     }
   }
 
   return idx;
 }
 
-int legal_movegen(const Position &position, Move *move_list) {
+inline int legal_movegen(const Position &position, Move *move_list) {
   uint64_t checkers = attacks_square(
       position, get_king_pos(position, position.color), position.color ^ 1);
   std::array<Move, ListSize> pseudo_list;
@@ -303,21 +268,15 @@ int legal_movegen(const Position &position, Move *move_list) {
   return legal_nmoves;
 }
 
-bool SEE(Position &position, Move move, int threshold) {
+inline bool SEE(const Position &position, Move move, int threshold) {
 
   int stm = position.color, from = extract_from(move), to = extract_to(move);
 
   if (!is_valid_square(from) || !is_valid_square(to))
     return false;
 
-  if (from >= 64 || to >= 64 || from < 0 || to < 0)
+  if (position.board[from] == Pieces::Blank)
     return false;
-
-  if (position.board[from] == Pieces::Blank ||
-      position.board[to] == Pieces::Blank) {
-    if (position.board[from] == Pieces::Blank)
-      return false;
-  }
 
   int from_piece = position.board[from];
   int from_color = get_color(from_piece);
@@ -326,7 +285,6 @@ bool SEE(Position &position, Move move, int threshold) {
 
   int gain = SeeValues[get_piece_type(position.board[to])] - threshold;
   if (gain < 0) {
-
     return false;
   }
 
@@ -343,9 +301,6 @@ bool SEE(Position &position, Move move, int threshold) {
   uint64_t occ =
       (position.colors_bb[Colors::White] | position.colors_bb[Colors::Black]) -
       (1ull << from);
-
-  if (!is_valid_square(to))
-    return false;
 
   uint64_t all_attackers = attacks_square(position, to, occ);
 
@@ -394,13 +349,11 @@ bool SEE(Position &position, Move move, int threshold) {
       return stm == position.color;
     }
   }
-
-  return true;
 }
 
 void make_move(Position &position, Move move);
 
-int evaluate_promotion_tactics(Position &position, Move move) {
+inline int evaluate_promotion_tactics(const Position &position, Move move) {
   int from = extract_from(move);
   int to = extract_to(move);
   int promo_type = extract_promo(move);
@@ -411,8 +364,7 @@ int evaluate_promotion_tactics(Position &position, Move move) {
     return 0;
   }
 
-  auto temp_pos_uptr = std::make_unique<Position>(position);
-  Position &temp_pos = *temp_pos_uptr;
+  Position temp_pos = position;
   make_move(temp_pos, move);
 
   if (promo_type == Promos::Knight) {
@@ -474,7 +426,7 @@ int evaluate_promotion_tactics(Position &position, Move move) {
   return bonus;
 }
 
-Move get_next_move(Move *moves, int *scores, int start_idx, int len) {
+inline Move get_next_move(Move *moves, int *scores, int start_idx, int len) {
 
   int best_idx = start_idx, best_score = scores[start_idx];
   for (int i = start_idx + 1; i < len; i++) {

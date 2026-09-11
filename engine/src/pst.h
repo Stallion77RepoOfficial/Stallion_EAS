@@ -73,6 +73,6 @@ constexpr int16_t KingEG[64] = {
     -30, -25,  -5,   0,   0,  -5, -25, -30,
     -50, -30, -30, -30, -30, -30, -30, -50};
 
-inline int mirror_square(int sq) { return sq ^ 56; }
+constexpr inline int mirror_square(int sq) noexcept { return sq ^ 56; }
 
 }

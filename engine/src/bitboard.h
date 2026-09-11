@@ -94,7 +94,7 @@ constexpr MultiArray<uint64_t, 2, 2> CastlingBBs = {{
     {0b00001110ull << 56, 0b01100000ull << 56},
 }};
 
-MultiArray<uint64_t, 64, 64> BetweenBBs = {{0}};
+MultiArray<uint64_t, 64, 64> BetweenBBs = {};
 
 std::array<uint64_t, 64> RookMasks;
 std::array<uint64_t, 64> BishopMasks;
@@ -225,27 +225,27 @@ inline uint64_t ROOK_ATK_SAFE(int sq, uint64_t occ) {
   return RookAttacks[idx_sq][attack_index];
 }
 
-int get_file(int square) { return square % 8; }
-int get_rank(int square) { return square / 8; }
+constexpr int get_file(int square) { return square % 8; }
+constexpr int get_rank(int square) { return square / 8; }
 
-uint64_t file_bb(int square) { return Files[square % 8]; }
-uint64_t rank_bb(int square) { return Ranks[square / 8]; }
+inline uint64_t file_bb(int square) { return Files[square % 8]; }
+inline uint64_t rank_bb(int square) { return Ranks[square / 8]; }
 
-int pop_count(uint64_t bb) { return __builtin_popcountll(bb); }
+inline int pop_count(uint64_t bb) { return __builtin_popcountll(bb); }
 
-int get_lsb(uint64_t bb) { return __builtin_ctzll(bb); }
+inline int get_lsb(uint64_t bb) { return __builtin_ctzll(bb); }
 
-int get_msb(uint64_t bb) { return 63 - __builtin_clzll(bb); }
+inline int get_msb(uint64_t bb) { return 63 - __builtin_clzll(bb); }
 
-int pop_lsb(uint64_t &bb) {
+inline int pop_lsb(uint64_t &bb) {
   int s = get_lsb(bb);
   bb &= (bb - 1);
   return s;
 }
 
-uint64_t get_lsb_bb(uint64_t bb) { return bb & int64_t(-bb); }
+inline uint64_t get_lsb_bb(uint64_t bb) { return bb & (~bb + 1); }
 
-uint64_t set_occ(int idx, int size, uint64_t mask) {
+inline uint64_t set_occ(int idx, int size, uint64_t mask) {
   uint64_t occ = 0;
 
   for (int i = 0; i < size; i++) {
@@ -259,7 +259,7 @@ uint64_t set_occ(int idx, int size, uint64_t mask) {
   return occ;
 }
 
-uint64_t bishop_sliders(int square, uint64_t occ) {
+inline uint64_t bishop_sliders(int square, uint64_t occ) {
   uint64_t bb = 0;
 
   int dirs_file[4] = {1, -1, 1, -1};
@@ -284,7 +284,7 @@ uint64_t bishop_sliders(int square, uint64_t occ) {
   return bb;
 }
 
-uint64_t rook_sliders(int square, uint64_t occ) {
+inline uint64_t rook_sliders(int square, uint64_t occ) {
   uint64_t bb = 0;
 
   int dirs_file[4] = {0, 0, 1, -1};
@@ -309,7 +309,7 @@ uint64_t rook_sliders(int square, uint64_t occ) {
   return bb;
 }
 
-void fill_bishop_attacks() {
+inline void fill_bishop_attacks() {
   for (int square = a1; square < SqNone; square++) {
     int bits = pop_count(BishopMasks[square]);
     int occ_var = 1 << bits;
@@ -322,7 +322,7 @@ void fill_bishop_attacks() {
   }
 }
 
-void fill_rook_attacks() {
+inline void fill_rook_attacks() {
   for (int square = a1; square < SqNone; square++) {
     int bits = pop_count(RookMasks[square]);
     int occ_var = 1 << bits;
@@ -335,7 +335,7 @@ void fill_rook_attacks() {
   }
 }
 
-void fill_king_attacks() {
+inline void fill_king_attacks() {
   for (int square = a1; square < SqNone; square++) {
     uint64_t occ = 0;
     int left = std::max(0, get_file(square) - 1),
@@ -357,7 +357,7 @@ void fill_king_attacks() {
   }
 }
 
-void fill_knight_attacks() {
+inline void fill_knight_attacks() {
   int knight_moves_file[8] = {-2, -2, -1, 1, 2, 2, 1, -1};
   int knight_moves_rank[8] = {-1, 1, 2, 2, 1, -1, -2, -2};
 
@@ -379,7 +379,7 @@ void fill_knight_attacks() {
   }
 }
 
-void fill_pawn_attacks() {
+inline void fill_pawn_attacks() {
   PawnAttacks.fill({});
 
   for (int square = a1; square <= h7; square++) {
@@ -405,15 +405,15 @@ void fill_pawn_attacks() {
   }
 }
 
-uint64_t get_bishop_attacks(int sq, uint64_t occ) {
+inline uint64_t get_bishop_attacks(int sq, uint64_t occ) {
   return BISHOP_ATK_SAFE(sq, occ);
 }
 
-uint64_t get_rook_attacks(int sq, uint64_t occ) {
+inline uint64_t get_rook_attacks(int sq, uint64_t occ) {
   return ROOK_ATK_SAFE(sq, occ);
 }
 
-void init_bbs() {
+inline void init_bbs() {
   for (int square = a1; square < SqNone; square++) {
 
     uint64_t edges = ((Ranks[0] | Ranks[7]) & ~rank_bb(square)) |
@@ -448,7 +448,7 @@ void init_bbs() {
   }
 }
 
-void generate_bb(std::string fen, Position &pos) {
+inline void generate_bb(const std::string &fen, Position &pos) {
   pos = Position{};
   int sq = a8;
 
@@ -497,8 +497,8 @@ void generate_bb(std::string fen, Position &pos) {
   }
 }
 
-void update_bb(Position &pos, int from_piece, int from, int to_piece, int to,
-               int captured_piece, int capture_sq) {
+inline void update_bb(Position &pos, int from_piece, int from, int to_piece, int to,
+                      int captured_piece, int capture_sq) {
 
   int color = from_piece & 1;
   int from_type = from_piece / 2;
@@ -515,7 +515,7 @@ void update_bb(Position &pos, int from_piece, int from, int to_piece, int to,
   }
 }
 
-uint64_t shift_pawns(uint64_t bb, int dir) {
+constexpr inline uint64_t shift_pawns(uint64_t bb, int dir) {
   if (dir >= 0) {
     return bb << dir;
   } else {

@@ -1,4 +1,15 @@
 .DS_Store
-.DS_Store
-.DS_Store
 /tuning
+/data
+*.parquet
+training/.venv/
+*.nnue
+*.zst
+stockfish
+engine/stallion_eas_mac
+engine/stallion_eas_android
+engine/.DS_Store
+engine/.DS_Store
+/Engines_Aggressiveness_Statistics_tool_V6.0
+/Sacrifice_Games_Search_Tool
+/training

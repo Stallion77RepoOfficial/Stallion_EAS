@@ -158,14 +158,14 @@ struct TTEntry {
   uint8_t depth;
   uint8_t age_bound;
 
-  uint8_t get_type();
+  uint8_t get_type() const noexcept;
 
-  int get_age();
+  int get_age() const noexcept;
 };
 
-inline uint8_t TTEntry::get_type() { return age_bound & 0b11; }
+inline uint8_t TTEntry::get_type() const noexcept { return age_bound & 0b11; }
 
-inline int TTEntry::get_age() { return age_bound >> 2; }
+inline int TTEntry::get_age() const noexcept { return age_bound >> 2; }
 
 struct TTBucket {
   std::array<TTEntry, BucketEntries> entries;
@@ -195,25 +195,25 @@ inline std::random_device rd;
 inline std::uniform_int_distribution<int> dist(0, INT32_MAX);
 }
 
-uint8_t get_color(uint8_t piece) { return piece & 1; }
+constexpr uint8_t get_color(uint8_t piece) { return piece & 1; }
 inline bool is_valid_square(int sq) { return sq >= 0 && sq < 64; }
 
 void safe_printf(const char *fmt, ...);
 void safe_print_cerr(const std::string &s);
 
-Move pack_move(uint8_t from, uint8_t to, int8_t type) {
+constexpr Move pack_move(uint8_t from, uint8_t to, int8_t type) {
   return ((from & 63) << 10) + ((to & 63) << 4) + (type & 3);
 }
-Move pack_move_promo(uint8_t from, uint8_t to, uint8_t promo) {
+constexpr Move pack_move_promo(uint8_t from, uint8_t to, uint8_t promo) {
   return ((from & 63) << 10) + ((to & 63) << 4) + ((promo & 3) << 2) +
          MoveTypes::Promotion;
 }
-uint8_t extract_from(Move move) { return (move >> 10) & 63; }
-uint8_t extract_to(Move move) { return (move >> 4) & 63; }
-uint8_t extract_promo(Move move) { return (move >> 2) & 3; }
-uint8_t extract_type(Move move) { return move & 3; }
+constexpr uint8_t extract_from(Move move) { return (move >> 10) & 63; }
+constexpr uint8_t extract_to(Move move) { return (move >> 4) & 63; }
+constexpr uint8_t extract_promo(Move move) { return (move >> 2) & 3; }
+constexpr uint8_t extract_type(Move move) { return move & 3; }
 
-uint16_t get_zobrist_key(uint8_t piece, uint8_t sq) {
+constexpr uint16_t get_zobrist_key(uint8_t piece, uint8_t sq) {
   return ((piece - 2) * 64) + sq;
 }
 

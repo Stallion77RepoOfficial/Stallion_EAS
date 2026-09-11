@@ -11,7 +11,7 @@
 #include <iostream>
 #include <memory>
 
-bool tb_initialized = false;
+inline bool tb_initialized = false;
 
 inline void compute_human_params(ThreadInfo &thread_info) {
   int elo = thread_info.human_elo;
@@ -42,13 +42,13 @@ inline void compute_human_params(ThreadInfo &thread_info) {
   thread_info.human_depth_limit = depth_cap;
 }
 
-void run_thread(BoardState &position, ThreadInfo &thread_info, std::thread &s) {
+inline void run_thread(BoardState &position, ThreadInfo &thread_info, std::thread &s) {
 
   s = std::thread(search_position, std::ref(position), std::ref(thread_info),
                   std::ref(TT));
 }
 
-uint64_t perft(int depth, BoardState &position, bool first,
+inline uint64_t perft(int depth, BoardState &position, bool first,
                ThreadInfo &thread_info)
 
 {
@@ -58,14 +58,14 @@ uint64_t perft(int depth, BoardState &position, bool first,
 
   if (depth <= 1) {
     std::array<Action, MaxActions> list;
-
     int nmoves = legal_movegen(position, list.data());
-
-    for (int i = 0; i < nmoves; i++) {
-      total_nodes += is_legal(position, list[i]);
+    if (first) {
+      for (int i = 0; i < nmoves; i++) {
+        std::string move_uci = internal_to_uci(position, list[i]);
+        safe_printf("%s: 1\n", move_uci.c_str());
+      }
     }
-
-    return total_nodes;
+    return nmoves;
   }
 
   MovePicker picker;
@@ -95,7 +95,7 @@ uint64_t perft(int depth, BoardState &position, bool first,
   return total_nodes;
 }
 
-void bench(BoardState &position, ThreadInfo &thread_info) {
+inline void bench(BoardState &position, ThreadInfo &thread_info) {
   std::vector<std::string> fens = {
       "2r2k2/8/4P1R1/1p6/8/P4K1N/7b/2B5 b - - 0 55",
       "2r4r/1p4k1/1Pnp4/3Qb1pq/8/4BpPp/5P2/2RR1BK1 w - - 0 42",
@@ -166,15 +166,19 @@ void bench(BoardState &position, ThreadInfo &thread_info) {
               (int64_t)(total_nodes * 1000 / time_elapsed(start)));
 }
 
-void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
+inline void uci(ThreadInfo &thread_info, BoardState &position,
+         std::istream &in_stream = std::cin, bool interactive = true) noexcept {
   setvbuf(stdin, NULL, _IONBF, 0);
   setvbuf(stdout, NULL, _IONBF, 0);
 
-  safe_printf("Stallion, written by LegendOfCompiling\n\n\n");
+  if (interactive) {
+    safe_printf("Stallion, written by LegendOfCompiling\n\n\n");
+  }
 
   new_game(thread_info, TT);
   set_board(position, thread_info,
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+  load_nnue_file();
 
   std::string input;
 
@@ -188,11 +192,7 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
     }
   };
 
-  while (getline(std::cin, input)) {
-
-    if (std::cin.eof() || std::cin.fail()) {
-      break;
-    }
+  while (getline(in_stream, input)) {
 
     if (input.empty()) {
       continue;
@@ -205,11 +205,9 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
     input_stream >> std::skipws >> command;
 
     if (command == "d") {
-      input_stream.clear();
-      input_stream.str("position fen "
-                       "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/"
-                       "R3K2R w KQkq - 0 1");
-      input_stream >> std::skipws >> command;
+      print_board(position);
+      safe_printf("Fen: %s\n", export_fen(position, thread_info).c_str());
+      continue;
     }
 
     if (command == "quit") {
@@ -248,9 +246,12 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
 
     else if (command == "uci") {
       safe_printf(
-          "id name Stallion HCE\n"
+          "id name Stallion EAS NNUE\n"
           "id author LegendOfCompiling\n"
 
+          "option name Use NNUE type check default true\n"
+          "option name EvalFile type string default nets/base.nnue\n"
+          "option name EvalFileAggressive type string default nets/aggressive.nnue\n"
           "option name Hash type spin default 256 min 1 max 131072\n"
           "option name Threads type spin default 1 min 1 max 1024\n"
           "option name MultiPV type spin default 1 min 1 max 256\n"
@@ -393,14 +394,14 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
 
           "option name DrawContemptMaterial type spin default 60 min 0 max "
           "200\n"
-          "option name RazorMargin type spin default 250 min 100 max 500\n"
-          "option name HistPruneDepth type spin default 5 min 2 max 8\n"
-          "option name HistPruneThreshold type spin default 3500 min 1000 max "
+          "option name RazorMargin type spin default 140 min 100 max 500\n"
+          "option name HistPruneDepth type spin default 4 min 2 max 8\n"
+          "option name HistPruneThreshold type spin default 6196 min 1000 max "
           "8000\n"
-          "option name ProbCutMargin type spin default 220 min 100 max 500\n"
-          "option name MultiCutDepth type spin default 5 min 3 max 10\n"
-          "option name MultiCutMoves type spin default 3 min 2 max 8\n"
-          "option name MultiCutCuts type spin default 2 min 1 max 5\n"
+          "option name ProbCutMargin type spin default 191 min 100 max 500\n"
+          "option name MultiCutDepth type spin default 4 min 3 max 10\n"
+          "option name MultiCutMoves type spin default 6 min 2 max 8\n"
+          "option name MultiCutCuts type spin default 3 min 1 max 5\n"
           "option name HistExtThreshold type spin default 7000 min 3000 max "
           "15000\n"
           "option name FPAttackModeBonus type spin default 80 min 0 max 200\n"
@@ -413,6 +414,21 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
           "option name AttackModeExitRelax type spin default 20 min 0 max 100\n"
           "option name AttackModeDropExtra type spin default 30 min 0 max 100\n"
           "option name AttackModeMatExit type spin default 200 min 0 max 500\n"
+
+          "option name PhaseConfirmHits type spin default 2 min 1 max 8\n"
+          "option name SacrificeEnterCp type spin default 250 min 100 max 500\n"
+          "option name SacrificeExitCp type spin default 170 min 50 max 400\n"
+          "option name SacrificeDropThreshold type spin default 120 min 50 max "
+          "300\n"
+          "option name LatePhaseMaterial type spin default 4200 min 2000 max "
+          "6000\n"
+          "option name EndgameMaterial type spin default 3000 min 1000 max "
+          "5000\n"
+          "option name MidRecoverMaterial type spin default 4500 min 2000 max "
+          "6000\n"
+          "option name EndRecoverMaterial type spin default 3300 min 1500 max "
+          "5500\n"
+          "option name OpeningMinPly type spin default 20 min 0 max 60\n"
 
           "option name SpaceWeight type spin default 7 min 0 max 20\n"
           "option name DeltaMarginBase type spin default 180 min 50 max 400\n"
@@ -466,31 +482,28 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
       std::string word;
       std::string optName;
       std::string valueStr;
-      bool gotName = false;
+      bool in_name = false;
 
       while (input_stream >> word) {
-        if (word == "name")
-          continue;
-        if (!gotName) {
-          optName = word;
-          gotName = true;
+        if (word == "name") {
+          in_name = true;
           continue;
         }
-        if (word == "value")
+        if (word == "value") {
           std::getline(input_stream, valueStr);
-        else {
-          valueStr = word;
-          std::string rest;
-          std::getline(input_stream, rest);
-          if (!rest.empty())
-            valueStr += rest;
+          break;
         }
-        if (!valueStr.empty()) {
-          size_t pos = valueStr.find_first_not_of(" \t");
-          if (pos != std::string::npos && pos > 0)
-            valueStr.erase(0, pos);
+        if (in_name) {
+          if (!optName.empty())
+            optName += " ";
+          optName += word;
         }
-        break;
+      }
+
+      if (!valueStr.empty()) {
+        size_t pos = valueStr.find_first_not_of(" \t");
+        if (pos != std::string::npos && pos > 0)
+          valueStr.erase(0, pos);
       }
 
       auto parse_int = [](const std::string &s, bool &ok) {
@@ -537,11 +550,17 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
         return true;
       };
 
-      if (!gotName) {
+      if (optName.empty()) {
         continue;
       }
 
-      if (optName == "Hash") {
+      if (optName == "Use NNUE" || optName == "UseNNUE" || optName == "use_nnue") {
+        use_nnue = to_bool(valueStr);
+      } else if (optName == "EvalFile" || optName == "evalfile") {
+        load_nnue_base(valueStr);
+      } else if (optName == "EvalFileAggressive" || optName == "evalfileaggressive") {
+        load_nnue_aggressive(valueStr);
+      } else if (optName == "Hash") {
         bool ok = false;
         int mb = parse_int(valueStr, ok);
         if (!ok)
@@ -662,19 +681,10 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
             if (tb_init(thread_info.syzygy_path.c_str())) {
               tb_initialized = true;
               thread_info.use_syzygy = true;
-              safe_printf("info string syzygy enabled: %s\n",
-                          thread_info.syzygy_path.c_str());
-              safe_fflush();
             } else {
               thread_info.use_syzygy = false;
-              safe_printf("info string failed to initialize syzygy: %s\n",
-                          thread_info.syzygy_path.c_str());
-              safe_fflush();
             }
           } else {
-            safe_printf("info string failed to enable syzygy: %s\n",
-                        thread_info.syzygy_path.c_str());
-            safe_fflush();
             thread_info.use_syzygy = false;
             if (tb_initialized) {
               tb_free();
@@ -687,11 +697,7 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
             tb_free();
             tb_initialized = false;
           }
-          safe_printf("info string syzygy disabled\n");
-          safe_fflush();
         } else {
-          safe_printf("info string failed to enable syzygy: no path set\n");
-          safe_fflush();
           thread_info.use_syzygy = false;
           if (tb_initialized) {
             tb_free();
@@ -709,19 +715,10 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
             if (std::filesystem::exists(valueStr)) {
               if (tb_init(valueStr.c_str())) {
                 tb_initialized = true;
-                safe_printf("info string syzygy path updated: %s\n",
-                            valueStr.c_str());
-                safe_fflush();
               } else {
-                safe_printf("info string failed to initialize syzygy path: %s\n",
-                            valueStr.c_str());
-                safe_fflush();
                 thread_info.use_syzygy = false;
               }
             } else {
-              safe_printf("info string failed to set syzygy path: %s\n",
-                          valueStr.c_str());
-              safe_fflush();
               thread_info.use_syzygy = false;
             }
           }
@@ -738,30 +735,13 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
           if (std::filesystem::exists(thread_info.book_path)) {
             bool loaded = thread_info.opening_book.load_book(thread_info.book_path);
             thread_info.use_opening_book = loaded;
-            if (loaded) {
-              safe_printf("info string opening book enabled: %s\n",
-                          thread_info.book_path.c_str());
-              safe_fflush();
-            } else {
-              safe_printf("info string failed to load opening book: %s\n",
-                          thread_info.book_path.c_str());
-              safe_fflush();
-            }
           } else {
-            safe_printf("info string failed to enable opening book: %s\n",
-                        thread_info.book_path.c_str());
-            safe_fflush();
             thread_info.use_opening_book = false;
           }
         } else if (!b) {
           thread_info.use_opening_book = false;
           thread_info.opening_book.clear_book();
-          safe_printf("info string opening book disabled\n");
-          safe_fflush();
         } else {
-          safe_printf(
-              "info string failed to enable opening book: no path set\n");
-          safe_fflush();
           thread_info.use_opening_book = false;
         }
       } else if (optName == "BookPath") {
@@ -771,20 +751,10 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
           if (thread_info.use_opening_book) {
             if (std::filesystem::exists(valueStr)) {
               bool loaded = thread_info.opening_book.load_book(valueStr);
-              if (loaded) {
-                safe_printf("info string opening book path updated: %s\n",
-                            valueStr.c_str());
-                safe_fflush();
-              } else {
-                safe_printf("info string failed to load opening book path: %s\n",
-                            valueStr.c_str());
-                safe_fflush();
+              if (!loaded) {
                 thread_info.use_opening_book = false;
               }
             } else {
-              safe_printf("info string failed to set opening book path: %s\n",
-                          valueStr.c_str());
-              safe_fflush();
               thread_info.use_opening_book = false;
             }
           }
@@ -966,6 +936,24 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
         set_spin(0, 100, AttackModeDropExtra);
       else if (optName == "AttackModeMatExit")
         set_spin(0, 500, AttackModeMatExit);
+      else if (optName == "PhaseConfirmHits")
+        set_spin(1, 8, PhaseConfirmHits);
+      else if (optName == "SacrificeEnterCp")
+        set_spin(100, 500, SacrificeEnterCp);
+      else if (optName == "SacrificeExitCp")
+        set_spin(50, 400, SacrificeExitCp);
+      else if (optName == "SacrificeDropThreshold")
+        set_spin(50, 300, SacrificeDropThreshold);
+      else if (optName == "LatePhaseMaterial")
+        set_spin(2000, 6000, LatePhaseMaterial);
+      else if (optName == "EndgameMaterial")
+        set_spin(1000, 5000, EndgameMaterial);
+      else if (optName == "MidRecoverMaterial")
+        set_spin(2000, 6000, MidRecoverMaterial);
+      else if (optName == "EndRecoverMaterial")
+        set_spin(1500, 5500, EndRecoverMaterial);
+      else if (optName == "OpeningMinPly")
+        set_spin(0, 60, OpeningMinPly);
       else if (optName == "SpaceWeight")
         set_spin(0, 20, SpaceWeight);
       else if (optName == "DeltaMarginBase")
@@ -1161,7 +1149,6 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
             thread_info.pondering = false;
             if (!thread_data.stop) {
               thread_data.stop = true;
-              safe_printf("info string ponder mismatch abort\n");
             }
           } else {
 
@@ -1185,8 +1172,6 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
       if (thread_info.use_syzygy && !tb_initialized) {
         if (tb_init(thread_info.syzygy_path.c_str())) {
           tb_initialized = true;
-          safe_printf("info string tablebase initialized: %s\n",
-                      thread_info.syzygy_path.c_str());
         } else {
           safe_print_cerr(
               std::string(
@@ -1210,6 +1195,7 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
         s.join();
       }
       thread_info.max_nodes_searched = UINT64_MAX / 2;
+      thread_info.opt_nodes_searched = UINT64_MAX / 2;
       if (thread_info.max_iter_depth != -1)
         thread_info.max_iter_depth = MaxSearchPly;
 
@@ -1331,6 +1317,7 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
           uint64_t nodes = 0;
           if (parse_u64_token(go_tokens[i + 1], nodes)) {
             thread_info.max_nodes_searched = nodes;
+            thread_info.opt_nodes_searched = std::max<uint64_t>(1, nodes * 8 / 10);
           }
           ++i;
         } else if (token == "searchmoves") {
@@ -1411,7 +1398,7 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
             int skip_chance = (v * v) / 225;
             if (skip_chance > 100)
               skip_chance = 100;
-            std::mt19937 rng(Random::rd());
+            thread_local static std::mt19937 rng(Random::rd());
             if ((std::uniform_int_distribution<int>(0, 99)(rng)) <
                 skip_chance) {
               book_move = MoveNone;
@@ -1441,10 +1428,6 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
             continue;
           }
         }
-
-        if (thread_info.game_ply <= 2) {
-          safe_printf("info string no book move found for this position\n");
-        }
       }
 
       if (thread_info.max_depth > 0) {
@@ -1461,6 +1444,9 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
       if (thread_info.max_nodes > 0) {
         thread_info.max_nodes_searched =
             std::min(thread_info.max_nodes_searched, thread_info.max_nodes);
+        thread_info.opt_nodes_searched = std::min(
+            thread_info.opt_nodes_searched,
+            std::max<uint64_t>(1, thread_info.max_nodes_searched * 8 / 10));
       }
 
       if (searchmoves_specified) {
@@ -1490,7 +1476,6 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
           thread_info.opt_time = std::min<uint64_t>(
               thread_info.opt_time + bonus, thread_info.max_time);
         }
-        safe_printf("info string ponderhit reuse\n");
       }
     }
 
@@ -1510,9 +1495,14 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
     }
 
     else if (command == "eval") {
+      if (use_nnue && nnue_loaded) {
+        select_active_nnue(thread_info.phase);
+        thread_info.nnue_state.reset_nnue(position);
+      }
       int eval_score = eval(position, thread_info);
-      safe_printf("info string evaluation: %d cp\n",
-                  eval_score * 100 / NormalizationFactor);
+      safe_printf("info string evaluation: %d cp (%s)\n",
+                  eval_score * 100 / NormalizationFactor,
+                  (use_nnue && nnue_loaded) ? "NNUE" : "HCE");
     }
 
     else if (command == "flip") {
@@ -1568,4 +1558,7 @@ void uci(ThreadInfo &thread_info, BoardState &position) noexcept {
       }
     }
   }
+
+  thread_data.stop = true;
+  safe_join(s);
 }

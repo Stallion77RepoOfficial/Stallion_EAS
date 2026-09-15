@@ -1,4 +1,4 @@
- 
+
 #include "search.h"
 #include "uci.h"
 #include <iostream>
@@ -8,6 +8,11 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -15,10 +20,6 @@ std::vector<std::string_view> collect_args(int argc, char* argv[]) {
     return std::vector<std::string_view>(argv, argv + argc);
 }
 
-// Any invocation with CLI args other than "uci" runs the given command(s)
-// once and then exits, instead of entering the interactive UCI loop. E.g.
-// "./stallion perft 5" or "./stallion bench" run and terminate; "./stallion"
-// (no args) or "./stallion uci" enter interactive UCI mode over stdin.
 std::optional<int> handle_cli_mode(const std::vector<std::string_view>& args,
                                    BoardState& position,
                                    ThreadInfo& thread_info) {
@@ -40,10 +41,26 @@ std::optional<int> handle_cli_mode(const std::vector<std::string_view>& args,
 }
 
 int main(int argc, char* argv[]) {
+    std::error_code ec;
+    std::filesystem::path executable;
+#if defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> path(size);
+    if (_NSGetExecutablePath(path.data(), &size) == 0) executable = path.data();
+#elif defined(_WIN32)
+    std::vector<wchar_t> path(32768);
+    const auto size = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (size && size < path.size()) executable = std::wstring(path.data(), size);
+#else
+    executable = std::filesystem::read_symlink("/proc/self/exe", ec);
+#endif
+    if (executable.empty()) executable = std::filesystem::absolute(argv[0], ec);
+    engine_directory = std::filesystem::weakly_canonical(executable, ec).parent_path();
     BoardState position;
     auto thread_info = std::make_unique<ThreadInfo>();
     init_LMR();
-    init_bbs();
+    ensure_bbs_initialized();
     resize_TT(256);
 
     const auto args = collect_args(argc, argv);

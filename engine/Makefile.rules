@@ -1,0 +1,15 @@
+# Shared dependencies and recipes for the platform entry points.
+.DEFAULT_GOAL := all
+.PHONY: all asan debug
+SOURCES := src/stallion.cpp fathom/src/tbprobe.cpp
+HEADERS := $(wildcard src/*.h fathom/src/*.h)
+INCLUDED_SOURCES := fathom/src/tbchess.cpp
+
+all: $(EXE)
+
+$(EXE): $(SOURCES) $(HEADERS) $(INCLUDED_SOURCES) $(MAKEFILE_LIST)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(ARCH_FLAGS) $(SOURCES) -o $@ $(LDFLAGS) $(LDLIBS)
+	@if command -v $(STRIP) >/dev/null 2>&1; then $(STRIP) $@; fi
+
+asan debug:
+	$(CXX) $(CPPFLAGS) -std=c++23 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -pthread $(ARCH_FLAGS) $(SOURCES) -o $(basename $(EXE))_asan$(suffix $(EXE)) $(LDFLAGS) $(LDLIBS)

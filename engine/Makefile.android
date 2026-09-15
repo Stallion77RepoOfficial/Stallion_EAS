@@ -1,35 +1,14 @@
-# Summary: Consolidated build workflow and guarded strip step for Android target.
-.PHONY: build default
-
+# Makefile.android — Android (NDK) için bağımsız derleme
 EXE := stallion_eas_android
-
-SOURCES := src/stallion.cpp \
-           fathom/src/tbprobe.cpp \
-           fathom/src/tbchess.cpp
-
-CXX := /Users/berkegulacar/Library/Android/sdk/ndk/30.0.14904198/android-ndk-r30-beta1/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android36-clang++
-CXXFLAGS := -O3 -std=c++23 -ffast-math -pthread -march=armv8-a
-
-LINKER := -lm -static-libstdc++
-
-OUT := $(EXE)
-
-STRIP := llvm-strip
-
-build: $(EXE)
-
-default: build
-
-$(EXE): $(SOURCES)
-	$(CXX) $^ $(CXXFLAGS) -o $(OUT) $(LINKER)
-	@if command -v $(STRIP) >/dev/null 2>&1; then \
-	$(STRIP) $(OUT); \
-	else \
-	echo "Strip tool '$(STRIP)' not found; skipping."; \
-	fi
-# AddressSanitizer ile debug build
-asan:
-	$(CXX) $(SOURCES) -std=c++23 -g -O1 -fsanitize=address -fno-omit-frame-pointer -pthread -march=armv8-a -o $(EXE)_asan $(LINKER)
-	@echo "ASAN build created as $(EXE)_asan (symbols preserved, no strip)"
-
-debug: asan
+ANDROID_NDK_HOME ?= $(patsubst %/toolchains,%,$(lastword $(sort $(wildcard $(HOME)/Library/Android/sdk/ndk/*/toolchains $(HOME)/Library/Android/sdk/ndk/*/*/toolchains $(HOME)/Android/Sdk/ndk/*/toolchains))))
+NDK_HOST_TAG ?= $(if $(filter Darwin,$(shell uname -s)),darwin-x86_64,linux-x86_64)
+ANDROID_API ?= 24
+CXX := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/$(NDK_HOST_TAG)/bin/aarch64-linux-android$(ANDROID_API)-clang++
+CXXFLAGS := -O3 -std=c++23 -ffast-math -pthread
+ARCH_FLAGS ?= -march=armv8-a
+LDLIBS := -lm
+LDFLAGS := -static-libstdc++
+STRIP := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/$(NDK_HOST_TAG)/bin/llvm-strip
+include Makefile.rules
+.PHONY: android
+android: all

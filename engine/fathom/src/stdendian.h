@@ -1,21 +1,19 @@
 #ifndef _STDENDIAN_H_
 #define _STDENDIAN_H_
- 
- 
+
 #if defined (__cplusplus)
 #include <cstdint>
 #elif !defined (__OPENCL_VERSION__)
 #include <stdint.h>
 #endif
 
- 
 #if defined(__linux__) || defined(__GLIBC__) || defined(__CYGWIN__)
 #include <endian.h>
 #include <byteswap.h>
 #define __ENDIAN_DEFINED        1
 #define __BSWAP_DEFINED         1
 #define __HOSTSWAP_DEFINED      1
- 
+
 #ifndef _BYTE_ORDER
 #define _BYTE_ORDER             __BYTE_ORDER
 #define _LITTLE_ENDIAN          __LITTLE_ENDIAN
@@ -24,21 +22,19 @@
 #define bswap16(x)              bswap_16(x)
 #define bswap32(x)              bswap_32(x)
 #define bswap64(x)              bswap_64(x)
-#endif  
+#endif
 
- 
 #if defined(__FreeBSD__) || defined(__NetBSD__) || \
   defined(__DragonFly__) || defined(__OpenBSD__)
 #include <sys/endian.h>
 #define __ENDIAN_DEFINED        1
 #define __BSWAP_DEFINED         1
 #define __HOSTSWAP_DEFINED      1
-#endif  
+#endif
 
- 
 #if defined (sun)
 #include <sys/isa_defs.h>
- 
+
 #if defined(_LITTLE_ENDIAN)
 #undef _LITTLE_ENDIAN
 #define _LITTLE_ENDIAN          1234
@@ -51,28 +47,24 @@
 #define _BYTE_ORDER             _BIG_ENDIAN
 #endif
 #define __ENDIAN_DEFINED        1
-#endif  
+#endif
 
- 
 #if defined(_WIN32) || defined(_MSC_VER) || defined(__EMSCRIPTEN__)
- 
- 
+
 #define _LITTLE_ENDIAN          1234
 #define _BIG_ENDIAN             4321
 #define _BYTE_ORDER             _LITTLE_ENDIAN
 #define __ENDIAN_DEFINED        1
-#endif  
+#endif
 
- 
 #if defined(__APPLE__)
 #include <machine/endian.h>
 #define _BYTE_ORDER             BYTE_ORDER
 #define _LITTLE_ENDIAN          LITTLE_ENDIAN
 #define _BIG_ENDIAN             BIG_ENDIAN
 #define __ENDIAN_DEFINED        1
-#endif  
+#endif
 
- 
 #if defined (__OPENCL_VERSION__)
 #define _LITTLE_ENDIAN          1234
 #define __BIG_ENDIAN            4321
@@ -88,12 +80,10 @@
 #define __BSWAP_DEFINED         1
 #endif
 
- 
 #if !__ENDIAN_DEFINED
 #error Could not determine CPU byte order
 #endif
 
- 
 #ifndef BYTE_ORDER
 #define BYTE_ORDER _BYTE_ORDER
 #endif
@@ -104,18 +94,16 @@
 #define BIG_ENDIAN _BIG_ENDIAN
 #endif
 
- 
 #if _BYTE_ORDER == _LITTLE_ENDIAN
 #if !defined (__ENDIAN_LITTLE__)
 #define __ENDIAN_LITTLE__   1
 #endif
 #endif
 
- 
 #if !__BSWAP_DEFINED
 
 #ifndef bswap16
- 
+
 #if defined __GNUC__
 #define bswap16(x) __builtin_bswap16(x)
 #else
@@ -158,7 +146,6 @@ inline uint64_t bswap64(uint64_t x) {
 
 #endif
 
- 
 #ifndef __HOSTSWAP_DEFINED
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 #define htobe16(x)              bswap16((x))
@@ -193,5 +180,4 @@ inline uint64_t bswap64(uint64_t x) {
 #endif
 #endif
 
- 
 #endif

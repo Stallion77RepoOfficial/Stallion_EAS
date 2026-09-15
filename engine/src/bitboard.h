@@ -94,19 +94,19 @@ constexpr MultiArray<uint64_t, 2, 2> CastlingBBs = {{
     {0b00001110ull << 56, 0b01100000ull << 56},
 }};
 
-MultiArray<uint64_t, 64, 64> BetweenBBs = {};
+inline MultiArray<uint64_t, 64, 64> BetweenBBs = {};
 
-std::array<uint64_t, 64> RookMasks;
-std::array<uint64_t, 64> BishopMasks;
-MultiArray<uint64_t, 64, 512> BishopAttacks;
-MultiArray<uint64_t, 64, 4096> RookAttacks;
-MultiArray<uint64_t, 2, 64> PawnAttacks;
-std::array<uint64_t, 64> KingAttacks;
-std::array<uint64_t, 64> KnightAttacks;
+inline std::array<uint64_t, 64> RookMasks;
+inline std::array<uint64_t, 64> BishopMasks;
+inline MultiArray<uint64_t, 64, 512> BishopAttacks;
+inline MultiArray<uint64_t, 64, 4096> RookAttacks;
+inline MultiArray<uint64_t, 2, 64> PawnAttacks;
+inline std::array<uint64_t, 64> KingAttacks;
+inline std::array<uint64_t, 64> KnightAttacks;
 
-static std::atomic<bool> BBS_INITIALIZED{false};
-static std::atomic<bool> BBS_INITIALIZING{false};
-static thread_local bool BBS_INIT_IN_THIS_THREAD = false;
+inline std::atomic<bool> BBS_INITIALIZED{false};
+inline std::atomic<bool> BBS_INITIALIZING{false};
+inline thread_local bool BBS_INIT_IN_THIS_THREAD = false;
 
 inline void ensure_bbs_initialized() {
   if (BBS_INITIALIZED.load(std::memory_order_acquire))
@@ -233,11 +233,16 @@ inline uint64_t rank_bb(int square) { return Ranks[square / 8]; }
 
 inline int pop_count(uint64_t bb) { return __builtin_popcountll(bb); }
 
-inline int get_lsb(uint64_t bb) { return __builtin_ctzll(bb); }
+inline int get_lsb(uint64_t bb) {
+  return bb ? __builtin_ctzll(bb) : SqNone;
+}
 
-inline int get_msb(uint64_t bb) { return 63 - __builtin_clzll(bb); }
+inline int get_msb(uint64_t bb) {
+  return bb ? 63 - __builtin_clzll(bb) : SqNone;
+}
 
 inline int pop_lsb(uint64_t &bb) {
+  if (!bb) return SqNone;
   int s = get_lsb(bb);
   bb &= (bb - 1);
   return s;
@@ -413,6 +418,20 @@ inline uint64_t get_rook_attacks(int sq, uint64_t occ) {
   return ROOK_ATK_SAFE(sq, occ);
 }
 
+inline uint64_t attackers_to(const Position &position, int sq, int color,
+                             uint64_t occupied) {
+  if (!is_valid_square(sq) || (color != Colors::White && color != Colors::Black))
+    return 0;
+  return position.colors_bb[color] &
+      ((PAWN_ATK_SAFE(color ^ 1, sq) & position.pieces_bb[PieceTypes::Pawn]) |
+       (KNIGHT_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::Knight]) |
+       (get_bishop_attacks(sq, occupied) &
+        (position.pieces_bb[PieceTypes::Bishop] | position.pieces_bb[PieceTypes::Queen])) |
+       (get_rook_attacks(sq, occupied) &
+        (position.pieces_bb[PieceTypes::Rook] | position.pieces_bb[PieceTypes::Queen])) |
+       (KING_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::King]));
+}
+
 inline void init_bbs() {
   for (int square = a1; square < SqNone; square++) {
 
@@ -444,55 +463,6 @@ inline void init_bbs() {
       }
 
       BetweenBBs[square1][square2] |= (1ull << square2);
-    }
-  }
-}
-
-inline void generate_bb(const std::string &fen, Position &pos) {
-  pos = Position{};
-  int sq = a8;
-
-  for (char c : fen) {
-    if (c == ' ') {
-      break;
-    } else if (c == '/') {
-      sq -= 8;
-      sq -= 8;
-    } else if (isdigit(c)) {
-      sq += Directions::East * (c - '0');
-    } else {
-      int index;
-      switch (tolower(c)) {
-      case 'p':
-        index = PieceTypes::Pawn;
-        break;
-      case 'n':
-        index = PieceTypes::Knight;
-        break;
-      case 'b':
-        index = PieceTypes::Bishop;
-        break;
-      case 'r':
-        index = PieceTypes::Rook;
-        break;
-      case 'q':
-        index = PieceTypes::Queen;
-        break;
-      case 'k':
-        index = PieceTypes::King;
-        break;
-      default:
-        safe_printf("Unexpected error occured parsing FEN!\n");
-        safe_printf("%s %c\n", fen.c_str(), c);
-        exit(1);
-      }
-
-      bool color_indx = islower(c);
-
-      pos.pieces_bb[index] |= (1ull << sq);
-      pos.colors_bb[color_indx] |= (1ull << sq);
-
-      sq += Directions::East;
     }
   }
 }

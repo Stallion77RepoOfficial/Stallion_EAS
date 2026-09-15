@@ -118,7 +118,7 @@ constexpr int SquareNone = 255;
 struct MoveInfo {
   std::array<Move, ListSize> moves;
   std::array<int, ListSize> scores;
-  uint8_t len = 0;
+  uint16_t len = 0;
 };
 
 struct Position {
@@ -132,10 +132,15 @@ struct Position {
   MultiArray<uint8_t, 2, 2> castling_squares;
   uint8_t ep_square;
   bool color;
-  uint8_t halfmoves;
+  uint16_t halfmoves;
+  uint32_t fullmove = 1;
 };
 
 constexpr int MaxSearchDepth = 256;
+
+constexpr int MaxRootDepth = 245;
+constexpr int MateThreshold = MateScore - MaxSearchDepth;
+constexpr int MaxEval = TB_WIN_SCORE - 1;
 
 struct GameHistory {
   uint64_t position_key = 0;
@@ -191,8 +196,8 @@ constexpr std::array<int, 7> MaterialValues = {0,   105, 320,  330,
                                                520, 950, 10000};
 
 namespace Random {
-inline std::random_device rd;
-inline std::uniform_int_distribution<int> dist(0, INT32_MAX);
+inline thread_local std::mt19937 rd(std::random_device{}());
+inline thread_local std::uniform_int_distribution<int> dist(0, INT32_MAX);
 }
 
 constexpr uint8_t get_color(uint8_t piece) { return piece & 1; }

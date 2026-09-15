@@ -123,7 +123,6 @@ int KZRookXray = 2;
 
 int EGCenterDist = 10;
 int EGKingDist = 5;
-int EGPassedPawnRank = 2;
 int EGMaterialThreshold = 2000;
 int EGMaterialAdvantage = 200;
 
@@ -183,10 +182,6 @@ int AttackModeEnterRelax = 20;
 int AttackModeExitRelax = 20;
 int AttackModeDropExtra = 30;
 int AttackModeMatExit = 200;
-int AttackModeHistMul = 3;
-int AttackModeHistDiv = 2;
-int AttackModeHistAdd = 10;
-int AttackModeHistCap = 256;
 
 int PhaseConfirmHits = 2;
 int SacrificeEnterCp = 250;
@@ -211,7 +206,7 @@ inline void print_params_for_ob() {
 }
 
 inline void init_LMR() {
-  for (int i = 0; i < 256; i++) {
+  for (int i = 0; i <= 256; i++) {
     for (int n = 0; n < MaxActions; n++) {
       double di = std::log(1.0 + static_cast<double>(i));
       double dn = std::log(1.0 + static_cast<double>(n));

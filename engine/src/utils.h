@@ -11,6 +11,7 @@
 #include <cstdarg>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <stdio.h>
 #include <string>
@@ -23,27 +24,23 @@ using std::array;
 typedef unsigned __int128 uint128_t;
 
 struct BookEntry {
-  uint64_t key;
   Action move;
   uint16_t weight;
-  uint32_t learn;
 };
 
 class OpeningBook {
 private:
-  std::unordered_map<uint64_t, std::vector<BookEntry>> book_positions;
-  bool book_loaded;
-  std::string book_path;
+  using Positions = std::unordered_map<uint64_t, std::vector<BookEntry>>;
+  std::shared_ptr<const Positions> book_positions;
 
 public:
-  OpeningBook() : book_loaded(false) {}
+  OpeningBook() = default;
 
   bool load_book(const std::string &path);
-  Action probe_book(uint64_t position_key, int min_weight = 1);
-  bool is_loaded() const { return book_loaded; }
+  Action probe_book(const BoardState &position, int min_weight = 1);
+  bool is_loaded() const { return book_positions && !book_positions->empty(); }
   void clear_book() {
-    book_positions.clear();
-    book_loaded = false;
+    book_positions.reset();
   }
 
   uint64_t polyglot_key(const BoardState &pos);
@@ -59,38 +56,33 @@ struct TimeManager {
   uint64_t soft_limit;
   uint64_t hard_limit;
   bool use_panic_mode;
-  int move_number;
-  int time_stability;
-  uint64_t nodes_searched;
 
   TimeManager()
       : allocated_time(0), max_time(0), panic_time(0), soft_limit(0),
-        hard_limit(0), use_panic_mode(false), move_number(0), time_stability(0),
-        nodes_searched(0) {}
+        hard_limit(0), use_panic_mode(false) {}
 
   void initialize(uint64_t time_left, uint64_t increment, int moves_to_go,
-                  int game_move);
+                  uint32_t game_move);
   bool should_stop(uint64_t elapsed, bool best_move_stable, bool in_trouble);
-  void update_node_count(uint64_t nodes);
 };
 
 struct ThreadInfoBase {
   uint16_t thread_id = 0;
-  std::array<StateRecord, MaxGameLen> game_hist;
-  uint16_t game_ply;
-  uint16_t search_ply;
+  std::array<StateRecord, MaxGameLen> game_hist{};
+  uint16_t game_ply = 0;
+  uint16_t search_ply = 0;
 
   std::vector<RootAction> root_moves;
 
   std::chrono::steady_clock::time_point start_time;
 
-  int seldepth;
+  int seldepth = 0;
 
-  uint64_t max_time;
-  uint64_t opt_time;
-  uint64_t original_opt;
+  uint64_t max_time = 0;
+  uint64_t opt_time = 0;
+  uint64_t original_opt = 0;
 
-  uint16_t time_checks;
+  uint16_t time_checks = 0;
 
   NNUE_State nnue_state;
 
@@ -102,17 +94,18 @@ struct ThreadInfoBase {
   MultiArray<Action, MaxSearchPly + 1, 2> KillerMoves;
   MultiArray<Action, 14, 64> CounterMoves;
 
-  uint8_t current_iter;
+  uint16_t current_iter = 0;
 
   uint16_t multipv = 1;
-  uint16_t multipv_index;
+  uint16_t multipv_index = 0;
   uint16_t variety = 150;
 
-  Action excluded_move;
+  Action excluded_move = MoveNone;
   std::array<Action, MaxActions> best_moves;
   std::array<int, MaxActions> best_scores;
 
-  int max_iter_depth = MaxSearchPly;
+  int max_iter_depth = MaxRootDepth;
+  int mate_search = 0;
   uint64_t max_nodes_searched = UINT64_MAX / 2;
   uint64_t opt_nodes_searched = UINT64_MAX / 2;
 
@@ -124,12 +117,13 @@ struct ThreadInfoBase {
   int human_elo = 3401;
 
   std::array<Action, MaxSearchPly * MaxSearchPly> pv;
-  std::array<int, 5> pv_material;
 
   BoardState position;
 
   uint8_t searches = 0;
-  uint8_t phase;
+  uint8_t phase = PhaseTypes::Opening;
+  uint8_t cached_eval_phase = SquareNone;
+  const NNUE_Params *cached_eval_network = nullptr;
   bool infinite_search = false;
 
   float opening_aggressiveness = 1.50f;
@@ -148,7 +142,6 @@ struct ThreadInfoBase {
   int root_completed_depth = 0;
   bool root_moves_limited = false;
 
-
   uint64_t max_move_time = 0;
   uint64_t move_overhead = 30;
 
@@ -157,9 +150,9 @@ struct ThreadInfoBase {
   uint64_t max_nodes = 0;
 
   bool use_ponder = true;
-  bool pondering = false;
+
   Action ponder_move = MoveNone;
-  bool ponder_hit = false;
+
   std::chrono::steady_clock::time_point ponder_start_time;
 
   bool use_syzygy = false;
@@ -187,18 +180,21 @@ struct ThreadInfoBase {
 
 struct ThreadInfo : ThreadInfoBase {
   std::atomic<uint64_t> nodes{0};
-  std::atomic<bool> searching{false};
+  std::atomic<bool> pondering{false};
+  std::atomic<bool> ponder_hit{false};
 
   ThreadInfo() = default;
   ThreadInfo(const ThreadInfo &other) : ThreadInfoBase(other) {
     nodes.store(other.nodes.load());
-    searching.store(other.searching.load());
+    pondering.store(other.pondering.load());
+    ponder_hit.store(other.ponder_hit.load());
   }
   ThreadInfo &operator=(const ThreadInfo &other) {
     if (this != &other) {
       ThreadInfoBase::operator=(other);
       nodes.store(other.nodes.load());
-      searching.store(other.searching.load());
+      pondering.store(other.pondering.load());
+      ponder_hit.store(other.ponder_hit.load());
     }
     return *this;
   }
@@ -216,13 +212,15 @@ struct ThreadData {
   std::vector<std::thread> threads;
   int num_threads = 1;
   std::atomic<bool> stop{true};
-  std::atomic<bool> terminate{false};
+
   std::atomic<bool> is_frc{false};
   std::mutex data_mutex;
   std::atomic<uint64_t> tb_hits{0};
   std::atomic<uint64_t> tb_fails{0};
-  std::mutex search_mutex;
-  std::condition_variable search_cv;
+  std::atomic<bool> pondering{false};
+  std::atomic<int64_t> ponder_hit_time{-1};
+  std::mutex control_mutex;
+  std::condition_variable control_cv;
 };
 
 inline ThreadData thread_data;
@@ -246,17 +244,12 @@ inline void safe_print_cerr(const std::string &s) {
   std::cerr << s << std::endl;
 }
 
-inline void safe_fflush() {
-  std::lock_guard<std::mutex> lg(get_print_mutex());
-  fflush(stdout);
-}
-
 inline uint64_t TT_size = (1 << 20);
 inline std::vector<TTBucket> TT(TT_size);
 
 inline std::atomic<bool> TT_resizing{false};
 
-inline void new_game(ThreadInfo &thread_info, std::vector<TTBucket> &TT) {
+inline void new_game(ThreadInfo &thread_info, std::vector<TTBucket> &table) {
   std::lock_guard<std::mutex> lg(thread_data.data_mutex);
   thread_info.game_ply = 0;
   thread_info.thread_id = 0;
@@ -268,9 +261,21 @@ inline void new_game(ThreadInfo &thread_info, std::vector<TTBucket> &TT) {
   thread_info.game_hist.fill({});
   thread_info.nodes.store(0);
   TT_resizing.store(true);
-  TT.assign(TT_size, TTBucket{});
+  table.assign(TT_size, TTBucket{});
   TT_resizing.store(false);
   thread_info.searches = 0;
+  thread_info.search_ply = 0;
+  thread_info.phase = PhaseTypes::Opening;
+  thread_info.cached_eval_phase = SquareNone;
+  thread_info.cached_eval_network = nullptr;
+  thread_info.attack_mode = false;
+  thread_info.last_root_eval = thread_info.prev_root_eval = 0;
+  thread_info.root_completed_depth = 0;
+  thread_info.phase_hit_counts.fill(0);
+  thread_info.KillerMoves.fill({});
+  thread_info.CounterMoves.fill({});
+  thread_info.recent_book_keys.fill(0);
+  thread_info.recent_book_head = 0;
 }
 
 constexpr inline uint32_t get_hash_low_bits(uint64_t hash) noexcept {
@@ -280,9 +285,9 @@ constexpr inline uint32_t get_hash_low_bits(uint64_t hash) noexcept {
 constexpr inline int32_t score_to_tt(int32_t score, int32_t ply) noexcept {
   if (score == ScoreNone)
     return ScoreNone;
-  if (score > MateScore)
+  if (score >= MateThreshold)
     return score + ply;
-  if (score < -MateScore)
+  if (score <= -MateThreshold)
     return score - ply;
   return score;
 }
@@ -290,9 +295,9 @@ constexpr inline int32_t score_to_tt(int32_t score, int32_t ply) noexcept {
 constexpr inline int32_t score_from_tt(int32_t score, int32_t ply) noexcept {
   if (score == ScoreNone)
     return ScoreNone;
-  if (score > MateScore)
+  if (score >= MateThreshold)
     return score - ply;
-  if (score < -MateScore)
+  if (score <= -MateThreshold)
     return score + ply;
   return score;
 }
@@ -301,13 +306,15 @@ inline void resize_TT(int size) {
   std::lock_guard<std::mutex> lock(thread_data.data_mutex);
 
   TT_resizing.store(true, std::memory_order_release);
-  TT_size = static_cast<uint64_t>(size) * 1024 * 1024 / sizeof(TTBucket);
-  TT.assign(TT_size, TTBucket{});
+  const uint64_t requested = static_cast<uint64_t>(std::clamp(size, 1, 131072)) * 1024 * 1024 / sizeof(TTBucket);
+  try {
+    std::vector<TTBucket> replacement(requested);
+    TT.swap(replacement);
+    TT_size = TT.size();
+  } catch (const std::bad_alloc &) {
+    safe_printf("info string Hash allocation failed; keeping current table\n");
+  }
   TT_resizing.store(false, std::memory_order_release);
-}
-
-constexpr inline uint64_t hash_to_idx(uint64_t hash) noexcept {
-  return (uint128_t(hash) * uint128_t(TT_size)) >> 64;
 }
 
 inline uint64_t safe_TT_size() {
@@ -320,7 +327,6 @@ inline uint64_t safe_TT_size() {
 inline void safe_TT_prefetch(uint64_t hash) {
   if (TT_resizing.load(std::memory_order_acquire))
     return;
-  std::lock_guard<std::mutex> lg(thread_data.data_mutex);
   uint64_t size = TT.size();
   if (size == 0)
     return;
@@ -335,8 +341,10 @@ constexpr inline int entry_quality(const TTEntry &entry, int searches) noexcept 
   return entry.depth - age_diff * 8;
 }
 
+inline std::array<std::mutex, 4096> tt_mutexes;
+
 inline TTEntry probe_entry(uint64_t hash, bool &hit, uint8_t searches,
-                           std::vector<TTBucket> &TT) {
+                           std::vector<TTBucket> &table) {
   static thread_local TTBucket fallback_bucket;
   auto fallback = [&]() {
     hit = false;
@@ -347,7 +355,7 @@ inline TTEntry probe_entry(uint64_t hash, bool &hit, uint8_t searches,
 
   if (TT_resizing.load(std::memory_order_acquire))
     return fallback();
-  uint64_t size = TT.size();
+  uint64_t size = table.size();
   if (size == 0)
     return fallback();
   uint32_t zobrist_key = get_hash_low_bits(hash);
@@ -355,7 +363,8 @@ inline TTEntry probe_entry(uint64_t hash, bool &hit, uint8_t searches,
   if (idx >= size)
     return fallback();
 
-  auto &bucket = TT[idx];
+  std::lock_guard<std::mutex> lock(tt_mutexes[idx % tt_mutexes.size()]);
+  auto &bucket = table[idx];
   __builtin_prefetch(&bucket, 0, 1);
   auto &entries = bucket.entries;
 
@@ -392,7 +401,7 @@ inline void insert_entry(TTEntry &entry, uint64_t hash, int depth, Action best_m
   uint32_t zobrist_key = get_hash_low_bits(hash);
   auto set_entry = [&](TTEntry &e) {
     e.position_key = zobrist_key;
-    e.depth = static_cast<uint8_t>(depth);
+    e.depth = static_cast<uint8_t>(std::clamp(depth, 0, 255));
     e.static_eval = static_eval;
     e.score = score;
     e.age_bound = (searches << 2) | bound_type;
@@ -416,6 +425,7 @@ inline void insert_entry(TTEntry &entry, uint64_t hash, int depth, Action best_m
   uint64_t idx = (uint128_t(hash) * uint128_t(size)) >> 64;
   if (idx >= size)
     idx = idx % size;
+  std::lock_guard<std::mutex> lock(tt_mutexes[idx % tt_mutexes.size()]);
   auto &bucket = TT[idx];
   auto &entries = bucket.entries;
 
@@ -445,8 +455,42 @@ inline void insert_entry(TTEntry &entry, uint64_t hash, int depth, Action best_m
   }
   TTEntry &we = *worst;
   set_entry(we);
-  if (best_move != MoveNone)
-    we.best_move = best_move;
+  we.best_move = best_move;
+}
+
+constexpr inline uint64_t mix_key(uint64_t value) {
+  value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+  return value ^ (value >> 31);
+}
+
+inline uint64_t castling_key(int color, int side, int square) {
+  return square == SquareNone ? 0 : mix_key(zobrist_keys[castling_index + color * 2 + side] ^ uint64_t(square));
+}
+
+inline uint64_t ep_key(const BoardState &position) {
+  const int ep = position.ep_square, color = position.color;
+  if (!is_valid_square(ep)) return 0;
+  const int captured = ep + (color ? 8 : -8);
+  if (!is_valid_square(captured) || position.board[ep] ||
+      position.board[captured] != Pieces::WPawn + (color ^ 1)) return 0;
+  uint64_t candidates = PAWN_ATK_SAFE(color ^ 1, ep) & position.colors_bb[color] & position.pieces_bb[PieceTypes::Pawn];
+  const uint64_t king_bb = position.colors_bb[color] & position.pieces_bb[PieceTypes::King];
+  if (!king_bb) return 0;
+  const int king = get_lsb(king_bb);
+  const uint64_t enemy = position.colors_bb[color ^ 1] & ~(1ULL << captured);
+  while (candidates) {
+    const int from = pop_lsb(candidates);
+    const uint64_t occ = ((position.colors_bb[0] | position.colors_bb[1]) & ~(1ULL << from) & ~(1ULL << captured)) | (1ULL << ep);
+    const uint64_t attacks =
+        (PAWN_ATK_SAFE(color, king) & position.pieces_bb[PieceTypes::Pawn]) |
+        (KNIGHT_ATK_SAFE(king) & position.pieces_bb[PieceTypes::Knight]) |
+        (KING_ATK_SAFE(king) & position.pieces_bb[PieceTypes::King]) |
+        (get_bishop_attacks(king, occ) & (position.pieces_bb[PieceTypes::Bishop] | position.pieces_bb[PieceTypes::Queen])) |
+        (get_rook_attacks(king, occ) & (position.pieces_bb[PieceTypes::Rook] | position.pieces_bb[PieceTypes::Queen]));
+    if (!(attacks & enemy)) return mix_key(zobrist_keys[ep_index] ^ uint64_t(ep % 8));
+  }
+  return 0;
 }
 
 inline void calculate(BoardState &position) {
@@ -471,14 +515,10 @@ inline void calculate(BoardState &position) {
   if (position.color) {
     hash ^= zobrist_keys[side_index];
   }
-  if (position.ep_square != 255) {
-    hash ^= zobrist_keys[ep_index];
-  }
-  for (int indx = castling_index; indx < 778; indx++) {
-    if (position.castling_squares[indx > 775][(indx & 1)] != SquareNone) {
-      hash ^= zobrist_keys[indx];
-    }
-  }
+  hash ^= ep_key(position);
+  for (int color = 0; color < 2; ++color)
+    for (int side = 0; side < 2; ++side)
+      hash ^= castling_key(color, side, position.castling_squares[color][side]);
   position.zobrist_key = hash;
   position.pawn_key = pawn_hash;
 }
@@ -494,174 +534,85 @@ inline int64_t time_elapsed(std::chrono::steady_clock::time_point start_time) {
 
 class Barrier {
 public:
-  Barrier(int64_t expected) { reset(expected); }
-
-  auto reset(int64_t expected) -> void {
-
-    m_total.store(expected, std::memory_order_seq_cst);
-    m_current.store(expected, std::memory_order_seq_cst);
+  explicit Barrier(size_t expected) : total(expected), remaining(expected) {}
+  void reset(size_t expected) {
+    std::lock_guard lock(mutex);
+    total = remaining = expected;
   }
-
-  auto arrive_and_wait() {
-    std::unique_lock lock{wait_mutex};
-
-    const auto current = --m_current;
-
-    if (current > 0) {
-      const auto phase = m_phase.load(std::memory_order_relaxed);
-      wait_signal.wait(lock, [this, phase] {
-        return (phase - m_phase.load(std::memory_order_acquire)) < 0 ||
-               m_cancel.load(std::memory_order_acquire);
-      });
-
-      if (m_cancel.load(std::memory_order_acquire))
-        return;
-    } else {
-      const auto total = m_total.load(std::memory_order_acquire);
-      m_current.store(total, std::memory_order_release);
-
-      m_phase++;
-
-      wait_signal.notify_all();
-    }
+  void arrive_and_wait() {
+    std::unique_lock lock(mutex);
+    const auto phase = generation;
+    if (--remaining == 0) {
+      remaining = total;
+      ++generation;
+      condition.notify_all();
+    } else condition.wait(lock, [&] { return generation != phase; });
   }
-
-  auto cancel() {
-    m_cancel.store(true, std::memory_order_release);
-    wait_signal.notify_all();
-  }
-
-  auto clear_cancel() { m_cancel.store(false, std::memory_order_release); }
-
 private:
-  std::atomic<int64_t> m_total{};
-  std::atomic<int64_t> m_current{};
-  std::atomic<int64_t> m_phase{};
-
-  std::atomic<bool> m_cancel{};
-
-  std::mutex wait_mutex{};
-  std::condition_variable wait_signal{};
+  size_t total, remaining, generation = 0;
+  std::mutex mutex;
+  std::condition_variable condition;
 };
 
-inline Barrier reset_barrier{1};
-inline Barrier idle_barrier{1};
-inline Barrier search_end_barrier{1};
-
-
 inline bool OpeningBook::load_book(const std::string &path) {
-  book_path = path;
-  if (path.empty()) {
-    book_loaded = false;
-    return false;
-  }
-
-  if (path.size() >= 4) {
-    auto ext = path.substr(path.size() - 4);
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-    if (ext != ".bin" && ext != ".bok" && ext != "book") {
-
-      safe_print_cerr(std::string("Unsupported opening book format: ") + path +
-                      std::string(" (supported: .bin/.book)"));
-      book_loaded = false;
-      return false;
-    }
-  }
-
-  return load_polyglot_book(path);
+  clear_book();
+  return !path.empty() && load_polyglot_book(resolve_asset(path));
 }
 
-inline Action OpeningBook::probe_book(uint64_t position_key, int min_weight) {
-  if (!book_loaded || book_positions.empty())
-    return MoveNone;
-  auto it = book_positions.find(position_key);
-  if (it == book_positions.end()) {
-    return MoveNone;
+inline int legal_movegen(const BoardState &position, Action *moves);
+
+inline Action OpeningBook::probe_book(const BoardState &position, int min_weight) {
+  if (!is_loaded()) return MoveNone;
+  auto it = book_positions->find(polyglot_key(position));
+  if (it == book_positions->end()) return MoveNone;
+  std::array<Action, MaxActions> legal{};
+  const int count = legal_movegen(position, legal.data());
+  std::vector<std::pair<Action, uint16_t>> candidates;
+  uint64_t total = 0;
+  for (const auto &entry : it->second) {
+    if (!entry.weight || entry.weight < std::max(0, min_weight)) continue;
+    for (int i = 0; i < count; ++i) {
+      const Action move = legal[i];
+      if (extract_from(move) != extract_from(entry.move) || extract_to(move) != extract_to(entry.move)) continue;
+      const bool promo = extract_type(move) == MoveTypes::Promotion;
+      if (promo != (extract_type(entry.move) == MoveTypes::Promotion) ||
+          (promo && extract_promo(move) != extract_promo(entry.move))) continue;
+
+      candidates.emplace_back(move, entry.weight);
+      total += entry.weight;
+      break;
+    }
   }
-
-  const auto &entries = it->second;
-  if (entries.empty()) {
-    return MoveNone;
+  if (!total) return MoveNone;
+  uint64_t ticket = std::uniform_int_distribution<uint64_t>(0, total - 1)(Random::rd);
+  for (const auto &[move, weight] : candidates) {
+    if (ticket < weight) return move;
+    ticket -= weight;
   }
-
-  std::vector<const BookEntry *> filtered;
-  filtered.reserve(entries.size());
-  for (auto &e : entries)
-    if (e.weight >= (uint16_t)min_weight)
-      filtered.push_back(&e);
-  if (filtered.empty())
-    return MoveNone;
-
-  uint32_t total_weight = 0;
-  for (const auto *entry : filtered)
-    total_weight += entry->weight;
-
-  if (total_weight == 0) {
-    return filtered[0]->move;
-  }
-
-  thread_local static std::mt19937 rng(Random::rd());
-  uint32_t random_value =
-      std::uniform_int_distribution<uint32_t>(0, total_weight - 1)(rng);
-  uint32_t current_weight = 0;
-
-  for (const auto *entry : filtered) {
-    current_weight += entry->weight;
-    if (random_value < current_weight)
-      return entry->move;
-  }
-  return filtered[0]->move;
+  return MoveNone;
 }
 
 inline bool OpeningBook::load_polyglot_book(const std::string &filename) {
-  std::ifstream file(filename, std::ios::binary);
-  if (!file.is_open()) {
-    return false;
+  std::ifstream file(filename, std::ios::binary | std::ios::ate);
+  if (!file || file.tellg() <= 0 || file.tellg() % 16 != 0) return false;
+  file.seekg(0);
+  auto positions = std::make_shared<Positions>();
+  std::array<unsigned char, 16> bytes{};
+  while (file.read(reinterpret_cast<char *>(bytes.data()), bytes.size())) {
+    uint64_t key = 0;
+    for (int i = 0; i < 8; ++i) key = (key << 8) | bytes[i];
+
+    if (key == 0) continue;
+    const unsigned encoded = (unsigned(bytes[8]) << 8) | bytes[9];
+    const uint16_t weight = (unsigned(bytes[10]) << 8) | bytes[11];
+    const int from = (encoded >> 6) & 63, to = encoded & 63, promo = (encoded >> 12) & 7;
+    if (encoded & 0x8000 || promo > 4 || from == to) { clear_book(); return false; }
+    const Action move = promo ? pack_move_promo(from, to, promo - 1) : pack_move(from, to, MoveTypes::Normal);
+    (*positions)[key].push_back({move, weight});
   }
-
-  book_positions.clear();
-
-  struct PolyglotEntry {
-    uint64_t key;
-    uint16_t move;
-    uint16_t weight;
-    uint32_t learn;
-  };
-
-  PolyglotEntry entry;
-  while (file.read(reinterpret_cast<char *>(&entry), sizeof(entry))) {
-
-    uint64_t key = __builtin_bswap64(entry.key);
-    uint16_t move = __builtin_bswap16(entry.move);
-    uint16_t weight = __builtin_bswap16(entry.weight);
-    uint32_t learn = __builtin_bswap32(entry.learn);
-
-    int from = ((move >> 6) & 0x3F);
-    int to = (move & 0x3F);
-    int promotion = ((move >> 12) & 0x7);
-
-    Action internal_move;
-    if (promotion == 0) {
-      internal_move = pack_move(from, to, MoveTypes::Normal);
-    } else {
-
-      uint8_t promo_piece = promotion - 1;
-      internal_move = pack_move_promo(from, to, promo_piece);
-    }
-
-    BookEntry book_entry;
-    book_entry.key = key;
-    book_entry.move = internal_move;
-    book_entry.weight = weight;
-    book_entry.learn = learn;
-
-    book_positions[key].push_back(book_entry);
-  }
-
-  file.close();
-  book_loaded = !book_positions.empty();
-  return book_loaded;
+  if (!file.eof()) { clear_book(); return false; }
+  book_positions = std::move(positions);
+  return is_loaded();
 }
 
 inline uint64_t OpeningBook::polyglot_key(const BoardState &pos) {
@@ -724,8 +675,7 @@ inline uint64_t OpeningBook::polyglot_key(const BoardState &pos) {
 }
 
 inline void TimeManager::initialize(uint64_t time_left, uint64_t increment,
-                                    int moves_to_go, int game_move) {
-  move_number = game_move;
+                                    int moves_to_go, uint32_t game_move) {
 
   uint64_t reserved = std::min<uint64_t>(50, time_left / 10);
   uint64_t usable_time = (time_left > reserved) ? (time_left - reserved)
@@ -766,7 +716,6 @@ inline void TimeManager::initialize(uint64_t time_left, uint64_t increment,
     soft_limit = hard_limit;
 
   use_panic_mode = false;
-  time_stability = 0;
 }
 
 inline bool TimeManager::should_stop(uint64_t elapsed, bool best_move_stable,
@@ -787,8 +736,6 @@ inline bool TimeManager::should_stop(uint64_t elapsed, bool best_move_stable,
   }
   return false;
 }
-
-inline void TimeManager::update_node_count(uint64_t nodes) { nodes_searched = nodes; }
 
 inline void adjust_soft_limit(ThreadInfo &thread_info, uint64_t best_move_nodes,
                               int bm_stability, int best_score) noexcept {
@@ -816,7 +763,8 @@ inline void adjust_soft_limit(ThreadInfo &thread_info, uint64_t best_move_nodes,
   }
 
   uint64_t new_time =
-      thread_info.original_opt * factor * bm_factor * node_factor * wdl_factor;
+      static_cast<uint64_t>(std::clamp<long double>(
+          static_cast<long double>(thread_info.original_opt) * factor * bm_factor * node_factor * wdl_factor,
+          1.0L, static_cast<long double>(thread_info.max_time)));
   thread_info.opt_time = std::min<uint64_t>(new_time, thread_info.max_time);
 }
-

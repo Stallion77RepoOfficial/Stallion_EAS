@@ -1,4 +1,4 @@
- 
+
 
 #ifndef TBPROBE_H
 #define TBPROBE_H
@@ -33,7 +33,6 @@ typedef uint8_t bool;
 #endif
 #endif
 
- 
 extern bool tb_init_impl(const char *_path);
 extern unsigned tb_probe_wdl_impl(
     uint64_t _white,
@@ -60,20 +59,19 @@ extern unsigned tb_probe_root_impl(
     bool     _turn,
     unsigned *_results);
 
- 
 #define TB_MAX_MOVES                (192+1)
 #define TB_MAX_CAPTURES             64
 #define TB_MAX_PLY                  256
-#define TB_CASTLING_K               0x1      
-#define TB_CASTLING_Q               0x2      
-#define TB_CASTLING_k               0x4      
-#define TB_CASTLING_q               0x8      
+#define TB_CASTLING_K               0x1
+#define TB_CASTLING_Q               0x2
+#define TB_CASTLING_k               0x4
+#define TB_CASTLING_q               0x8
 
-#define TB_LOSS                     0        
-#define TB_BLESSED_LOSS             1        
-#define TB_DRAW                     2        
-#define TB_CURSED_WIN               3        
-#define TB_WIN                      4        
+#define TB_LOSS                     0
+#define TB_BLESSED_LOSS             1
+#define TB_DRAW                     2
+#define TB_CURSED_WIN               3
+#define TB_WIN                      4
 
 #define TB_PROMOTES_NONE            0
 #define TB_PROMOTES_QUEEN           1
@@ -130,16 +128,12 @@ extern unsigned tb_probe_root_impl(
 #define TB_RESULT_STALEMATE         TB_SET_WDL(0, TB_DRAW)
 #define TB_RESULT_FAILED            0xFFFFFFFF
 
- 
 extern unsigned TB_LARGEST;
 
- 
 bool tb_init(const char *_path);
 
- 
 void tb_free(void);
 
- 
 static inline unsigned tb_probe_wdl(
     uint64_t _white,
     uint64_t _black,
@@ -162,7 +156,6 @@ static inline unsigned tb_probe_wdl(
         _bishops, _knights, _pawns, _ep, _turn);
 }
 
- 
 static inline unsigned tb_probe_root(
     uint64_t _white,
     uint64_t _black,
@@ -205,7 +198,6 @@ struct TbRootMoves {
   struct TbRootMove moves[TB_MAX_MOVES];
 };
 
- 
 int tb_probe_root_dtz(
     uint64_t _white,
     uint64_t _black,
@@ -223,7 +215,6 @@ int tb_probe_root_dtz(
     bool useRule50,
     struct TbRootMoves *_results);
 
- 
 int tb_probe_root_wdl(uint64_t _white,
     uint64_t _black,
     uint64_t _kings,
@@ -239,7 +230,6 @@ int tb_probe_root_wdl(uint64_t _white,
     bool useRule50,
     struct TbRootMoves *_results);
 
- 
 #ifndef TB_NO_HELPER_API
 
 extern unsigned tb_pop_count(uint64_t _bb);

@@ -44,6 +44,7 @@ inline void compute_human_params(ThreadInfo &thread_info) {
 
 inline void run_thread(BoardState &position, ThreadInfo &thread_info, std::thread &s) {
 
+  thread_data.stop = false;
   s = std::thread(search_position, std::ref(position), std::ref(thread_info),
                   std::ref(TT));
 }
@@ -52,6 +53,7 @@ inline uint64_t perft(int depth, BoardState &position, bool first,
                ThreadInfo &thread_info)
 
 {
+  if (depth == 0) return 1;
   uint64_t total_nodes = 0;
   uint64_t checkers = attacks_square(
       position, get_king_pos(position, position.color), position.color ^ 1);
@@ -95,7 +97,7 @@ inline uint64_t perft(int depth, BoardState &position, bool first,
   return total_nodes;
 }
 
-inline void bench(BoardState &position, ThreadInfo &thread_info) {
+inline void bench(BoardState &position, ThreadInfo &thread_info, int depth = 12) {
   std::vector<std::string> fens = {
       "2r2k2/8/4P1R1/1p6/8/P4K1N/7b/2B5 b - - 0 55",
       "2r4r/1p4k1/1Pnp4/3Qb1pq/8/4BpPp/5P2/2RR1BK1 w - - 0 42",
@@ -148,7 +150,12 @@ inline void bench(BoardState &position, ThreadInfo &thread_info) {
       "2r2b2/5p2/5k2/p1r1pP2/P2pB3/1P3P2/K1P3R1/7R w - - 23 93"};
 
   thread_info.max_time = UINT64_MAX / 2, thread_info.opt_time = UINT64_MAX / 2;
-  thread_info.max_iter_depth = 12;
+  thread_info.max_iter_depth = std::clamp(depth, 1, MaxRootDepth);
+  thread_info.time_manager.hard_limit = thread_info.max_time;
+  thread_info.time_manager.soft_limit = thread_info.opt_time;
+  thread_info.max_nodes_searched = thread_info.opt_nodes_searched = UINT64_MAX / 2;
+  thread_info.pondering = false;
+  thread_data.pondering = false;
   uint64_t total_nodes = 0;
 
   auto start = std::chrono::steady_clock::now();
@@ -158,16 +165,19 @@ inline void bench(BoardState &position, ThreadInfo &thread_info) {
     set_board(position, thread_info, fen);
     thread_info.start_time = std::chrono::steady_clock::now();
     thread_info.infinite_search = false;
+    thread_info.root_moves_limited = false;
+    thread_info.root_moves.clear();
+    thread_data.stop = false;
     search_position(position, thread_info, TT);
     total_nodes += thread_info.nodes.load();
   }
 
   safe_printf("Bench: %" PRIu64 " nodes %" PRIi64 " nps\n", total_nodes,
-              (int64_t)(total_nodes * 1000 / time_elapsed(start)));
+              (int64_t)(total_nodes * 1000 / safe_elapsed(start)));
 }
 
 inline void uci(ThreadInfo &thread_info, BoardState &position,
-         std::istream &in_stream = std::cin, bool interactive = true) noexcept {
+         std::istream &in_stream = std::cin, bool interactive = true) {
   setvbuf(stdin, NULL, _IONBF, 0);
   setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -178,17 +188,32 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
   new_game(thread_info, TT);
   set_board(position, thread_info,
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-  load_nnue_file();
+  if (!load_nnue_file())
+    safe_printf("info string NNUE files unavailable; using HCE\n");
 
   std::string input;
 
   std::thread s;
 
-  auto safe_join = [](std::thread &t) {
-    try {
-      if (t.joinable())
-        t.join();
-    } catch (...) {
+  auto safe_join = [](std::thread &t) { if (t.joinable()) t.join(); };
+  auto stop_search = [&] {
+    { std::lock_guard lock(thread_data.control_mutex); thread_data.stop = true; }
+    thread_data.control_cv.notify_all();
+    safe_join(s);
+  };
+  auto init_tablebases = [&] {
+    if (tb_initialized) tb_free();
+    tb_initialized = false;
+    if (thread_info.use_syzygy && !thread_info.syzygy_path.empty()) {
+      tb_initialized = tb_init(thread_info.syzygy_path.c_str()) && TB_LARGEST > 0;
+      safe_printf("info string Syzygy %s (largest %u)\n", tb_initialized ? "loaded" : "unavailable", TB_LARGEST);
+    }
+  };
+  auto init_book = [&] {
+    thread_info.opening_book.clear_book();
+    if (thread_info.use_opening_book && !thread_info.book_path.empty()) {
+      const bool loaded = thread_info.opening_book.load_book(thread_info.book_path);
+      safe_printf("info string Opening book %s\n", loaded ? "loaded" : "unavailable");
     }
   };
 
@@ -204,45 +229,17 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
     input_stream >> std::skipws >> command;
 
+    if (command == "setoption" || command == "ucinewgame" || command == "position" ||
+        command == "go" || command == "bench" || command == "perft" || command == "eval" ||
+        command == "flip" || command == "hashfull" || command == "d") stop_search();
+
     if (command == "d") {
       print_board(position);
       safe_printf("Fen: %s\n", export_fen(position, thread_info).c_str());
       continue;
     }
 
-    if (command == "quit") {
-      thread_data.stop = true;
-      search_end_barrier.cancel();
-
-      safe_join(s);
-      thread_data.terminate = true;
-
-      if (thread_data.num_threads > 0 && !thread_data.threads.empty()) {
-
-        try {
-          reset_barrier.cancel();
-          idle_barrier.cancel();
-          search_end_barrier.cancel();
-        } catch (...) {
-        }
-
-        {
-          std::lock_guard<std::mutex> lg(thread_data.data_mutex);
-          for (auto &t : thread_data.threads)
-            safe_join(t);
-          thread_data.thread_infos.clear();
-          thread_data.threads.clear();
-        }
-
-        try {
-          reset_barrier.clear_cancel();
-          idle_barrier.clear_cancel();
-          search_end_barrier.clear_cancel();
-        } catch (...) {
-        }
-      }
-      std::exit(0);
-    }
+    if (command == "quit") break;
 
     else if (command == "uci") {
       safe_printf(
@@ -278,12 +275,11 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           "option name MoveOverhead type spin default 30 min 0 max 1000\n"
           "option name Ponder type check default true\n"
           "option name UseSyzygy type check default false\n"
-          "option name SyzygyPath type string default \"\"\n"
-          "option name MaxDepth type spin default 0 min 0 max 256\n"
+          "option name SyzygyPath type string default <empty>\n"
           "option name MaxNodes type spin default 0 min 0 max 500000\n"
 
           "option name UseOpeningBook type check default false\n"
-          "option name BookPath type string default \"\"\n"
+          "option name BookPath type string default <empty>\n"
           "option name BookDepthLimit type spin default 0 min 0 max 50\n"
           "option name SyzygyProbeDepth type spin default 6 min 1 max 64\n"
           "option name SyzygyProbeLimit type spin default 6 min 1 max 7\n"
@@ -331,7 +327,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
           "option name EGCenterDist type spin default 10 min 0 max 30\n"
           "option name EGKingDist type spin default 5 min 0 max 20\n"
-          "option name EGPassedPawnRank type spin default 2 min 0 max 8\n"
+
           "option name EGMaterialThreshold type spin default 2000 min 500 max "
           "5000\n"
           "option name EGMaterialAdvantage type spin default 200 min 50 max "
@@ -451,10 +447,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
           "option name KZBishopXray type spin default 1 min 0 max 5\n"
           "option name KZRookXray type spin default 2 min 0 max 8\n"
-          "option name AttackModeHistMul type spin default 3 min 1 max 8\n"
-          "option name AttackModeHistDiv type spin default 2 min 1 max 8\n"
-          "option name AttackModeHistAdd type spin default 10 min 0 max 50\n"
-          "option name AttackModeHistCap type spin default 256 min 64 max 512\n"
+
           "option name NormalizationFactor type spin default 195 min 50 max "
           "500\n"
           "option name HalfmoveScaleMax type spin default 200 min 50 max 500\n"
@@ -466,6 +459,14 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           "300\n"
           "option name VarietyMultiplier type spin default 2 min 1 max 5\n");
 
+      safe_printf("option name MaxDepth type spin default 0 min 0 max %d\n", MaxRootDepth);
+      for (const auto &param : params) {
+        if (param.name == "RazorMargin" || param.name == "ProbCutMargin" ||
+            param.name == "MultiCutDepth" || param.name == "MultiCutMoves" || param.name == "MultiCutCuts" ||
+            param.name == "HistPruneDepth" || param.name == "HistPruneThreshold") continue;
+        safe_printf("option name %s type spin default %d min %d max %d\n",
+                    param.name.c_str(), param.value, param.min, param.max);
+      }
       safe_printf("uciok\n");
     }
 
@@ -500,16 +501,15 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         }
       }
 
-      if (!valueStr.empty()) {
-        size_t pos = valueStr.find_first_not_of(" \t");
-        if (pos != std::string::npos && pos > 0)
-          valueStr.erase(0, pos);
-      }
+      const auto first = valueStr.find_first_not_of(" \t\r");
+      valueStr = first == std::string::npos ? "" : valueStr.substr(first, valueStr.find_last_not_of(" \t\r") - first + 1);
+      if (valueStr == "<empty>" || valueStr == "\"\"") valueStr.clear();
 
       auto parse_int = [](const std::string &s, bool &ok) {
         try {
-          int v = std::stoi(s);
-          ok = true;
+          size_t end = 0;
+          int v = std::stoi(s, &end);
+          ok = end == s.size();
           return v;
         } catch (...) {
           ok = false;
@@ -518,8 +518,9 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       };
       auto parse_uint64 = [](const std::string &s, bool &ok) -> uint64_t {
         try {
-          unsigned long long tmp = std::stoull(s);
-          ok = true;
+          size_t end = 0;
+          unsigned long long tmp = std::stoull(s, &end);
+          ok = !s.empty() && s[0] != '-' && end == s.size();
           return static_cast<uint64_t>(tmp);
         } catch (...) {
           ok = false;
@@ -527,7 +528,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         }
       };
       auto to_bool = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
         return s == "true" || s == "1" || s == "yes" || s == "on";
       };
       auto set_spin = [&](int lo, int hi, int &out) {
@@ -550,73 +551,66 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         return true;
       };
 
+      auto lowercase = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+        return value;
+      };
+      optName = lowercase(optName);
       if (optName.empty()) {
         continue;
       }
 
-      if (optName == "Use NNUE" || optName == "UseNNUE" || optName == "use_nnue") {
+      if (optName == "use nnue" || optName == "usennue" || optName == "use_nnue" ||
+          optName == "uci_limitstrength" || optName == "uci_chess960" || optName == "ponder" ||
+          optName == "usesyzygy" || optName == "syzygy50moverule" || optName == "useopeningbook") {
+        const auto value = lowercase(valueStr);
+        if (value != "true" && value != "false" && value != "1" && value != "0" &&
+            value != "yes" && value != "no" && value != "on" && value != "off") {
+          safe_printf("info string Invalid boolean option value\n");
+          continue;
+        }
+      }
+
+      std::fill(TT.begin(), TT.end(), TTBucket{});
+      thread_info.PawnCorrHist.fill({});
+      thread_info.NonPawnCorrHist.fill({});
+      if (optName == "use nnue" || optName == "usennue" || optName == "use_nnue") {
         use_nnue = to_bool(valueStr);
-      } else if (optName == "EvalFile" || optName == "evalfile") {
-        load_nnue_base(valueStr);
-      } else if (optName == "EvalFileAggressive" || optName == "evalfileaggressive") {
-        load_nnue_aggressive(valueStr);
-      } else if (optName == "Hash") {
+      } else if (optName == "evalfile") {
+        const bool loaded = load_nnue_base(valueStr);
+        safe_printf("info string EvalFile %s\n", loaded ? "loaded" : "load failed; previous network retained");
+      } else if (optName == "evalfileaggressive") {
+        const bool loaded = load_nnue_aggressive(valueStr);
+        safe_printf("info string EvalFileAggressive %s\n", loaded ? "loaded" : "load failed; previous network retained");
+      } else if (optName == "hash") {
         bool ok = false;
         int mb = parse_int(valueStr, ok);
         if (!ok)
           continue;
         resize_TT(std::clamp(mb, 1, 131072));
-      } else if (optName == "Threads") {
+      } else if (optName == "threads") {
         bool ok = false;
         int thr = parse_int(valueStr, ok);
         if (!ok)
           continue;
         thr = std::clamp(thr, 1, 1024);
-        thread_data.stop = true;
-        safe_join(s);
-        thread_data.terminate = true;
-
         try {
-          reset_barrier.cancel();
-          idle_barrier.cancel();
-          search_end_barrier.cancel();
-        } catch (...) {
+          std::vector<ThreadInfo> workers(thr - 1);
+          thread_data.threads.reserve(thr - 1);
+          thread_data.thread_infos.swap(workers);
+          thread_data.num_threads = thr;
+        } catch (const std::bad_alloc &) {
+          safe_printf("info string Thread allocation failed\n");
         }
-        for (auto &t : thread_data.threads) {
-          try {
-            if (t.joinable())
-              t.join();
-          } catch (...) {
-          }
-        }
-        try {
-          reset_barrier.clear_cancel();
-          idle_barrier.clear_cancel();
-          search_end_barrier.clear_cancel();
-        } catch (...) {
-        }
-        thread_data.thread_infos.clear();
-        thread_data.threads.clear();
-        thread_data.terminate = false;
-        thread_data.num_threads = thr;
-
-        reset_barrier.reset(thread_data.num_threads);
-        idle_barrier.reset(thread_data.num_threads);
-        search_end_barrier.reset(thread_data.num_threads);
-
-        for (int i = 0; i < thr - 1; i++) {
-          thread_data.thread_infos.emplace_back();
-          thread_data.threads.emplace_back(loop, i);
-        }
-      } else if (optName == "MultiPV") {
+      } else if (optName == "multipv") {
         int mv;
         if (!set_spin_req(1, 256, mv)) continue;
         thread_info.multipv = static_cast<uint16_t>(mv);
-      } else if (optName == "Variety") {
+      } else if (optName == "variety") {
         int v;
         if (!set_spin_req(0, 150, v)) continue;
         thread_info.variety = static_cast<uint16_t>(v);
-      } else if (optName == "UCI_LimitStrength") {
+      } else if (optName == "uci_limitstrength") {
         bool b = to_bool(valueStr);
         thread_info.is_human = b;
         if (!b) {
@@ -626,390 +620,309 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         } else {
           compute_human_params(thread_info);
         }
-      } else if (optName == "UCI_Chess960") {
+      } else if (optName == "uci_chess960") {
         bool b = to_bool(valueStr);
         thread_data.is_frc = b;
-      } else if (optName == "UCI_Elo") {
+      } else if (optName == "uci_elo") {
         if (!set_spin_req(500, 3401, thread_info.human_elo)) continue;
         if (thread_info.is_human) compute_human_params(thread_info);
-      } else if (optName == "OpeningAggressiveness") {
+      } else if (optName == "openingaggressiveness") {
         if (!set_aggressiveness(thread_info.opening_aggressiveness)) continue;
-      } else if (optName == "MiddlegameAggressiveness") {
+      } else if (optName == "middlegameaggressiveness") {
         if (!set_aggressiveness(thread_info.middlegame_aggressiveness)) continue;
-      } else if (optName == "LateMiddlegameAggressiveness") {
+      } else if (optName == "latemiddlegameaggressiveness") {
         if (!set_aggressiveness(thread_info.late_middlegame_aggressiveness)) continue;
-      } else if (optName == "EndgameAggressiveness") {
+      } else if (optName == "endgameaggressiveness") {
         if (!set_aggressiveness(thread_info.endgame_aggressiveness)) continue;
-      } else if (optName == "SacrificeLookAhead") {
+      } else if (optName == "sacrificelookahead") {
         if (!set_spin_req(0, 1, thread_info.sacrifice_lookahead)) continue;
-      } else if (optName == "SacrificeLookAheadTimeMultiplier") {
+      } else if (optName == "sacrificelookaheadtimemultiplier") {
         if (!set_spin_req(50, 200, thread_info.sacrifice_lookahead_time_multiplier)) continue;
-      } else if (optName == "SacrificeLookAheadAggressiveness") {
+      } else if (optName == "sacrificelookaheadaggressiveness") {
         if (!set_spin_req(50, 150, thread_info.sacrifice_lookahead_aggressiveness)) continue;
-      } else if (optName == "MaxMoveTime") {
+      } else if (optName == "maxmovetime") {
         int v;
         if (!set_spin_req(0, 10000, v)) continue;
         thread_info.max_move_time = static_cast<uint64_t>(v);
-      } else if (optName == "MoveOverhead") {
+      } else if (optName == "moveoverhead") {
         int v;
         if (!set_spin_req(0, 1000, v)) continue;
         thread_info.move_overhead = static_cast<uint64_t>(v);
-      } else if (optName == "Ponder") {
+      } else if (optName == "ponder") {
         thread_info.use_ponder = to_bool(valueStr);
         if (!thread_info.use_ponder) {
           thread_info.pondering = false;
           thread_info.ponder_hit = false;
           thread_info.ponder_move = MoveNone;
         }
-      } else if (optName == "MaxDepth") {
+      } else if (optName == "maxdepth") {
         int v;
-        if (!set_spin_req(0, 256, v)) continue;
+        if (!set_spin_req(0, MaxRootDepth, v)) continue;
         thread_info.max_depth = static_cast<uint16_t>(v);
-      } else if (optName == "MaxNodes") {
+      } else if (optName == "maxnodes") {
         bool ok = false;
         uint64_t v = parse_uint64(valueStr, ok);
         if (!ok) continue;
         thread_info.max_nodes = std::min(v, uint64_t{500000});
-      } else if (optName == "UseSyzygy") {
-        bool b = to_bool(valueStr);
-        if (b && !thread_info.syzygy_path.empty()) {
-          if (std::filesystem::exists(thread_info.syzygy_path)) {
-            if (tb_initialized) {
-              tb_free();
-              tb_initialized = false;
-            }
-            if (tb_init(thread_info.syzygy_path.c_str())) {
-              tb_initialized = true;
-              thread_info.use_syzygy = true;
-            } else {
-              thread_info.use_syzygy = false;
-            }
-          } else {
-            thread_info.use_syzygy = false;
-            if (tb_initialized) {
-              tb_free();
-              tb_initialized = false;
-            }
-          }
-        } else if (!b) {
-          thread_info.use_syzygy = false;
-          if (tb_initialized) {
-            tb_free();
-            tb_initialized = false;
-          }
-        } else {
-          thread_info.use_syzygy = false;
-          if (tb_initialized) {
-            tb_free();
-            tb_initialized = false;
-          }
-        }
-      } else if (optName == "SyzygyPath") {
-        if (valueStr != thread_info.syzygy_path) {
-          thread_info.syzygy_path = valueStr;
-          if (tb_initialized) {
-            tb_free();
-            tb_initialized = false;
-          }
-          if (thread_info.use_syzygy) {
-            if (std::filesystem::exists(valueStr)) {
-              if (tb_init(valueStr.c_str())) {
-                tb_initialized = true;
-              } else {
-                thread_info.use_syzygy = false;
-              }
-            } else {
-              thread_info.use_syzygy = false;
-            }
-          }
-        }
-      } else if (optName == "SyzygyProbeDepth") {
+      } else if (optName == "usesyzygy") {
+        thread_info.use_syzygy = to_bool(valueStr);
+        init_tablebases();
+      } else if (optName == "syzygypath") {
+        thread_info.syzygy_path = valueStr;
+        init_tablebases();
+      } else if (optName == "syzygyprobedepth") {
         if (!set_spin_req(1, 64, thread_info.syzygy_probe_depth)) continue;
-      } else if (optName == "SyzygyProbeLimit") {
+      } else if (optName == "syzygyprobelimit") {
         if (!set_spin_req(1, 7, thread_info.syzygy_probe_limit)) continue;
-      } else if (optName == "Syzygy50MoveRule") {
+      } else if (optName == "syzygy50moverule") {
         thread_info.syzygy_50_move_rule = to_bool(valueStr);
-      } else if (optName == "UseOpeningBook") {
-        bool b = to_bool(valueStr);
-        if (b && !thread_info.book_path.empty()) {
-          if (std::filesystem::exists(thread_info.book_path)) {
-            bool loaded = thread_info.opening_book.load_book(thread_info.book_path);
-            thread_info.use_opening_book = loaded;
-          } else {
-            thread_info.use_opening_book = false;
-          }
-        } else if (!b) {
-          thread_info.use_opening_book = false;
-          thread_info.opening_book.clear_book();
-        } else {
-          thread_info.use_opening_book = false;
-        }
-      } else if (optName == "BookPath") {
-        if (valueStr != thread_info.book_path) {
-          thread_info.book_path = valueStr;
-          thread_info.opening_book.clear_book();
-          if (thread_info.use_opening_book) {
-            if (std::filesystem::exists(valueStr)) {
-              bool loaded = thread_info.opening_book.load_book(valueStr);
-              if (!loaded) {
-                thread_info.use_opening_book = false;
-              }
-            } else {
-              thread_info.use_opening_book = false;
-            }
-          }
-        }
-      } else if (optName == "BookDepthLimit") {
+      } else if (optName == "useopeningbook") {
+        thread_info.use_opening_book = to_bool(valueStr);
+        init_book();
+      } else if (optName == "bookpath") {
+        thread_info.book_path = valueStr;
+        init_book();
+      } else if (optName == "bookdepthlimit") {
         if (!set_spin_req(0, 50, thread_info.book_depth_limit)) continue;
-      } else if (optName == "BookMinWeight") {
+      } else if (optName == "bookminweight") {
         if (!set_spin_req(0, 1000, thread_info.book_min_weight)) continue;
-      } else if (optName == "PonderTimeFactor") {
+      } else if (optName == "pondertimefactor") {
         if (!set_spin_req(0, 200, thread_info.ponder_time_factor)) continue;
-      } else if (optName == "Contempt")
+      } else if (optName == "contempt")
         set_spin(-100, 100, Contempt);
-      else if (optName == "TempoBonus")
+      else if (optName == "tempobonus")
         set_spin(0, 50, TempoBonus);
-      else if (optName == "TropismQueenWeight")
+      else if (optName == "tropismqueenweight")
         set_spin(0, 15, TropismQueenWeight);
-      else if (optName == "TropismRookWeight")
+      else if (optName == "tropismrookweight")
         set_spin(0, 15, TropismRookWeight);
-      else if (optName == "TropismKnightWeight")
+      else if (optName == "tropismknightweight")
         set_spin(0, 15, TropismKnightWeight);
-      else if (optName == "TropismBishopWeight")
+      else if (optName == "tropismbishopweight")
         set_spin(0, 15, TropismBishopWeight);
-      else if (optName == "ThreatPawnAttack")
+      else if (optName == "threatpawnattack")
         set_spin(0, 80, ThreatPawnAttack);
-      else if (optName == "ThreatMinorOnHeavy")
+      else if (optName == "threatminoronheavy")
         set_spin(0, 100, ThreatMinorOnHeavy);
-      else if (optName == "ThreatRookOnQueen")
+      else if (optName == "threatrookonqueen")
         set_spin(0, 100, ThreatRookOnQueen);
-      else if (optName == "ThreatRookOnMinor")
+      else if (optName == "threatrookonminor")
         set_spin(0, 60, ThreatRookOnMinor);
-      else if (optName == "ThreatHanging")
+      else if (optName == "threathanging")
         set_spin(0, 60, ThreatHanging);
 
-      else if (optName == "KSPawnShield")
+      else if (optName == "kspawnshield")
         set_spin(0, 60, KSPawnShield);
-      else if (optName == "KSPawnClose")
+      else if (optName == "kspawnclose")
         set_spin(0, 40, KSPawnClose);
-      else if (optName == "KSPawnMed")
+      else if (optName == "kspawnmed")
         set_spin(0, 30, KSPawnMed);
-      else if (optName == "KSNoPawn")
+      else if (optName == "ksnopawn")
         set_spin(-80, 0, KSNoPawn);
-      else if (optName == "KSOpenFile")
+      else if (optName == "ksopenfile")
         set_spin(-60, 0, KSOpenFile);
-      else if (optName == "KSSafeSqLow")
+      else if (optName == "kssafesqlow")
         set_spin(-120, 0, KSSafeSqLow);
-      else if (optName == "KSSafeSqMed")
+      else if (optName == "kssafesqmed")
         set_spin(-60, 0, KSSafeSqMed);
-      else if (optName == "KSCastleBonus")
+      else if (optName == "kscastlebonus")
         set_spin(0, 40, KSCastleBonus);
-      else if (optName == "KSCastledFlank")
+      else if (optName == "kscastledflank")
         set_spin(0, 60, KSCastledFlank);
-      else if (optName == "KSCentralKingMajor")
+      else if (optName == "kscentralkingmajor")
         set_spin(-120, 0, KSCentralKingMajor);
-      else if (optName == "KSCentralKingMinor")
+      else if (optName == "kscentralkingminor")
         set_spin(-60, 0, KSCentralKingMinor);
-      else if (optName == "KSAdvancedKing")
+      else if (optName == "ksadvancedking")
         set_spin(-100, 0, KSAdvancedKing);
-      else if (optName == "KSMovedKingCastle")
+      else if (optName == "ksmovedkingcastle")
         set_spin(-120, 0, KSMovedKingCastle);
-      else if (optName == "KSUncastledKing")
+      else if (optName == "ksuncastledking")
         set_spin(-100, 0, KSUncastledKing);
-      else if (optName == "KZDangerMultiplier")
+      else if (optName == "kzdangermultiplier")
         set_spin(1, 15, KZDangerMultiplier);
-      else if (optName == "KZMultiAttackerBonus")
+      else if (optName == "kzmultiattackerbonus")
         set_spin(0, 10, KZMultiAttackerBonus);
-      else if (optName == "KZSingleAttackerThreshold")
+      else if (optName == "kzsingleattackerthreshold")
         set_spin(1, 15, KZSingleAttackerThreshold);
-      else if (optName == "KZSingleAttackerPenalty")
+      else if (optName == "kzsingleattackerpenalty")
         set_spin(0, 10, KZSingleAttackerPenalty);
-      else if (optName == "KZNoQueenBonus")
+      else if (optName == "kznoqueenbonus")
         set_spin(0, 80, KZNoQueenBonus);
 
-      else if (optName == "EGCenterDist")
+      else if (optName == "egcenterdist")
         set_spin(0, 30, EGCenterDist);
-      else if (optName == "EGKingDist")
+      else if (optName == "egkingdist")
         set_spin(0, 20, EGKingDist);
-      else if (optName == "EGPassedPawnRank")
-        set_spin(0, 8, EGPassedPawnRank);
-      else if (optName == "EGMaterialThreshold")
+      else if (optName == "egmaterialthreshold")
         set_spin(500, 5000, EGMaterialThreshold);
-      else if (optName == "EGMaterialAdvantage")
+      else if (optName == "egmaterialadvantage")
         set_spin(50, 500, EGMaterialAdvantage);
-      else if (optName == "BishopPairBonus")
+      else if (optName == "bishoppairbonus")
         set_spin(0, 100, BishopPairBonus);
-      else if (optName == "RookOpenFile")
+      else if (optName == "rookopenfile")
         set_spin(0, 50, RookOpenFile);
-      else if (optName == "RookSemiOpenFile")
+      else if (optName == "rooksemiopenfile")
         set_spin(0, 30, RookSemiOpenFile);
-      else if (optName == "PassedPawnBase")
+      else if (optName == "passedpawnbase")
         set_spin(0, 60, PassedPawnBase);
-      else if (optName == "PassedPawnRankMul")
+      else if (optName == "passedpawnrankmul")
         set_spin(1, 10, PassedPawnRankMul);
-      else if (optName == "PassedPawnBlocked")
+      else if (optName == "passedpawnblocked")
         set_spin(-30, 0, PassedPawnBlocked);
-      else if (optName == "PassedPawnKingProximity")
+      else if (optName == "passedpawnkingproximity")
         set_spin(0, 60, PassedPawnKingProximity);
-      else if (optName == "PassedPawnKingProximityRank")
+      else if (optName == "passedpawnkingproximityrank")
         set_spin(3, 7, PassedPawnKingProximityRank);
-      else if (optName == "IsolatedPawnPenalty")
+      else if (optName == "isolatedpawnpenalty")
         set_spin(-40, 0, IsolatedPawnPenalty);
-      else if (optName == "DoubledPawnPenalty")
+      else if (optName == "doubledpawnpenalty")
         set_spin(-30, 0, DoubledPawnPenalty);
-      else if (optName == "OutpostBonus")
+      else if (optName == "outpostbonus")
         set_spin(0, 80, OutpostBonus);
-      else if (optName == "CenterKnight")
+      else if (optName == "centerknight")
         set_spin(0, 40, CenterKnight);
-      else if (optName == "CenterBishop")
+      else if (optName == "centerbishop")
         set_spin(0, 40, CenterBishop);
-      else if (optName == "CenterPawn")
+      else if (optName == "centerpawn")
         set_spin(0, 40, CenterPawn);
-      else if (optName == "MobilityKnightBase")
+      else if (optName == "mobilityknightbase")
         set_spin(0, 8, MobilityKnightBase);
-      else if (optName == "MobilityBishopBase")
+      else if (optName == "mobilitybishopbase")
         set_spin(0, 12, MobilityBishopBase);
-      else if (optName == "MobilityBishopMul")
+      else if (optName == "mobilitybishopmul")
         set_spin(1, 8, MobilityBishopMul);
-      else if (optName == "MobilityBishopDiv")
+      else if (optName == "mobilitybishopdiv")
         set_spin(1, 8, MobilityBishopDiv);
-      else if (optName == "MobilityRookBase")
+      else if (optName == "mobilityrookbase")
         set_spin(0, 14, MobilityRookBase);
-      else if (optName == "MobilityRookMul")
+      else if (optName == "mobilityrookmul")
         set_spin(1, 8, MobilityRookMul);
-      else if (optName == "MobilityRookDiv")
+      else if (optName == "mobilityrookdiv")
         set_spin(1, 8, MobilityRookDiv);
-      else if (optName == "MobilityQueenBase")
+      else if (optName == "mobilityqueenbase")
         set_spin(0, 28, MobilityQueenBase);
-      else if (optName == "MobilityQueenDiv")
+      else if (optName == "mobilityqueendiv")
         set_spin(1, 8, MobilityQueenDiv);
-      else if (optName == "MobilityEarlyQueenBonus")
+      else if (optName == "mobilityearlyqueenbonus")
         set_spin(0, 20, MobilityEarlyQueenBonus);
-      else if (optName == "UndevelopedPenalty")
+      else if (optName == "undevelopedpenalty")
         set_spin(0, 20, UndevelopedPenalty);
 
-      else if (optName == "EvalMultBase")
+      else if (optName == "evalmultbase")
         set_spin(400, 1200, EvalMultBase);
-      else if (optName == "EvalMultMatDiv")
+      else if (optName == "evalmultmatdiv")
         set_spin(8, 64, EvalMultMatDiv);
-      else if (optName == "EvalMultNorm")
+      else if (optName == "evalmultnorm")
         set_spin(512, 2048, EvalMultNorm);
-      else if (optName == "EvalWinningMul")
+      else if (optName == "evalwinningmul")
         set_spin(100, 200, EvalWinningMul);
-      else if (optName == "EvalWinningMatThreshold")
+      else if (optName == "evalwinningmatthreshold")
         set_spin(2000, 8000, EvalWinningMatThreshold);
-      else if (optName == "EvalSlightWinMul")
+      else if (optName == "evalslightwinmul")
         set_spin(100, 150, EvalSlightWinMul);
-      else if (optName == "EvalSlightWinMatThreshold")
+      else if (optName == "evalslightwinmatthreshold")
         set_spin(1000, 5000, EvalSlightWinMatThreshold);
-      else if (optName == "EvalLosingMul")
+      else if (optName == "evallosingmul")
         set_spin(50, 100, EvalLosingMul);
-      else if (optName == "EvalLosingThreshold")
+      else if (optName == "evallosingthreshold")
         set_spin(-500, 0, EvalLosingThreshold);
-      else if (optName == "EvalSlightLoseMul")
+      else if (optName == "evalslightlosemul")
         set_spin(50, 100, EvalSlightLoseMul);
-      else if (optName == "EvalSlightLoseThreshold")
+      else if (optName == "evalslightlosethreshold")
         set_spin(-200, 0, EvalSlightLoseThreshold);
-      else if (optName == "SacPatternBonus")
+      else if (optName == "sacpatternbonus")
         set_spin(0, 150, SacPatternBonus);
-      else if (optName == "SacKingFileBonus")
+      else if (optName == "sackingfilebonus")
         set_spin(0, 80, SacKingFileBonus);
-      else if (optName == "SacMultiBonus")
+      else if (optName == "sacmultibonus")
         set_spin(0, 100, SacMultiBonus);
-      else if (optName == "SacMaterialThreshold")
+      else if (optName == "sacmaterialthreshold")
         set_spin(1000, 6000, SacMaterialThreshold);
-      else if (optName == "DrawContemptMaterial")
+      else if (optName == "drawcontemptmaterial")
         set_spin(0, 200, DrawContemptMaterial);
-      else if (optName == "HistExtThreshold")
+      else if (optName == "histextthreshold")
         set_spin(3000, 15000, HistExtThreshold);
-      else if (optName == "FPAttackModeBonus")
+      else if (optName == "fpattackmodebonus")
         set_spin(0, 200, FPAttackModeBonus);
-      else if (optName == "AttackModeEnterDepth")
+      else if (optName == "attackmodeenterdepth")
         set_spin(3, 12, AttackModeEnterDepth);
-      else if (optName == "AttackModeMaterial")
+      else if (optName == "attackmodematerial")
         set_spin(1500, 5000, AttackModeMaterial);
-      else if (optName == "AttackModeEnterRelax")
+      else if (optName == "attackmodeenterrelax")
         set_spin(0, 100, AttackModeEnterRelax);
-      else if (optName == "AttackModeExitRelax")
+      else if (optName == "attackmodeexitrelax")
         set_spin(0, 100, AttackModeExitRelax);
-      else if (optName == "AttackModeDropExtra")
+      else if (optName == "attackmodedropextra")
         set_spin(0, 100, AttackModeDropExtra);
-      else if (optName == "AttackModeMatExit")
+      else if (optName == "attackmodematexit")
         set_spin(0, 500, AttackModeMatExit);
-      else if (optName == "PhaseConfirmHits")
+      else if (optName == "phaseconfirmhits")
         set_spin(1, 8, PhaseConfirmHits);
-      else if (optName == "SacrificeEnterCp")
+      else if (optName == "sacrificeentercp")
         set_spin(100, 500, SacrificeEnterCp);
-      else if (optName == "SacrificeExitCp")
+      else if (optName == "sacrificeexitcp")
         set_spin(50, 400, SacrificeExitCp);
-      else if (optName == "SacrificeDropThreshold")
+      else if (optName == "sacrificedropthreshold")
         set_spin(50, 300, SacrificeDropThreshold);
-      else if (optName == "LatePhaseMaterial")
+      else if (optName == "latephasematerial")
         set_spin(2000, 6000, LatePhaseMaterial);
-      else if (optName == "EndgameMaterial")
+      else if (optName == "endgamematerial")
         set_spin(1000, 5000, EndgameMaterial);
-      else if (optName == "MidRecoverMaterial")
+      else if (optName == "midrecovermaterial")
         set_spin(2000, 6000, MidRecoverMaterial);
-      else if (optName == "EndRecoverMaterial")
+      else if (optName == "endrecovermaterial")
         set_spin(1500, 5500, EndRecoverMaterial);
-      else if (optName == "OpeningMinPly")
+      else if (optName == "openingminply")
         set_spin(0, 60, OpeningMinPly);
-      else if (optName == "SpaceWeight")
+      else if (optName == "spaceweight")
         set_spin(0, 20, SpaceWeight);
-      else if (optName == "DeltaMarginBase")
+      else if (optName == "deltamarginbase")
         set_spin(50, 400, DELTA_MARGIN_BASE);
-      else if (optName == "MaterialBasisPawn")
+      else if (optName == "materialbasispawn")
         set_spin(100, 400, MaterialBasis[1]);
-      else if (optName == "MaterialBasisKnight")
+      else if (optName == "materialbasisknight")
         set_spin(500, 1200, MaterialBasis[2]);
-      else if (optName == "MaterialBasisBishop")
+      else if (optName == "materialbasisbishop")
         set_spin(500, 1200, MaterialBasis[3]);
-      else if (optName == "MaterialBasisRook")
+      else if (optName == "materialbasisrook")
         set_spin(800, 2000, MaterialBasis[4]);
-      else if (optName == "MaterialBasisQueen")
+      else if (optName == "materialbasisqueen")
         set_spin(1500, 4000, MaterialBasis[5]);
-      else if (optName == "PawnStorm1")
+      else if (optName == "pawnstorm1")
         set_spin(0, 200, PawnStormConfig[0]);
-      else if (optName == "PawnStorm2")
+      else if (optName == "pawnstorm2")
         set_spin(0, 150, PawnStormConfig[1]);
-      else if (optName == "PawnStorm3")
+      else if (optName == "pawnstorm3")
         set_spin(0, 100, PawnStormConfig[2]);
-      else if (optName == "PawnStorm4")
+      else if (optName == "pawnstorm4")
         set_spin(0, 60, PawnStormConfig[3]);
-      else if (optName == "KZBishopXray")
+      else if (optName == "kzbishopxray")
         set_spin(0, 5, KZBishopXray);
-      else if (optName == "KZRookXray")
+      else if (optName == "kzrookxray")
         set_spin(0, 8, KZRookXray);
-      else if (optName == "AttackModeHistMul")
-        set_spin(1, 8, AttackModeHistMul);
-      else if (optName == "AttackModeHistDiv")
-        set_spin(1, 8, AttackModeHistDiv);
-      else if (optName == "AttackModeHistAdd")
-        set_spin(0, 50, AttackModeHistAdd);
-      else if (optName == "AttackModeHistCap")
-        set_spin(64, 512, AttackModeHistCap);
-      else if (optName == "NormalizationFactor")
+      else if (optName == "normalizationfactor")
         set_spin(50, 500, NormalizationFactor);
-      else if (optName == "HalfmoveScaleMax")
+      else if (optName == "halfmovescalemax")
         set_spin(50, 500, HALFMOVE_SCALE_MAX);
-      else if (optName == "PromoBonusDoubleFork")
+      else if (optName == "promobonusdoublefork")
         set_spin(0, 500, PROMO_BONUS_DOUBLE_FORK);
-      else if (optName == "PromoBonusSingleFork")
+      else if (optName == "promobonussinglefork")
         set_spin(0, 300, PROMO_BONUS_SINGLE_FORK);
-      else if (optName == "VarietyBaseThreshold")
+      else if (optName == "varietybasethreshold")
         set_spin(50, 300, VARIETY_BASE_THRESHOLD);
-      else if (optName == "VarietyMultiplier")
+      else if (optName == "varietymultiplier")
         set_spin(1, 5, VARIETY_MULTIPLIER);
       else {
         for (auto &param : params) {
-          if (optName == param.name) {
+          if (optName == lowercase(param.name)) {
             bool ok = false;
             int v = parse_int(valueStr, ok);
             if (!ok)
               break;
             v = std::clamp(v, param.min, param.max);
             param.value = v;
-            if (optName == "LMRBase" || optName == "LMRRatio")
+            if (optName == "lmrbase" || optName == "lmrratio")
               init_LMR();
             break;
           }
@@ -1018,111 +931,80 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     }
 
     else if (command == "stop") {
-      thread_data.stop = true;
-
-      if (s.joinable()) {
-        s.join();
-      }
+      stop_search();
     }
 
     else if (command == "ucinewgame") {
-      thread_data.stop = true;
-
-      if (s.joinable()) {
-        s.join();
-      }
-
       new_game(thread_info, TT);
-      thread_info.game_ply = 0;
-
       thread_info.time_manager = TimeManager();
       thread_info.best_move_stable = false;
       thread_info.stability_counter = 0;
       thread_info.previous_best_move = MoveNone;
       thread_info.root_moves.clear();
       thread_info.root_moves_limited = false;
-
-      if (thread_info.use_opening_book && !thread_info.book_path.empty()) {
-        if (!thread_info.opening_book.is_loaded()) {
-          bool loaded =
-              thread_info.opening_book.load_book(thread_info.book_path);
-          if (!loaded) {
-            safe_print_cerr(
-                std::string("Warning: Failed to load opening book: ") +
-                thread_info.book_path);
-            thread_info.use_opening_book = false;
-          }
-        }
-      }
-
-      if (thread_info.use_syzygy) {
-        if (tb_initialized) {
-          tb_free();
-          tb_initialized = false;
-        }
-        if (tb_init(thread_info.syzygy_path.c_str())) {
-          tb_initialized = true;
-        } else {
-          safe_print_cerr(
-              std::string("Warning: Syzygy TB initialization failed for path: ") +
-              thread_info.syzygy_path);
-          thread_info.use_syzygy = false;
-        }
-      } else if (tb_initialized) {
-        tb_free();
-        tb_initialized = false;
-      }
       set_board(position, thread_info,
                 "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     }
 
     else if (command == "position") {
 
-      thread_data.stop = true;
-      {
-        std::unique_lock<std::mutex> lk(thread_data.search_mutex);
-        thread_data.search_cv.wait(lk, [&] {
-          return std::none_of(
-              thread_data.thread_infos.begin(), thread_data.thread_infos.end(),
-              [](const ThreadInfo &ti) { return ti.searching.load(); });
-        });
-      }
-      if (s.joinable()) {
-        s.join();
-      }
+      const BoardState previous_position = position;
+      const auto previous_game_hist = thread_info.game_hist;
+      const uint16_t previous_game_ply = thread_info.game_ply;
+      const uint16_t previous_search_ply = thread_info.search_ply;
 
       std::string setup;
       input_stream >> setup;
+      bool has_moves_token = false;
+
       if (setup == "fen") {
-        thread_info.game_ply = 0;
         std::string fen;
+        std::string token;
 
-        for (int i = 0; i < 6; i++) {
-
-          std::string substr;
-          input_stream >> substr;
-          fen += substr + " ";
+        while (input_stream >> token) {
+          if (token == "moves") {
+            has_moves_token = true;
+            break;
+          }
+          if (!fen.empty())
+            fen += " ";
+          fen += token;
         }
 
-        set_board(position, thread_info, fen);
-      } else {
-        thread_info.game_ply = 0;
+        if (!set_board(position, thread_info, fen)) {
+          safe_printf("info string Invalid FEN; position unchanged\n");
+          continue;
+        }
+      } else if (setup == "startpos") {
+        std::string token;
+        if (input_stream >> token) {
+          if (token != "moves") {
+            safe_printf("info string Invalid position command; position unchanged\n");
+            continue;
+          }
+          has_moves_token = true;
+        }
         set_board(position, thread_info,
                   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+      } else {
+        safe_printf("info string Invalid position command\n");
+        continue;
       }
 
-      calculate(position);
-      std::string has_moves;
-      if (input_stream >> has_moves) {
+      if (has_moves_token) {
 
         std::string moves;
-        Action last_move_played = MoveNone;
+        bool invalid_move = false;
         while (input_stream >> moves) {
           Action move = uci_to_internal(position, moves);
-          if (move == MoveNone)
+          if (move == MoveNone) {
+            invalid_move = true;
             break;
-          if (thread_info.game_ply >= MaxGameLen)
-            break;
+          }
+          if (thread_info.game_ply >= MaxGameLen - MaxSearchPly - 2) {
+            std::move(thread_info.game_hist.begin() + MaxGameLen / 2, thread_info.game_hist.end(), thread_info.game_hist.begin());
+            thread_info.game_ply -= MaxGameLen / 2;
+          }
 
           thread_info.game_hist[thread_info.game_ply].position_key =
               position.zobrist_key;
@@ -1137,25 +1019,19 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
             thread_info.game_ply++;
 
           make_move(position, move);
-          last_move_played = move;
+        }
+
+        if (invalid_move) {
+          position = previous_position;
+          thread_info.game_hist = previous_game_hist;
+          thread_info.game_ply = previous_game_ply;
+          thread_info.search_ply = previous_search_ply;
+          safe_printf("info string Invalid move; position unchanged\n");
+          continue;
         }
 
         thread_info.search_ply = 0;
 
-        if (thread_info.pondering && last_move_played != MoveNone &&
-            thread_info.ponder_move != MoveNone) {
-          if (last_move_played != thread_info.ponder_move) {
-
-            thread_info.pondering = false;
-            if (!thread_data.stop) {
-              thread_data.stop = true;
-            }
-          } else {
-
-            thread_info.ponder_hit = true;
-            thread_info.pondering = false;
-          }
-        }
       }
 
     }
@@ -1164,52 +1040,29 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       thread_info.start_time = std::chrono::steady_clock::now();
       thread_info.infinite_search = false;
 
-      if (thread_info.pondering == false) {
-        thread_info.ponder_hit = false;
-        thread_info.ponder_move = MoveNone;
-      }
-
-      if (thread_info.use_syzygy && !tb_initialized) {
-        if (tb_init(thread_info.syzygy_path.c_str())) {
-          tb_initialized = true;
-        } else {
-          safe_print_cerr(
-              std::string(
-                  "Warning: Syzygy TB initialization failed for path: ") +
-              thread_info.syzygy_path);
-          thread_info.use_syzygy = false;
-        }
-      } else if (!thread_info.use_syzygy && tb_initialized) {
-        tb_free();
-        tb_initialized = false;
-      }
-      {
-        std::unique_lock<std::mutex> lk(thread_data.search_mutex);
-        thread_data.search_cv.wait(lk, [&] {
-          return std::none_of(
-              thread_data.thread_infos.begin(), thread_data.thread_infos.end(),
-              [](const ThreadInfo &ti) { return ti.searching.load(); });
-        });
-      }
-      if (s.joinable()) {
-        s.join();
-      }
+      thread_info.ponder_hit = false;
+      thread_info.pondering = false;
+      thread_info.ponder_move = MoveNone;
+      thread_data.ponder_hit_time = -1;
+      thread_info.best_move_stable = false;
+      thread_info.stability_counter = 0;
+      thread_info.time_checks = 0;
       thread_info.max_nodes_searched = UINT64_MAX / 2;
       thread_info.opt_nodes_searched = UINT64_MAX / 2;
-      if (thread_info.max_iter_depth != -1)
-        thread_info.max_iter_depth = MaxSearchPly;
+      thread_info.max_iter_depth = MaxRootDepth;
+      thread_info.mate_search = 0;
 
-      int color = position.color, time = INT32_MAX, increment = 0;
+      int color = position.color, time = -1, increment = 0;
+      int move_time = -1;
       std::string token;
       int movestogo = 0;
-      int mate_in = 0;
       std::vector<Action> searchmoves;
       bool searchmoves_specified = false;
       auto parse_int_token = [](const std::string &s, int &out) -> bool {
         try {
           size_t consumed = 0;
           int v = std::stoi(s, &consumed);
-          if (consumed != s.size())
+          if (s.empty() || s[0] == '-' || consumed != s.size())
             return false;
           out = v;
           return true;
@@ -1221,7 +1074,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         try {
           size_t consumed = 0;
           uint64_t v = std::stoull(s, &consumed);
-          if (consumed != s.size())
+          if (s.empty() || s[0] == '-' || consumed != s.size())
             return false;
           out = v;
           return true;
@@ -1262,7 +1115,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         }
 
         if (token == "infinite") {
-          thread_info.max_iter_depth = MaxSearchPly;
+          thread_info.max_iter_depth = MaxRootDepth;
           thread_info.max_time = UINT64_MAX;
           thread_info.opt_time = UINT64_MAX;
           thread_info.infinite_search = true;
@@ -1294,30 +1147,23 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           } else if (token == "movestogo") {
             movestogo = value;
           } else if (token == "mate") {
-            mate_in = value;
-            thread_info.max_iter_depth =
-                std::min(mate_in * 2 + 1, MaxSearchPly);
+            thread_info.mate_search = std::max(1, value);
+            thread_info.max_iter_depth = std::clamp(value * 2, 1, MaxRootDepth);
           } else if (token == "depth") {
-            thread_info.max_iter_depth = std::min(value, MaxSearchPly);
+            thread_info.max_iter_depth = std::clamp(value, 1, MaxRootDepth);
           } else if (token == "movetime") {
-            thread_info.max_time = static_cast<uint64_t>(value);
-            thread_info.opt_time = static_cast<uint64_t>(value);
-            thread_info.time_manager.allocated_time = static_cast<uint64_t>(value);
-            thread_info.time_manager.max_time = static_cast<uint64_t>(value);
-            thread_info.time_manager.panic_time = static_cast<uint64_t>(value);
-            thread_info.time_manager.soft_limit = static_cast<uint64_t>(value);
-            thread_info.time_manager.hard_limit = static_cast<uint64_t>(value);
-            time = INT32_MAX;
-            goto run;
+            move_time = std::max(1, value);
           }
           ++i;
-        } else if (token == "nodes") {
+          } else if (token == "nodes") {
           if (i + 1 >= go_tokens.size())
             continue;
           uint64_t nodes = 0;
           if (parse_u64_token(go_tokens[i + 1], nodes)) {
+
+            nodes = std::max<uint64_t>(1, nodes);
             thread_info.max_nodes_searched = nodes;
-            thread_info.opt_nodes_searched = std::max<uint64_t>(1, nodes * 8 / 10);
+            thread_info.opt_nodes_searched = std::max<uint64_t>(1, nodes / 10 * 8);
           }
           ++i;
         } else if (token == "searchmoves") {
@@ -1337,52 +1183,41 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         }
       }
 
-      if (movestogo > 0 && time != INT32_MAX) {
-        int overhead = std::min(static_cast<int>(thread_info.move_overhead),
-                                std::max(1, time / 10));
-        time = std::max(2, time - overhead);
-        thread_info.max_time =
-            static_cast<uint64_t>(time) / std::max(movestogo, 1);
-        thread_info.opt_time = thread_info.max_time * 8 / 10;
-      } else {
-
-        int overhead = std::min(static_cast<int>(thread_info.move_overhead),
-                                std::max(1, time / 10));
-        time = std::max(2, time - overhead);
-        thread_info.max_time = static_cast<uint64_t>(time) * 4 / 5;
-        thread_info.opt_time = (static_cast<uint64_t>(time) / 15 +
-                                static_cast<uint64_t>(increment) * 9 / 10) *
-                               7 / 10;
+      constexpr uint64_t unlimited = UINT64_MAX / 2;
+      thread_info.max_time = thread_info.opt_time = unlimited;
+      if (!thread_info.infinite_search) {
+        if (move_time >= 0) {
+          const auto overhead = std::min<uint64_t>(thread_info.move_overhead, move_time / 10);
+          thread_info.max_time = thread_info.opt_time = std::max<uint64_t>(1, move_time - overhead);
+        } else if (time >= 0) {
+          const int overhead = std::min<int>(thread_info.move_overhead, time / 10);
+          const uint64_t usable = std::max(1, time - overhead);
+          thread_info.time_manager.initialize(usable, increment, movestogo, position.fullmove);
+          thread_info.max_time = thread_info.time_manager.hard_limit;
+          thread_info.opt_time = thread_info.time_manager.soft_limit;
+        }
+        if (thread_info.max_move_time > 0) {
+          thread_info.max_time = std::min(thread_info.max_time, thread_info.max_move_time);
+          thread_info.opt_time = std::min(thread_info.opt_time, thread_info.max_time);
+        }
       }
+      thread_info.time_manager.allocated_time = thread_info.opt_time;
+      thread_info.time_manager.soft_limit = thread_info.opt_time;
+      thread_info.time_manager.max_time = thread_info.max_time;
+      thread_info.time_manager.hard_limit = thread_info.max_time;
+      thread_info.time_manager.panic_time = thread_info.max_time;
+      thread_info.time_manager.use_panic_mode = false;
+      thread_data.pondering = thread_info.pondering.load();
 
-    run:
-
-      if (!thread_info.infinite_search && time != INT32_MAX) {
-        int game_move = (thread_info.game_ply / 2) + 1;
-        thread_info.time_manager.initialize(static_cast<uint64_t>(time),
-                                            static_cast<uint64_t>(increment),
-                                            movestogo, game_move);
-        thread_info.max_time = thread_info.time_manager.hard_limit;
-        thread_info.opt_time = thread_info.time_manager.soft_limit;
-      }
-
-      if (thread_info.max_move_time > 0) {
-        thread_info.max_time = thread_info.max_move_time;
-        thread_info.opt_time =
-            thread_info.max_move_time > thread_info.move_overhead
-                ? thread_info.max_move_time - thread_info.move_overhead
-                : 0;
-      }
-
-      if (!searchmoves_specified && !thread_info.pondering &&
+      if (!thread_info.infinite_search && !searchmoves_specified && !thread_info.pondering &&
           thread_info.use_opening_book &&
           thread_info.opening_book.is_loaded() &&
           (thread_info.book_depth_limit == 0 ||
-           thread_info.game_ply <= thread_info.book_depth_limit)) {
+           uint64_t(position.fullmove - 1) * 2 + position.color < static_cast<unsigned>(thread_info.book_depth_limit))) {
 
         uint64_t book_key = thread_info.opening_book.polyglot_key(position);
         Action book_move = thread_info.opening_book.probe_book(
-            book_key, thread_info.book_min_weight);
+            position, thread_info.book_min_weight);
 
         if (book_move != MoveNone && thread_info.variety > 0) {
 
@@ -1464,28 +1299,23 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     }
 
     else if (command == "ponderhit") {
-      if (thread_info.pondering) {
-
-        thread_info.ponder_hit = true;
-        thread_info.pondering = false;
-
-        auto ponder_elapsed = time_elapsed(thread_info.ponder_start_time);
-        if (ponder_elapsed > 0 && !thread_info.infinite_search) {
-          uint64_t bonus =
-              ponder_elapsed * thread_info.ponder_time_factor / 100;
-          thread_info.opt_time = std::min<uint64_t>(
-              thread_info.opt_time + bonus, thread_info.max_time);
-        }
+      if (thread_data.pondering) {
+        thread_data.ponder_hit_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        { std::lock_guard lock(thread_data.control_mutex); thread_data.pondering = false; }
+        thread_data.control_cv.notify_all();
       }
     }
 
     else if (command == "bench") {
-      bench(position, thread_info);
+      int depth = 12;
+      input_stream >> depth;
+      bench(position, thread_info, depth);
     }
 
     else if (command == "perft") {
       int perft_depth;
-      if (input_stream >> perft_depth) {
+      if ((input_stream >> perft_depth) && perft_depth >= 0 && perft_depth <= 10) {
         auto perft_start = std::chrono::steady_clock::now();
         uint64_t nodes = perft(perft_depth, position, true, thread_info);
         uint64_t elapsed_ms = time_elapsed(perft_start);
@@ -1495,18 +1325,26 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     }
 
     else if (command == "eval") {
+      const uint8_t saved_phase = thread_info.phase;
+      thread_info.phase = root_phase(position);
       if (use_nnue && nnue_loaded) {
         select_active_nnue(thread_info.phase);
         thread_info.nnue_state.reset_nnue(position);
+        safe_printf("info string NNUE raw: %d (net: %s, phase: %d)\n",
+                    thread_info.nnue_state.evaluate(position.color),
+                    (g_nnue == g_nnue_aggressive.get()) ? "aggressive/sacrifice" : "base",
+                    thread_info.phase);
       }
       int eval_score = eval(position, thread_info);
       safe_printf("info string evaluation: %d cp (%s)\n",
                   eval_score * 100 / NormalizationFactor,
                   (use_nnue && nnue_loaded) ? "NNUE" : "HCE");
+      thread_info.phase = saved_phase;
     }
 
     else if (command == "flip") {
       position.color ^= 1;
+      position.ep_square = SquareNone;
       position.zobrist_key ^= zobrist_keys[side_index];
       calculate(position);
     }
@@ -1535,30 +1373,8 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     }
   }
 
-  if (std::cin.eof() || std::cin.fail()) {
-    thread_data.terminate = true;
-
-    if (s.joinable()) {
-      s.join();
-    }
-
-    if (thread_data.num_threads > 0 && !thread_data.threads.empty()) {
-      try {
-        reset_barrier.arrive_and_wait();
-        idle_barrier.arrive_and_wait();
-      } catch (...) {
-      }
-
-      for (auto &t : thread_data.threads) {
-        try {
-          if (t.joinable())
-            t.join();
-        } catch (...) {
-        }
-      }
-    }
-  }
-
+  if (interactive) stop_search();
+  else safe_join(s);
   thread_data.stop = true;
-  safe_join(s);
+  if (tb_initialized) { tb_free(); tb_initialized = false; }
 }

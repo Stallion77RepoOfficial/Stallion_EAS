@@ -1,4 +1,4 @@
- 
+
 
 #include "tbprobe.h"
 #include <stdint.h>
@@ -6,7 +6,6 @@
 #include <assert.h>
 #include <cstddef>
 
- 
 #ifndef popcount
 #define popcount(x) __builtin_popcountll(x)
 #endif
@@ -62,7 +61,6 @@
 #define BEST_NONE               0xFFFF
 #define SCORE_ILLEGAL           0x7FFF
 
- 
 #ifdef __cplusplus
 namespace {
 enum Color { BLACK, WHITE };
@@ -126,8 +124,7 @@ static inline uint64_t pieces_by_type(const Pos *pos, Color c, PieceType p) {
 }
 
 static const char piece_to_char[] = " PNBRQK  pnbrqk";
-  
- 
+
 static PieceType char_to_piece_type(char c) {
     for (int i = PAWN; i <= KING; i++)
        if (c == piece_to_char[i]) {
@@ -143,8 +140,8 @@ static PieceType char_to_piece_type(char c) {
 
 #ifdef TB_KING_ATTACKS
 #define king_attacks(s)         TB_KING_ATTACKS(s)
-#define king_attacks_init()      
-#else        
+#define king_attacks_init()
+#else
 
 static uint64_t king_attacks_table[64];
 
@@ -177,12 +174,12 @@ static void king_attacks_init(void)
     }
 }
 
-#endif       
+#endif
 
 #ifdef TB_KNIGHT_ATTACKS
 #define knight_attacks(s)       TB_KNIGHT_ATTACKS(s)
-#define knight_attacks_init()    
-#else        
+#define knight_attacks_init()
+#else
 
 static uint64_t knight_attacks_table[64];
 
@@ -223,12 +220,12 @@ static void knight_attacks_init(void)
     }
 }
 
-#endif       
+#endif
 
 #ifdef TB_BISHOP_ATTACKS
 #define bishop_attacks(s, occ)  TB_BISHOP_ATTACKS(s, occ)
-#define bishop_attacks_init()    
-#else        
+#define bishop_attacks_init()
+#else
 
 static uint64_t diag_attacks_table[64][64];
 static uint64_t anti_attacks_table[64][64];
@@ -381,12 +378,12 @@ static void bishop_attacks_init(void)
     }
 }
 
-#endif       
+#endif
 
 #ifdef TB_ROOK_ATTACKS
 #define rook_attacks(s, occ)    TB_ROOK_ATTACKS(s, occ)
-#define rook_attacks_init()      
-#else        
+#define rook_attacks_init()
+#else
 
 static uint64_t rank_attacks_table[64][64];
 static uint64_t file_attacks_table[64][64];
@@ -497,19 +494,19 @@ static void rook_attacks_init(void)
     }
 }
 
-#endif       
+#endif
 
 #ifdef TB_QUEEN_ATTACKS
 #define queen_attacks(s, occ)   TB_QUEEN_ATTACKS(s, occ)
-#else        
+#else
 #define queen_attacks(s, occ)   \
     (rook_attacks((s), (occ)) | bishop_attacks((s), (occ)))
-#endif       
+#endif
 
 #ifdef TB_PAWN_ATTACKS
 #define pawn_attacks(s, c)      TB_PAWN_ATTACKS(s, c)
-#define pawn_attacks_init()      
-#else        
+#define pawn_attacks_init()
+#else
 
 static uint64_t pawn_attacks_table[2][64];
 
@@ -544,9 +541,8 @@ static void pawn_attacks_init(void)
     }
 }
 
-#endif       
+#endif
 
- 
 static uint64_t calc_key(const Pos *pos, bool mirror)
 {
     uint64_t white = pos->white, black = pos->black;
@@ -568,7 +564,6 @@ static uint64_t calc_key(const Pos *pos, bool mirror)
            popcount(black & pos->pawns)   * PRIME_BLACK_PAWN;
 }
 
- 
 static uint64_t calc_key_from_pcs(int *pcs, int mirror)
 {
     mirror = (mirror? 8: 0);
@@ -584,7 +579,6 @@ static uint64_t calc_key_from_pcs(int *pcs, int mirror)
            pcs[BLACK_PAWN ^ mirror] * PRIME_BLACK_PAWN;
 }
 
- 
 static uint64_t calc_key_from_pieces(uint8_t *piece, int num)
 {
     uint64_t key = 0;
@@ -638,7 +632,6 @@ static TbMove *add_move(TbMove *moves, bool promotes, unsigned from,
     return moves;
 }
 
- 
 static TbMove *gen_captures(const Pos *pos, TbMove *moves)
 {
     uint64_t occ = pos->white | pos->black;
@@ -709,14 +702,13 @@ static TbMove *gen_captures(const Pos *pos, TbMove *moves)
     return moves;
 }
 
- 
 static TbMove *gen_moves(const Pos *pos, TbMove *moves)
 {
     uint64_t occ = pos->white | pos->black;
     uint64_t us = (pos->turn? pos->white: pos->black),
              them = (pos->turn? pos->black: pos->white);
     uint64_t b, att;
-    
+
     {
         unsigned from = lsb(pos->kings & us);
         for (att = king_attacks(from) & ~us; att; att = poplsb(att))
@@ -790,7 +782,6 @@ static TbMove *gen_moves(const Pos *pos, TbMove *moves)
     return moves;
 }
 
- 
 static bool is_en_passant(const Pos *pos, TbMove move)
 {
     uint16_t from = move_from(move);
@@ -805,14 +796,12 @@ static bool is_en_passant(const Pos *pos, TbMove move)
     return true;
 }
 
-
 static bool is_capture(const Pos *pos, TbMove move)
 {
    uint16_t to   = move_to(move);
    uint64_t them = (pos->turn? pos->black: pos->white);
    return (them & board(to)) != 0 || is_en_passant(pos,move);
 }
-
 
 static bool is_legal(const Pos *pos)
 {
@@ -840,7 +829,6 @@ static bool is_legal(const Pos *pos)
     return true;
 }
 
- 
 static bool is_check(const Pos *pos)
 {
     uint64_t occ = pos->white | pos->black;
@@ -864,7 +852,6 @@ static bool is_check(const Pos *pos)
     return false;
 }
 
- 
 static bool is_valid(const Pos *pos)
 {
     if (popcount(pos->kings) != 2)
@@ -920,38 +907,38 @@ static bool is_valid(const Pos *pos)
 
 static bool do_move(Pos *pos, const Pos *pos0, TbMove move)
 {
-    unsigned from = move_from(move); 
-    unsigned to = move_to(move);  
-    unsigned promotes = move_promotes(move);  
+    unsigned from = move_from(move);
+    unsigned to = move_to(move);
+    unsigned promotes = move_promotes(move);
     pos->turn = !pos0->turn;
     pos->white = do_bb_move(pos0->white, from, to);
     pos->black = do_bb_move(pos0->black, from, to);
     pos->kings = do_bb_move(pos0->kings, from, to);
-    pos->queens = do_bb_move(pos0->queens, from, to); 
+    pos->queens = do_bb_move(pos0->queens, from, to);
     pos->rooks = do_bb_move(pos0->rooks, from, to);
-    pos->bishops = do_bb_move(pos0->bishops, from, to);  
-    pos->knights = do_bb_move(pos0->knights, from, to);  
+    pos->bishops = do_bb_move(pos0->bishops, from, to);
+    pos->knights = do_bb_move(pos0->knights, from, to);
     pos->pawns = do_bb_move(pos0->pawns, from, to);
     pos->ep = 0;
-    if (promotes != TB_PROMOTES_NONE) 
-    {  
-        pos->pawns &= ~board(to);        
+    if (promotes != TB_PROMOTES_NONE)
+    {
+        pos->pawns &= ~board(to);
         switch (promotes)
-        { 
+        {
             case TB_PROMOTES_QUEEN:
                 pos->queens |= board(to); break;
-            case TB_PROMOTES_ROOK: 
-                pos->rooks |= board(to); break; 
-            case TB_PROMOTES_BISHOP:  
-                pos->bishops |= board(to); break;  
-            case TB_PROMOTES_KNIGHT:  
-                pos->knights |= board(to); break;  
+            case TB_PROMOTES_ROOK:
+                pos->rooks |= board(to); break;
+            case TB_PROMOTES_BISHOP:
+                pos->bishops |= board(to); break;
+            case TB_PROMOTES_KNIGHT:
+                pos->knights |= board(to); break;
         }
         pos->rule50 = 0;
     }
     else if ((board(from) & pos0->pawns) != 0)
     {
-        pos->rule50 = 0;                 
+        pos->rule50 = 0;
         if (rank(from) == 1 && rank(to) == 3 &&
             (pawn_attacks(from+8, true) & pos0->pawns & pos0->black) != 0)
             pos->ep = from+8;
@@ -968,9 +955,9 @@ static bool do_move(Pos *pos, const Pos *pos0, TbMove move)
         }
     }
     else if ((board(to) & (pos0->white | pos0->black)) != 0)
-        pos->rule50 = 0;                 
+        pos->rule50 = 0;
     else
-        pos->rule50 = pos0->rule50 + 1;  
+        pos->rule50 = pos0->rule50 + 1;
     if (!is_legal(pos))
         return false;
     return true;
@@ -981,7 +968,6 @@ static bool legal_move(const Pos *pos, TbMove move) {
    return do_move(&pos1, pos, move);
 }
 
- 
 static bool is_mate(const Pos *pos)
 {
     if (!is_check(pos))
@@ -998,7 +984,6 @@ static bool is_mate(const Pos *pos)
     return true;
 }
 
- 
 static TbMove *gen_legal(const Pos *pos, TbMove *moves)
 {
   TbMove pl_moves[TB_MAX_MOVES];

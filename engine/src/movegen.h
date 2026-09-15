@@ -9,7 +9,7 @@ namespace Generate {
 constexpr uint8_t GenQuiets = 0;
 constexpr uint8_t GenCaptures = 1;
 constexpr uint8_t GenAll = 2;
-} 
+}
 
 constexpr int TTMoveScore = 10000000;
 constexpr int QueenPromoScore = 5000000;
@@ -97,7 +97,7 @@ inline void pawn_moves(const Position &position, uint64_t check_filter,
       move_list[key++] = m;
   };
 
-  while (move_promo) {
+  while (move_promo && gen_type != Generate::GenQuiets) {
     int to = pop_lsb(move_promo);
 
     for (int i = 0; i < 4; i++) {
@@ -125,7 +125,6 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
             int gen_type) {
 
   uint8_t color = position.color, king_pos = get_king_pos(position, color);
-  int opp_color = color ^ 1;
   int idx = 0;
   uint64_t stm_pieces = position.colors_bb[color],
            opp_pieces = position.colors_bb[color ^ 1];
@@ -148,9 +147,10 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
   }
   uint64_t king_attacks = KING_ATK_SAFE(king_sq) & targets;
   while (king_attacks) {
+    const int to = pop_lsb(king_attacks);
     if (move_list && idx < ListSize)
       move_list[idx++] =
-          pack_move(king_pos, pop_lsb(king_attacks), MoveTypes::Normal);
+          pack_move(king_pos, to, MoveTypes::Normal);
   }
 
   if (checkers) {
@@ -217,36 +217,8 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
       continue;
     }
 
-    int rook_target = 56 * color + 3 + 2 * side;
-    int king_target = 56 * color + 2 + 4 * side;
-    if (!is_valid_square(rook_target) || !is_valid_square(king_target)) {
-      continue;
-    }
-
-    uint64_t castle_bb = (BetweenBBs[castling_sq][rook_target] | BetweenBBs[king_sq][king_target])
-                         & ~(1ull << king_pos) & ~(1ull << castling_sq);
-
-    if (occ & castle_bb) {
-      continue;
-    }
-    bool invalid = false;
-
-    if (king_target != king_pos) {
-      int dir = (king_target > king_pos) ? 1 : -1;
-
-      for (int i = king_pos + dir; i != king_target; i += dir) {
-        if (attacks_square(position, i, opp_color)) {
-          invalid = true;
-          break;
-        }
-      }
-    }
-
-    if (!invalid) {
-      if (move_list && idx < ListSize)
-        move_list[idx++] =
-            pack_move(king_pos, castling_sq, MoveTypes::Castling);
-    }
+    if (can_castle(position, king_pos, castling_sq) && move_list && idx < ListSize)
+      move_list[idx++] = pack_move(king_pos, castling_sq, MoveTypes::Castling);
   }
 
   return idx;
@@ -283,12 +255,17 @@ inline bool SEE(const Position &position, Move move, int threshold) {
   if (from_color != position.color)
     return false;
 
-  int gain = SeeValues[get_piece_type(position.board[to])] - threshold;
+  if (extract_type(move) == MoveTypes::Castling) return threshold <= 0;
+  const bool en_passant = extract_type(move) == MoveTypes::EnPassant;
+  const bool promotion = extract_type(move) == MoveTypes::Promotion;
+  const int moved_type = promotion ? extract_promo(move) + PieceTypes::Knight : get_piece_type(position.board[from]);
+  int gain = (en_passant ? SeeValues[PieceTypes::Pawn] : SeeValues[get_piece_type(position.board[to])]) - threshold;
+  if (promotion) gain += SeeValues[moved_type] - SeeValues[PieceTypes::Pawn];
   if (gain < 0) {
     return false;
   }
 
-  gain -= SeeValues[get_piece_type(position.board[from])];
+  gain -= SeeValues[moved_type];
   if (gain >= 0) {
     return true;
   }
@@ -302,6 +279,7 @@ inline bool SEE(const Position &position, Move move, int threshold) {
       (position.colors_bb[Colors::White] | position.colors_bb[Colors::Black]) -
       (1ull << from);
 
+  if (en_passant) occ &= ~(1ULL << (to + (position.color ? 8 : -8)));
   uint64_t all_attackers = attacks_square(position, to, occ);
 
   while (true) {
@@ -344,6 +322,9 @@ inline bool SEE(const Position &position, Move move, int threshold) {
       all_attackers |= get_rook_attacks(to, occ) & rooks;
     }
 
+    if (attackerType == PieceTypes::King &&
+        (attacks_square(position, to, occ) & occ & position.colors_bb[stm ^ 1]))
+      return stm != position.color;
     gain = -gain - SeeValues[attackerType] - 1;
     if (gain >= 0) {
       return stm == position.color;
@@ -389,7 +370,7 @@ inline int evaluate_promotion_tactics(const Position &position, Move move) {
       bonus += 50;
     }
 
-    if (temp_pos.material_count[PieceTypes::Pawn] < 4 &&
+    if (pop_count(temp_pos.pieces_bb[PieceTypes::Pawn]) < 4 &&
         !temp_pos.pieces_bb[PieceTypes::Queen] &&
         !temp_pos.pieces_bb[PieceTypes::Rook]) {
       bonus += 25;

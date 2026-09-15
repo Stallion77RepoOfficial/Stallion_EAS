@@ -91,6 +91,7 @@ inline Action next_move(MovePicker &picker, const Position &position,
       Action move = get_next_move(picker.captures.moves.data(),
                                   picker.captures.scores.data(), picker.idx++,
                                   picker.captures.len);
+      if (move == tt_move) continue;
       if (SEE(position, move, picker.see_threshold)) {
         return move;
       } else {
@@ -189,13 +190,15 @@ inline Action next_move(MovePicker &picker, const Position &position,
   }
 
   if (picker.stage == Stages::Quiets) {
+    while (!skip_quiets && picker.idx < picker.quiets.len) {
+      Action move = get_next_move(picker.quiets.moves.data(),
+                                  picker.quiets.scores.data(), picker.idx++,
+                                  picker.quiets.len);
+      if (move != tt_move) return move;
+    }
     if (skip_quiets || picker.idx >= picker.quiets.len) {
       picker.idx = 0;
       picker.stage++;
-    } else {
-      return get_next_move(picker.quiets.moves.data(),
-                           picker.quiets.scores.data(), picker.idx++,
-                           picker.quiets.len);
     }
   }
 

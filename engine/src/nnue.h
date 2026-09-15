@@ -1,5 +1,6 @@
 #pragma once
 #include "defs.h"
+#include "assets.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -10,8 +11,22 @@
 #include <string>
 #include <vector>
 
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#define STALLION_SIMD_NEON 1
+#elif defined(__AVX2__)
+#include <immintrin.h>
+#define STALLION_SIMD_AVX2 1
+#elif defined(__SSSE3__)
+#include <tmmintrin.h>
+#define STALLION_SIMD_SSSE3 1
+#elif defined(__SSE2__)
+#include <emmintrin.h>
+#define STALLION_SIMD_SSE2 1
+#endif
+
 constexpr size_t INPUT_SIZE = 768;
-constexpr size_t LAYER1_SIZE = 768;
+constexpr size_t LAYER1_SIZE = 1024;
 
 constexpr int SCRELU_MIN = 0;
 constexpr int SCRELU_MAX = 255;
@@ -20,7 +35,7 @@ constexpr int SCALE = 400;
 
 constexpr int QA = 255;
 constexpr int QB = 64;
-constexpr int QAB = QA * QB; // 16320
+constexpr int QAB = QA * QB;
 
 struct alignas(64) NNUE_Params {
   std::array<int16_t, INPUT_SIZE * LAYER1_SIZE> feature_v;
@@ -31,34 +46,51 @@ struct alignas(64) NNUE_Params {
 
 inline std::unique_ptr<NNUE_Params> g_nnue_base = nullptr;
 inline std::unique_ptr<NNUE_Params> g_nnue_aggressive = nullptr;
-inline const NNUE_Params *g_nnue = nullptr;
+
+inline thread_local const NNUE_Params *g_nnue = nullptr;
 inline bool nnue_loaded = false;
 inline bool use_nnue = true;
 
+inline std::unique_ptr<NNUE_Params> parse_nnue_memory(const unsigned char *data, size_t length) {
+  constexpr size_t words = INPUT_SIZE * LAYER1_SIZE + LAYER1_SIZE * 3 + 1;
+  constexpr size_t payload = words * 2;
+  constexpr size_t padded = (payload + 63) / 64 * 64;
+  if (length != payload && length != padded) return nullptr;
+  auto loaded_params = std::make_unique<NNUE_Params>();
+  size_t offset = 0;
+  auto read_value = [&]() {
+    const int value = data[offset] | (unsigned(data[offset + 1]) << 8);
+    offset += 2;
+    return static_cast<int16_t>(value >= 32768 ? value - 65536 : value);
+  };
+  for (auto &v : loaded_params->feature_v) v = read_value();
+  for (auto &v : loaded_params->feature_bias) v = read_value();
+  for (auto &v : loaded_params->output_v) v = read_value();
+  loaded_params->output_bias = read_value();
+  return loaded_params;
+}
+
 inline std::unique_ptr<NNUE_Params> read_nnue_binary(const std::string &path) {
-  std::ifstream file(path, std::ios::binary);
-  if (!file.is_open()) {
-    file.open("nets/" + path, std::ios::binary);
-  }
-  if (!file.is_open()) {
-    return nullptr;
-  }
-
-  auto params = std::make_unique<NNUE_Params>();
-  file.read(reinterpret_cast<char *>(params.get()), sizeof(NNUE_Params));
-  if (file.gcount() < static_cast<std::streamsize>(sizeof(NNUE_Params))) {
-    return nullptr;
+  std::ifstream file(resolve_asset(path), std::ios::binary | std::ios::ate);
+  if (file.is_open()) {
+    const auto length = static_cast<size_t>(file.tellg());
+    file.seekg(0);
+    std::vector<unsigned char> buffer(length);
+    file.read(reinterpret_cast<char *>(buffer.data()), length);
+    if (file) {
+      auto parsed = parse_nnue_memory(buffer.data(), buffer.size());
+      if (parsed) return parsed;
+    }
   }
 
-  return params;
+  return nullptr;
 }
 
 inline bool load_nnue_base(const std::string &path = "nets/base.nnue") {
   auto net = read_nnue_binary(path);
   if (net) {
     g_nnue_base = std::move(net);
-    if (!g_nnue)
-      g_nnue = g_nnue_base.get();
+    g_nnue = g_nnue_base.get();
     nnue_loaded = true;
     return true;
   }
@@ -69,6 +101,7 @@ inline bool load_nnue_aggressive(const std::string &path = "nets/aggressive.nnue
   auto net = read_nnue_binary(path);
   if (net) {
     g_nnue_aggressive = std::move(net);
+    if (!g_nnue || !g_nnue_base) g_nnue = g_nnue_aggressive.get();
     nnue_loaded = true;
     return true;
   }
@@ -78,6 +111,11 @@ inline bool load_nnue_aggressive(const std::string &path = "nets/aggressive.nnue
 inline bool load_nnue_file(const std::string &path = "nets/base.nnue") {
   bool ok1 = load_nnue_base(path);
   bool ok2 = load_nnue_aggressive("nets/aggressive.nnue");
+  if (g_nnue_base) {
+    g_nnue = g_nnue_base.get();
+  } else if (g_nnue_aggressive) {
+    g_nnue = g_nnue_aggressive.get();
+  }
   return ok1 || ok2;
 }
 
@@ -87,10 +125,10 @@ inline void select_active_nnue(int phase) {
     return;
   }
 
-  if (phase == PhaseTypes::Endgame || !g_nnue_aggressive) {
-    g_nnue = g_nnue_base ? g_nnue_base.get() : g_nnue_aggressive.get();
-  } else {
+  if (phase == PhaseTypes::Sacrifice && g_nnue_aggressive) {
     g_nnue = g_nnue_aggressive.get();
+  } else {
+    g_nnue = g_nnue_base ? g_nnue_base.get() : g_nnue_aggressive.get();
   }
 }
 
@@ -112,12 +150,12 @@ constexpr inline std::pair<size_t, size_t> feature_indices(int piece, int sq) no
 
 template <size_t HiddenSize = LAYER1_SIZE>
 struct alignas(64) Accumulator {
-  alignas(64) std::array<int16_t, HiddenSize> white;
-  alignas(64) std::array<int16_t, HiddenSize> black;
+  alignas(64) std::array<int32_t, HiddenSize> white;
+  alignas(64) std::array<int32_t, HiddenSize> black;
 
   inline void init(const int16_t *bias_ptr) {
-    std::memcpy(white.data(), bias_ptr, sizeof(int16_t) * HiddenSize);
-    std::memcpy(black.data(), bias_ptr, sizeof(int16_t) * HiddenSize);
+    std::copy_n(bias_ptr, HiddenSize, white.begin());
+    std::copy_n(bias_ptr, HiddenSize, black.begin());
   }
 
   Accumulator() = default;
@@ -134,21 +172,106 @@ struct alignas(64) Accumulator {
   }
 };
 
-constexpr inline int32_t screlu(int16_t x) noexcept {
+constexpr inline int32_t screlu(int32_t x) noexcept {
   const int32_t clipped = std::clamp(static_cast<int32_t>(x), SCRELU_MIN, SCRELU_MAX);
   return clipped * clipped;
 }
 
-inline int32_t screlu_flatten(const std::array<int16_t, LAYER1_SIZE> &us,
-                             const std::array<int16_t, LAYER1_SIZE> &them,
+inline int64_t screlu_flatten(const std::array<int32_t, LAYER1_SIZE> &us,
+                             const std::array<int32_t, LAYER1_SIZE> &them,
                              const std::array<int16_t, LAYER1_SIZE * 2> &weights) {
-  int32_t sum = 0;
+#if defined(STALLION_SIMD_AVX2)
+  const __m256i zero = _mm256_setzero_si256();
+  const __m256i max255 = _mm256_set1_epi32(255);
+  __m256i acc64 = _mm256_setzero_si256();
+
+  auto process = [&](const int32_t *acc_in, const int16_t *w_in) {
+    for (size_t i = 0; i < LAYER1_SIZE; i += 16) {
+      __m256i u0 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(acc_in + i));
+      __m256i u1 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(acc_in + i + 8));
+
+      u0 = _mm256_min_epi32(_mm256_max_epi32(u0, zero), max255);
+      u1 = _mm256_min_epi32(_mm256_max_epi32(u1, zero), max255);
+
+      __m256i c16 = _mm256_packs_epi32(u0, u1);
+      c16 = _mm256_permute4x64_epi64(c16, _MM_SHUFFLE(3, 1, 2, 0));
+
+      __m256i c_lo = _mm256_cvtepu16_epi32(_mm256_castsi256_si128(c16));
+      __m256i c_hi = _mm256_cvtepu16_epi32(_mm256_extracti128_si256(c16, 1));
+      __m256i sq_lo = _mm256_mullo_epi32(c_lo, c_lo);
+      __m256i sq_hi = _mm256_mullo_epi32(c_hi, c_hi);
+
+      __m256i w16 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(w_in + i));
+      __m256i w_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(w16));
+      __m256i w_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(w16, 1));
+
+      __m256i prod_lo = _mm256_mullo_epi32(sq_lo, w_lo);
+      __m256i prod_hi = _mm256_mullo_epi32(sq_hi, w_hi);
+
+      acc64 = _mm256_add_epi64(acc64, _mm256_cvtepi32_epi64(_mm256_castsi256_si128(prod_lo)));
+      acc64 = _mm256_add_epi64(acc64, _mm256_cvtepi32_epi64(_mm256_extracti128_si256(prod_lo, 1)));
+      acc64 = _mm256_add_epi64(acc64, _mm256_cvtepi32_epi64(_mm256_castsi256_si128(prod_hi)));
+      acc64 = _mm256_add_epi64(acc64, _mm256_cvtepi32_epi64(_mm256_extracti128_si256(prod_hi, 1)));
+    }
+  };
+
+  process(us.data(), weights.data());
+  process(them.data(), weights.data() + LAYER1_SIZE);
+
+  __m128i low_128 = _mm256_castsi256_si128(acc64);
+  __m128i high_128 = _mm256_extracti128_si256(acc64, 1);
+  __m128i sum_128 = _mm_add_epi64(low_128, high_128);
+  int64_t total = _mm_extract_epi64(sum_128, 0) + _mm_extract_epi64(sum_128, 1);
+  return total / QA;
+
+#elif defined(STALLION_SIMD_NEON)
+  const int32x4_t zero32 = vdupq_n_s32(0);
+  const int32x4_t max255 = vdupq_n_s32(255);
+  int64x2_t acc0 = vdupq_n_s64(0);
+  int64x2_t acc1 = vdupq_n_s64(0);
+
+  auto process = [&](const int32_t *acc_in, const int16_t *w_in) {
+    for (size_t i = 0; i < LAYER1_SIZE; i += 8) {
+      int32x4_t a0 = vld1q_s32(acc_in + i);
+      int32x4_t a1 = vld1q_s32(acc_in + i + 4);
+
+      a0 = vminq_s32(vmaxq_s32(a0, zero32), max255);
+      a1 = vminq_s32(vmaxq_s32(a1, zero32), max255);
+
+      int16x4_t c0 = vmovn_s32(a0);
+      int16x4_t c1 = vmovn_s32(a1);
+
+      int32x4_t sq0 = vmull_s16(c0, c0);
+      int32x4_t sq1 = vmull_s16(c1, c1);
+
+      int16x8_t w = vld1q_s16(w_in + i);
+      int32x4_t w0 = vmovl_s16(vget_low_s16(w));
+      int32x4_t w1 = vmovl_s16(vget_high_s16(w));
+
+      int32x4_t prod0 = vmulq_s32(sq0, w0);
+      int32x4_t prod1 = vmulq_s32(sq1, w1);
+
+      acc0 = vpadalq_s32(acc0, prod0);
+      acc1 = vpadalq_s32(acc1, prod1);
+    }
+  };
+
+  process(us.data(), weights.data());
+  process(them.data(), weights.data() + LAYER1_SIZE);
+
+  int64x2_t total2 = vaddq_s64(acc0, acc1);
+  int64_t total = vgetq_lane_s64(total2, 0) + vgetq_lane_s64(total2, 1);
+  return total / QA;
+
+#else
+  int64_t sum = 0;
   #pragma unroll 4
   for (size_t i = 0; i < LAYER1_SIZE; ++i) {
-    sum += screlu(us[i]) * static_cast<int32_t>(weights[i]);
-    sum += screlu(them[i]) * static_cast<int32_t>(weights[LAYER1_SIZE + i]);
+    sum += screlu(us[i]) * static_cast<int64_t>(weights[i]);
+    sum += screlu(them[i]) * static_cast<int64_t>(weights[LAYER1_SIZE + i]);
   }
   return sum / QA;
+#endif
 }
 
 class alignas(64) NNUE_State {
@@ -156,6 +279,17 @@ public:
   alignas(64) Accumulator<LAYER1_SIZE> m_accumulator_stack[MaxSearchDepth];
   Accumulator<LAYER1_SIZE> *m_curr = &m_accumulator_stack[0];
   int m_idx = 0;
+
+  NNUE_State() = default;
+  NNUE_State(const NNUE_State &other) { *this = other; }
+  NNUE_State &operator=(const NNUE_State &other) {
+    if (this != &other) {
+      m_idx = other.m_idx;
+      std::copy_n(other.m_accumulator_stack, m_idx + 1, m_accumulator_stack);
+      m_curr = &m_accumulator_stack[m_idx];
+    }
+    return *this;
+  }
 
   inline void pop() {
     if (m_idx > 0) {
@@ -175,8 +309,9 @@ public:
     if (!g_nnue || !nnue_loaded) return 0;
     const auto &us = (color == Colors::White) ? m_curr->white : m_curr->black;
     const auto &them = (color == Colors::White) ? m_curr->black : m_curr->white;
-    const int32_t output = screlu_flatten(us, them, g_nnue->output_v);
-    return (output + g_nnue->output_bias) * SCALE / QAB;
+    const int64_t output = screlu_flatten(us, them, g_nnue->output_v);
+    return static_cast<int>(std::clamp<int64_t>(
+        (output + g_nnue->output_bias) * SCALE / QAB, -MaxEval, MaxEval));
   }
 
   inline void reset_nnue(const BoardState &position) {

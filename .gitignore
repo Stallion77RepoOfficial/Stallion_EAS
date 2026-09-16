@@ -27,4 +27,3 @@ engine/*_asan
 engine/*_tsan
 *.dSYM/
 engine/.DS_Store
-/training

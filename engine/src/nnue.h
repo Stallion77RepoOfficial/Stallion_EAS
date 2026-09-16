@@ -1,6 +1,5 @@
 #pragma once
 #include "defs.h"
-#include "assets.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -51,11 +50,17 @@ inline thread_local const NNUE_Params *g_nnue = nullptr;
 inline bool nnue_loaded = false;
 inline bool use_nnue = true;
 
-inline std::unique_ptr<NNUE_Params> parse_nnue_memory(const unsigned char *data, size_t length) {
+inline std::unique_ptr<NNUE_Params> read_nnue_binary(const std::string &path) {
   constexpr size_t words = INPUT_SIZE * LAYER1_SIZE + LAYER1_SIZE * 3 + 1;
   constexpr size_t payload = words * 2;
   constexpr size_t padded = (payload + 63) / 64 * 64;
-  if (length != payload && length != padded) return nullptr;
+  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  if (!file) return nullptr;
+  const auto length = file.tellg();
+  if (length != std::streamoff(payload) && length != std::streamoff(padded)) return nullptr;
+  std::vector<unsigned char> data(payload);
+  file.seekg(0);
+  if (!file.read(reinterpret_cast<char *>(data.data()), payload)) return nullptr;
   auto loaded_params = std::make_unique<NNUE_Params>();
   size_t offset = 0;
   auto read_value = [&]() {
@@ -68,22 +73,6 @@ inline std::unique_ptr<NNUE_Params> parse_nnue_memory(const unsigned char *data,
   for (auto &v : loaded_params->output_v) v = read_value();
   loaded_params->output_bias = read_value();
   return loaded_params;
-}
-
-inline std::unique_ptr<NNUE_Params> read_nnue_binary(const std::string &path) {
-  std::ifstream file(resolve_asset(path), std::ios::binary | std::ios::ate);
-  if (file.is_open()) {
-    const auto length = static_cast<size_t>(file.tellg());
-    file.seekg(0);
-    std::vector<unsigned char> buffer(length);
-    file.read(reinterpret_cast<char *>(buffer.data()), length);
-    if (file) {
-      auto parsed = parse_nnue_memory(buffer.data(), buffer.size());
-      if (parsed) return parsed;
-    }
-  }
-
-  return nullptr;
 }
 
 inline bool load_nnue_base(const std::string &path = "nets/base.nnue") {
@@ -106,17 +95,6 @@ inline bool load_nnue_aggressive(const std::string &path = "nets/aggressive.nnue
     return true;
   }
   return false;
-}
-
-inline bool load_nnue_file(const std::string &path = "nets/base.nnue") {
-  bool ok1 = load_nnue_base(path);
-  bool ok2 = load_nnue_aggressive("nets/aggressive.nnue");
-  if (g_nnue_base) {
-    g_nnue = g_nnue_base.get();
-  } else if (g_nnue_aggressive) {
-    g_nnue = g_nnue_aggressive.get();
-  }
-  return ok1 || ok2;
 }
 
 inline void select_active_nnue(int phase) {

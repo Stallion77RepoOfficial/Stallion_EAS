@@ -9,6 +9,7 @@
 #include <cctype>
 #include <condition_variable>
 #include <cstdarg>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -20,6 +21,25 @@
 #include <vector>
 
 using std::array;
+
+inline std::filesystem::path engine_directory;
+
+inline std::string resolve_file_path(const std::string &name) {
+  namespace fs = std::filesystem;
+  const fs::path path(name);
+  if (name.empty() || path.is_absolute()) return name;
+  std::vector<fs::path> candidates{path};
+  if (!engine_directory.empty()) candidates.push_back(engine_directory / path);
+  if (!path.has_parent_path() && path.extension() == ".nnue") {
+    candidates.push_back(fs::path("nets") / path);
+    if (!engine_directory.empty()) candidates.push_back(engine_directory / "nets" / path);
+  }
+  for (const auto &candidate : candidates) {
+    std::error_code ec;
+    if (fs::is_regular_file(candidate, ec)) return candidate.string();
+  }
+  return name;
+}
 
 typedef unsigned __int128 uint128_t;
 
@@ -556,7 +576,7 @@ private:
 
 inline bool OpeningBook::load_book(const std::string &path) {
   clear_book();
-  return !path.empty() && load_polyglot_book(resolve_asset(path));
+  return !path.empty() && load_polyglot_book(resolve_file_path(path));
 }
 
 inline int legal_movegen(const BoardState &position, Action *moves);

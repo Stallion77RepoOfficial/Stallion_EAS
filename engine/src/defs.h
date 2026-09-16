@@ -38,10 +38,10 @@ constexpr uint8_t King = 6;
 }
 
 namespace MoveTypes {
-constexpr int8_t Normal = 0;
-constexpr int8_t EnPassant = 1;
-constexpr int8_t Castling = 2;
-constexpr int8_t Promotion = 3;
+constexpr uint8_t Normal = 0;
+constexpr uint8_t EnPassant = 1;
+constexpr uint8_t Castling = 2;
+constexpr uint8_t Promotion = 3;
 }
 
 namespace Directions {
@@ -56,8 +56,8 @@ constexpr int8_t Southwest = -9;
 }
 
 namespace Sides {
-constexpr int8_t Kingside = 1;
-constexpr int8_t Queenside = 0;
+constexpr uint8_t Kingside = 1;
+constexpr uint8_t Queenside = 0;
 }
 
 namespace EntryTypes {
@@ -89,7 +89,7 @@ constexpr int LateMiddle = 3000;
 constexpr int Endgame = 1500;
 }
 
-constexpr int get_piece_type(int x) { return x / 2; }
+constexpr inline int get_piece_type(int x) noexcept { return x / 2; }
 
 template <typename T, size_t N, size_t... Ns> struct MultiArrayImpl {
   using Type = std::array<typename MultiArrayImpl<T, Ns...>::Type, N>;
@@ -122,17 +122,17 @@ struct MoveInfo {
 };
 
 struct Position {
-  uint64_t zobrist_key;
-  uint64_t pawn_key;
-  std::array<uint64_t, 2> non_pawn_key;
-  std::array<uint8_t, 64> board;
-  std::array<uint64_t, 2> colors_bb;
-  std::array<uint64_t, 7> pieces_bb;
-  std::array<uint8_t, 10> material_count;
-  MultiArray<uint8_t, 2, 2> castling_squares;
-  uint8_t ep_square;
-  bool color;
-  uint16_t halfmoves;
+  uint64_t zobrist_key = 0;
+  uint64_t pawn_key = 0;
+  std::array<uint64_t, 2> non_pawn_key{};
+  std::array<uint8_t, 64> board{};
+  std::array<uint64_t, 2> colors_bb{};
+  std::array<uint64_t, 7> pieces_bb{};
+  std::array<uint8_t, 10> material_count{};
+  MultiArray<uint8_t, 2, 2> castling_squares{};
+  uint8_t ep_square = SquareNone;
+  uint8_t color = Colors::White;
+  uint16_t halfmoves = 0;
   uint32_t fullmove = 1;
 };
 
@@ -147,39 +147,34 @@ struct GameHistory {
   Move played_move = MoveNone;
   uint8_t piece_moved = Pieces::Blank;
 
-  bool is_cap;
-  int16_t m_diff;
-  int32_t static_eval;
+  bool is_cap = false;
+  int16_t m_diff = 0;
+  int32_t static_eval = 0;
 };
 
 constexpr int BucketEntries = 3;
 constexpr int MaxAge = 1 << 6;
 
 struct TTEntry {
-  uint32_t position_key;
-  int16_t static_eval;
-  int16_t score;
-  Move best_move;
-  uint8_t depth;
-  uint8_t age_bound;
+  uint32_t position_key = 0;
+  int16_t static_eval = 0;
+  int16_t score = 0;
+  Move best_move = MoveNone;
+  uint8_t depth = 0;
+  uint8_t age_bound = 0;
 
-  uint8_t get_type() const noexcept;
-
-  int get_age() const noexcept;
+  constexpr uint8_t get_type() const noexcept { return age_bound & 0b11; }
+  constexpr int get_age() const noexcept { return age_bound >> 2; }
 };
 
-inline uint8_t TTEntry::get_type() const noexcept { return age_bound & 0b11; }
-
-inline int TTEntry::get_age() const noexcept { return age_bound >> 2; }
-
 struct TTBucket {
-  std::array<TTEntry, BucketEntries> entries;
-  int16_t padding;
+  std::array<TTEntry, BucketEntries> entries{};
+  int16_t padding = 0;
 };
 
 struct RootMoveInfo {
-  Move move;
-  uint64_t nodes;
+  Move move = MoveNone;
+  uint64_t nodes = 0;
 };
 
 using Action = Move;
@@ -200,26 +195,26 @@ inline thread_local std::mt19937 rd(std::random_device{}());
 inline thread_local std::uniform_int_distribution<int> dist(0, INT32_MAX);
 }
 
-constexpr uint8_t get_color(uint8_t piece) { return piece & 1; }
-inline bool is_valid_square(int sq) { return sq >= 0 && sq < 64; }
+constexpr inline uint8_t get_color(uint8_t piece) noexcept { return piece & 1; }
+constexpr inline bool is_valid_square(int sq) noexcept { return sq >= 0 && sq < 64; }
 
 void safe_printf(const char *fmt, ...);
 void safe_print_cerr(const std::string &s);
 
-constexpr Move pack_move(uint8_t from, uint8_t to, int8_t type) {
-  return ((from & 63) << 10) + ((to & 63) << 4) + (type & 3);
+constexpr inline Move pack_move(uint8_t from, uint8_t to, uint8_t type = MoveTypes::Normal) noexcept {
+  return static_cast<Move>(((from & 63) << 10) | ((to & 63) << 4) | (type & 3));
 }
-constexpr Move pack_move_promo(uint8_t from, uint8_t to, uint8_t promo) {
-  return ((from & 63) << 10) + ((to & 63) << 4) + ((promo & 3) << 2) +
-         MoveTypes::Promotion;
+constexpr inline Move pack_move_promo(uint8_t from, uint8_t to, uint8_t promo) noexcept {
+  return static_cast<Move>(((from & 63) << 10) | ((to & 63) << 4) | ((promo & 3) << 2) |
+         MoveTypes::Promotion);
 }
-constexpr uint8_t extract_from(Move move) { return (move >> 10) & 63; }
-constexpr uint8_t extract_to(Move move) { return (move >> 4) & 63; }
-constexpr uint8_t extract_promo(Move move) { return (move >> 2) & 3; }
-constexpr uint8_t extract_type(Move move) { return move & 3; }
+constexpr inline uint8_t extract_from(Move move) noexcept { return (move >> 10) & 63; }
+constexpr inline uint8_t extract_to(Move move) noexcept { return (move >> 4) & 63; }
+constexpr inline uint8_t extract_promo(Move move) noexcept { return (move >> 2) & 3; }
+constexpr inline uint8_t extract_type(Move move) noexcept { return move & 3; }
 
-constexpr uint16_t get_zobrist_key(uint8_t piece, uint8_t sq) {
-  return ((piece - 2) * 64) + sq;
+constexpr inline uint16_t get_zobrist_key(uint8_t piece, uint8_t sq) noexcept {
+  return static_cast<uint16_t>(((piece - 2) * 64) + sq);
 }
 
 constexpr int32_t side_index = 772;

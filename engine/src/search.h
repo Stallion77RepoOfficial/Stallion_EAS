@@ -862,11 +862,10 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
     }
   }
 
-  uint64_t center_squares =
-      (1ULL << 27) | (1ULL << 28) | (1ULL << 35) | (1ULL << 36);
-  uint64_t extended_center = center_squares | (1ULL << 26) | (1ULL << 29) |
-                             (1ULL << 34) | (1ULL << 37) | (1ULL << 42) |
-                             (1ULL << 43) | (1ULL << 44) | (1ULL << 45);
+  constexpr uint64_t center_squares = (Files[3] | Files[4]) & (Ranks[3] | Ranks[4]);
+  constexpr uint64_t extended_center =
+      (Files[2] | Files[3] | Files[4] | Files[5]) &
+      (Ranks[2] | Ranks[3] | Ranks[4] | Ranks[5]);
   int center_control = 0;
   if (position.pieces_bb[PieceTypes::Knight] & position.colors_bb[color] &
       extended_center)
@@ -2333,13 +2332,6 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
             thread_info.multipv_index + 1, depth, thread_info.seldepth,
             eval_string.c_str(), nodes, nps, search_time, thread_data.tb_hits.load(),
             format_pv(position, thread_info).c_str());
-
-        if (thread_info.mate_search > 0 && score >= MateScore - MaxSearchPly) {
-          int dist = (MateScore - score + 1) / 2;
-          if (dist <= thread_info.mate_search) {
-            thread_data.stop = true;
-          }
-        }
 
         if ((!thread_info.infinite_search && !thread_data.pondering &&
              static_cast<uint64_t>(search_time) > thread_info.opt_time) ||

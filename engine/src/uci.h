@@ -188,7 +188,9 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
   new_game(thread_info, TT);
   set_board(position, thread_info,
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-  if (!load_nnue_file())
+  const bool base_loaded = load_nnue_base(resolve_file_path("nets/base.nnue"));
+  const bool aggressive_loaded = load_nnue_aggressive(resolve_file_path("nets/aggressive.nnue"));
+  if (!base_loaded && !aggressive_loaded)
     safe_printf("info string NNUE files unavailable; using HCE\n");
 
   std::string input;
@@ -577,10 +579,10 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       if (optName == "use nnue" || optName == "usennue" || optName == "use_nnue") {
         use_nnue = to_bool(valueStr);
       } else if (optName == "evalfile") {
-        const bool loaded = load_nnue_base(valueStr);
+        const bool loaded = load_nnue_base(resolve_file_path(valueStr));
         safe_printf("info string EvalFile %s\n", loaded ? "loaded" : "load failed; previous network retained");
       } else if (optName == "evalfileaggressive") {
-        const bool loaded = load_nnue_aggressive(valueStr);
+        const bool loaded = load_nnue_aggressive(resolve_file_path(valueStr));
         safe_printf("info string EvalFileAggressive %s\n", loaded ? "loaded" : "load failed; previous network retained");
       } else if (optName == "hash") {
         bool ok = false;
@@ -1147,8 +1149,8 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           } else if (token == "movestogo") {
             movestogo = value;
           } else if (token == "mate") {
-            thread_info.mate_search = std::max(1, value);
-            thread_info.max_iter_depth = std::clamp(value * 2, 1, MaxRootDepth);
+            thread_info.mate_search = std::clamp(value, 1, MaxRootDepth / 2);
+            thread_info.max_iter_depth = thread_info.mate_search * 2;
           } else if (token == "depth") {
             thread_info.max_iter_depth = std::clamp(value, 1, MaxRootDepth);
           } else if (token == "movetime") {

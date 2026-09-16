@@ -1,14 +1,12 @@
 #pragma once
 #include "defs.h"
+#include <algorithm>
+#include <array>
 #include <atomic>
-#include <cctype>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <thread>
 
-void init_bbs();
+void init_bbs() noexcept;
 
 enum Square : int {
 
@@ -89,29 +87,24 @@ constexpr std::array<uint64_t, 8> Files = {
     0x101010101010101ull << 4, 0x101010101010101ull << 5,
     0x101010101010101ull << 6, 0x101010101010101ull << 7};
 
-constexpr MultiArray<uint64_t, 2, 2> CastlingBBs = {{
-    {0b00001110ull, 0b01100000ull},
-    {0b00001110ull << 56, 0b01100000ull << 56},
-}};
+inline MultiArray<uint64_t, 64, 64> BetweenBBs{};
 
-inline MultiArray<uint64_t, 64, 64> BetweenBBs = {};
-
-inline std::array<uint64_t, 64> RookMasks;
-inline std::array<uint64_t, 64> BishopMasks;
-inline MultiArray<uint64_t, 64, 512> BishopAttacks;
-inline MultiArray<uint64_t, 64, 4096> RookAttacks;
-inline MultiArray<uint64_t, 2, 64> PawnAttacks;
-inline std::array<uint64_t, 64> KingAttacks;
-inline std::array<uint64_t, 64> KnightAttacks;
+inline std::array<uint64_t, 64> RookMasks{};
+inline std::array<uint64_t, 64> BishopMasks{};
+inline MultiArray<uint64_t, 64, 512> BishopAttacks{};
+inline MultiArray<uint64_t, 64, 4096> RookAttacks{};
+inline MultiArray<uint64_t, 2, 64> PawnAttacks{};
+inline std::array<uint64_t, 64> KingAttacks{};
+inline std::array<uint64_t, 64> KnightAttacks{};
 
 inline std::atomic<bool> BBS_INITIALIZED{false};
 inline std::atomic<bool> BBS_INITIALIZING{false};
 inline thread_local bool BBS_INIT_IN_THIS_THREAD = false;
 
-inline void ensure_bbs_initialized() {
-  if (BBS_INITIALIZED.load(std::memory_order_acquire))
+inline void ensure_bbs_initialized() noexcept {
+  if (BBS_INITIALIZED.load(std::memory_order_relaxed)) [[likely]]
     return;
-  if (BBS_INIT_IN_THIS_THREAD)
+  if (BBS_INIT_IN_THIS_THREAD) [[unlikely]]
     return;
 
   bool expected = false;
@@ -177,86 +170,84 @@ constexpr std::array<uint64_t, 64> RookMagics = {
     0x0082008820100402, 0x0012008410050806, 0x2009408802100144,
     0x821080440020810A};
 
-inline uint64_t KNIGHT_ATK_SAFE(int sq) {
-  if (!is_valid_square(sq))
+inline uint64_t KNIGHT_ATK_SAFE(int sq) noexcept {
+  if (!is_valid_square(sq)) [[unlikely]]
     return 0ULL;
   ensure_bbs_initialized();
   return KnightAttacks[static_cast<size_t>(sq)];
 }
 
-inline uint64_t KING_ATK_SAFE(int sq) {
-  if (!is_valid_square(sq))
+inline uint64_t KING_ATK_SAFE(int sq) noexcept {
+  if (!is_valid_square(sq)) [[unlikely]]
     return 0ULL;
   ensure_bbs_initialized();
   return KingAttacks[static_cast<size_t>(sq)];
 }
 
-inline uint64_t PAWN_ATK_SAFE(int color, int sq) {
-  if (!is_valid_square(sq))
+inline uint64_t PAWN_ATK_SAFE(int color, int sq) noexcept {
+  if (!is_valid_square(sq)) [[unlikely]]
     return 0ULL;
-  int c = color & 1;
+  const int c = color & 1;
   ensure_bbs_initialized();
   return PawnAttacks[static_cast<size_t>(c)][static_cast<size_t>(sq)];
 }
 
-inline uint64_t BISHOP_ATK_SAFE(int sq, uint64_t occ) {
-  if (!is_valid_square(sq))
+inline uint64_t BISHOP_ATK_SAFE(int sq, uint64_t occ) noexcept {
+  if (!is_valid_square(sq)) [[unlikely]]
     return 0ULL;
-  size_t idx_sq = static_cast<size_t>(sq);
+  const size_t idx_sq = static_cast<size_t>(sq);
   ensure_bbs_initialized();
-  uint64_t mask = BishopMasks[idx_sq];
-  uint64_t index = ((occ & mask) * BishopMagics[idx_sq]) >> 55;
-  size_t attack_index = static_cast<size_t>(index);
-  if (attack_index >= BishopAttacks[idx_sq].size())
+  const uint64_t mask = BishopMasks[idx_sq];
+  const uint64_t index = ((occ & mask) * BishopMagics[idx_sq]) >> 55;
+  const size_t attack_index = static_cast<size_t>(index);
+  if (attack_index >= BishopAttacks[idx_sq].size()) [[unlikely]]
     return 0ULL;
   return BishopAttacks[idx_sq][attack_index];
 }
 
-inline uint64_t ROOK_ATK_SAFE(int sq, uint64_t occ) {
-  if (!is_valid_square(sq))
+inline uint64_t ROOK_ATK_SAFE(int sq, uint64_t occ) noexcept {
+  if (!is_valid_square(sq)) [[unlikely]]
     return 0ULL;
-  size_t idx_sq = static_cast<size_t>(sq);
+  const size_t idx_sq = static_cast<size_t>(sq);
   ensure_bbs_initialized();
-  uint64_t mask = RookMasks[idx_sq];
-  uint64_t index = ((occ & mask) * RookMagics[idx_sq]) >> 52;
-  size_t attack_index = static_cast<size_t>(index);
-  if (attack_index >= RookAttacks[idx_sq].size())
+  const uint64_t mask = RookMasks[idx_sq];
+  const uint64_t index = ((occ & mask) * RookMagics[idx_sq]) >> 52;
+  const size_t attack_index = static_cast<size_t>(index);
+  if (attack_index >= RookAttacks[idx_sq].size()) [[unlikely]]
     return 0ULL;
   return RookAttacks[idx_sq][attack_index];
 }
 
-constexpr int get_file(int square) { return square % 8; }
-constexpr int get_rank(int square) { return square / 8; }
+constexpr inline int get_file(int square) noexcept { return square & 7; }
+constexpr inline int get_rank(int square) noexcept { return square >> 3; }
 
-inline uint64_t file_bb(int square) { return Files[square % 8]; }
-inline uint64_t rank_bb(int square) { return Ranks[square / 8]; }
+constexpr inline uint64_t file_bb(int square) noexcept { return Files[square & 7]; }
+constexpr inline uint64_t rank_bb(int square) noexcept { return Ranks[square >> 3]; }
 
-inline int pop_count(uint64_t bb) { return __builtin_popcountll(bb); }
+constexpr inline int pop_count(uint64_t bb) noexcept { return __builtin_popcountll(bb); }
 
-inline int get_lsb(uint64_t bb) {
+constexpr inline int get_lsb(uint64_t bb) noexcept {
   return bb ? __builtin_ctzll(bb) : SqNone;
 }
 
-inline int get_msb(uint64_t bb) {
+constexpr inline int get_msb(uint64_t bb) noexcept {
   return bb ? 63 - __builtin_clzll(bb) : SqNone;
 }
 
-inline int pop_lsb(uint64_t &bb) {
-  if (!bb) return SqNone;
-  int s = get_lsb(bb);
+inline int pop_lsb(uint64_t &bb) noexcept {
+  if (!bb) [[unlikely]] return SqNone;
+  const int s = __builtin_ctzll(bb);
   bb &= (bb - 1);
   return s;
 }
 
-inline uint64_t get_lsb_bb(uint64_t bb) { return bb & (~bb + 1); }
+constexpr inline uint64_t get_lsb_bb(uint64_t bb) noexcept { return bb & -bb; }
 
-inline uint64_t set_occ(int idx, int size, uint64_t mask) {
+inline uint64_t set_occ(int idx, int size, uint64_t mask) noexcept {
   uint64_t occ = 0;
 
   for (int i = 0; i < size; i++) {
-
-    int square = pop_lsb(mask);
-
+    const int square = pop_lsb(mask);
     if (idx & (1 << i)) {
       occ |= (1ull << square);
     }
@@ -264,18 +255,18 @@ inline uint64_t set_occ(int idx, int size, uint64_t mask) {
   return occ;
 }
 
-inline uint64_t bishop_sliders(int square, uint64_t occ) {
+inline uint64_t bishop_sliders(int square, uint64_t occ) noexcept {
   uint64_t bb = 0;
 
-  int dirs_file[4] = {1, -1, 1, -1};
-  int dirs_rank[4] = {1, 1, -1, -1};
+  constexpr int dirs_file[4] = {1, -1, 1, -1};
+  constexpr int dirs_rank[4] = {1, 1, -1, -1};
   for (int i = 0; i < 4; i++) {
     int temp_file = get_file(square) + dirs_file[i];
     int temp_rank = get_rank(square) + dirs_rank[i];
 
     while (temp_file >= 0 && temp_file <= 7 && temp_rank >= 0 &&
            temp_rank <= 7) {
-      int temp_sq = temp_file + (temp_rank * 8);
+      const int temp_sq = temp_file + (temp_rank * 8);
       bb |= (1ull << temp_sq);
       if (occ & (1ull << temp_sq)) {
         break;
@@ -289,18 +280,18 @@ inline uint64_t bishop_sliders(int square, uint64_t occ) {
   return bb;
 }
 
-inline uint64_t rook_sliders(int square, uint64_t occ) {
+inline uint64_t rook_sliders(int square, uint64_t occ) noexcept {
   uint64_t bb = 0;
 
-  int dirs_file[4] = {0, 0, 1, -1};
-  int dirs_rank[4] = {-1, 1, 0, 0};
+  constexpr int dirs_file[4] = {0, 0, 1, -1};
+  constexpr int dirs_rank[4] = {-1, 1, 0, 0};
   for (int i = 0; i < 4; i++) {
     int temp_file = get_file(square) + dirs_file[i];
     int temp_rank = get_rank(square) + dirs_rank[i];
 
     while (temp_file >= 0 && temp_file <= 7 && temp_rank >= 0 &&
            temp_rank <= 7) {
-      int temp_sq = temp_file + (temp_rank * 8);
+      const int temp_sq = temp_file + (temp_rank * 8);
       bb |= (1ull << temp_sq);
       if (occ & (1ull << temp_sq)) {
         break;
@@ -314,47 +305,43 @@ inline uint64_t rook_sliders(int square, uint64_t occ) {
   return bb;
 }
 
-inline void fill_bishop_attacks() {
+inline void fill_bishop_attacks() noexcept {
   for (int square = a1; square < SqNone; square++) {
-    int bits = pop_count(BishopMasks[square]);
-    int occ_var = 1 << bits;
+    const int bits = pop_count(BishopMasks[square]);
+    const int occ_var = 1 << bits;
     for (int i = 0; i < occ_var; i++) {
-      uint64_t occ = set_occ(i, bits, BishopMasks[square]);
-
-      uint64_t magic_idx = occ * BishopMagics[square] >> 55;
+      const uint64_t occ = set_occ(i, bits, BishopMasks[square]);
+      const uint64_t magic_idx = (occ * BishopMagics[square]) >> 55;
       BishopAttacks[square][magic_idx] = bishop_sliders(square, occ);
     }
   }
 }
 
-inline void fill_rook_attacks() {
+inline void fill_rook_attacks() noexcept {
   for (int square = a1; square < SqNone; square++) {
-    int bits = pop_count(RookMasks[square]);
-    int occ_var = 1 << bits;
+    const int bits = pop_count(RookMasks[square]);
+    const int occ_var = 1 << bits;
     for (int i = 0; i < occ_var; i++) {
-
-      uint64_t occ = set_occ(i, bits, RookMasks[square]);
-      uint64_t magic_idx = occ * RookMagics[square] >> 52;
+      const uint64_t occ = set_occ(i, bits, RookMasks[square]);
+      const uint64_t magic_idx = (occ * RookMagics[square]) >> 52;
       RookAttacks[square][magic_idx] = rook_sliders(square, occ);
     }
   }
 }
 
-inline void fill_king_attacks() {
+inline void fill_king_attacks() noexcept {
   for (int square = a1; square < SqNone; square++) {
     uint64_t occ = 0;
-    int left = std::max(0, get_file(square) - 1),
-        right = std::min(7, get_file(square) + 1),
-        bottom = std::max(0, get_rank(square) - 1),
-        top = std::min(7, get_rank(square) + 1);
+    const int left = std::max(0, get_file(square) - 1);
+    const int right = std::min(7, get_file(square) + 1);
+    const int bottom = std::max(0, get_rank(square) - 1);
+    const int top = std::min(7, get_rank(square) + 1);
 
     for (int file = left; file <= right; file++) {
       for (int rank = bottom; rank <= top; rank++) {
-
         if (file + rank * 8 == square) {
           continue;
         }
-
         occ |= (1ull << (file + rank * 8));
       }
     }
@@ -362,18 +349,17 @@ inline void fill_king_attacks() {
   }
 }
 
-inline void fill_knight_attacks() {
-  int knight_moves_file[8] = {-2, -2, -1, 1, 2, 2, 1, -1};
-  int knight_moves_rank[8] = {-1, 1, 2, 2, 1, -1, -2, -2};
+inline void fill_knight_attacks() noexcept {
+  constexpr int knight_moves_file[8] = {-2, -2, -1, 1, 2, 2, 1, -1};
+  constexpr int knight_moves_rank[8] = {-1, 1, 2, 2, 1, -1, -2, -2};
 
   for (int square = a1; square < SqNone; square++) {
-
     uint64_t occ = 0;
-    int s_file = get_file(square), s_rank = get_rank(square);
+    const int s_file = get_file(square), s_rank = get_rank(square);
 
     for (int i = 0; i < 8; i++) {
-      int file = s_file + knight_moves_file[i];
-      int rank = s_rank + knight_moves_rank[i];
+      const int file = s_file + knight_moves_file[i];
+      const int rank = s_rank + knight_moves_rank[i];
 
       if (file >= 0 && file <= 7 && rank >= 0 && rank <= 7) {
         occ |= (1ull << (file + rank * 8));
@@ -384,7 +370,7 @@ inline void fill_knight_attacks() {
   }
 }
 
-inline void fill_pawn_attacks() {
+inline void fill_pawn_attacks() noexcept {
   PawnAttacks.fill({});
 
   for (int square = a1; square <= h7; square++) {
@@ -410,17 +396,17 @@ inline void fill_pawn_attacks() {
   }
 }
 
-inline uint64_t get_bishop_attacks(int sq, uint64_t occ) {
+inline uint64_t get_bishop_attacks(int sq, uint64_t occ) noexcept {
   return BISHOP_ATK_SAFE(sq, occ);
 }
 
-inline uint64_t get_rook_attacks(int sq, uint64_t occ) {
+inline uint64_t get_rook_attacks(int sq, uint64_t occ) noexcept {
   return ROOK_ATK_SAFE(sq, occ);
 }
 
 inline uint64_t attackers_to(const Position &position, int sq, int color,
-                             uint64_t occupied) {
-  if (!is_valid_square(sq) || (color != Colors::White && color != Colors::Black))
+                             uint64_t occupied) noexcept {
+  if (!is_valid_square(sq) || (color != Colors::White && color != Colors::Black)) [[unlikely]]
     return 0;
   return position.colors_bb[color] &
       ((PAWN_ATK_SAFE(color ^ 1, sq) & position.pieces_bb[PieceTypes::Pawn]) |
@@ -432,11 +418,10 @@ inline uint64_t attackers_to(const Position &position, int sq, int color,
        (KING_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::King]));
 }
 
-inline void init_bbs() {
+inline void init_bbs() noexcept {
   for (int square = a1; square < SqNone; square++) {
-
-    uint64_t edges = ((Ranks[0] | Ranks[7]) & ~rank_bb(square)) |
-                     ((Files[0] | Files[7]) & ~file_bb(square));
+    const uint64_t edges = ((Ranks[0] | Ranks[7]) & ~rank_bb(square)) |
+                           ((Files[0] | Files[7]) & ~file_bb(square));
 
     BishopMasks[square] = bishop_sliders(square, 0) & ~edges;
     RookMasks[square] = rook_sliders(square, 0) & ~edges;
@@ -450,13 +435,11 @@ inline void init_bbs() {
 
   for (int square1 = a1; square1 < SqNone; square1++) {
     for (int square2 = a1; square2 < SqNone; square2++) {
-      uint64_t occ = (1ull << square1) | (1ull << square2);
+      const uint64_t occ = (1ull << square1) | (1ull << square2);
 
       if (get_bishop_attacks(square1, 0) & (1ull << square2)) {
-
         BetweenBBs[square1][square2] =
             get_bishop_attacks(square1, occ) & get_bishop_attacks(square2, occ);
-
       } else if (get_rook_attacks(square1, 0) & (1ull << square2)) {
         BetweenBBs[square1][square2] =
             get_rook_attacks(square1, occ) & get_rook_attacks(square2, occ);
@@ -468,24 +451,23 @@ inline void init_bbs() {
 }
 
 inline void update_bb(Position &pos, int from_piece, int from, int to_piece, int to,
-                      int captured_piece, int capture_sq) {
+                      int captured_piece, int capture_sq) noexcept {
+  const int color = get_color(from_piece);
+  const int from_type = get_piece_type(from_piece);
+  const int to_type = get_piece_type(to_piece);
+  const int capt_type = get_piece_type(captured_piece);
 
-  int color = from_piece & 1;
-  int from_type = from_piece / 2;
-  int to_type = to_piece / 2;
-  int capt_type = captured_piece / 2;
-
-  pos.colors_bb[color] += (1ull << to) - (1ull << from);
-  pos.pieces_bb[from_type] -= (1ull << from);
-  pos.pieces_bb[to_type] += (1ull << to);
+  pos.colors_bb[color] ^= (1ull << from) | (1ull << to);
+  pos.pieces_bb[from_type] ^= (1ull << from);
+  pos.pieces_bb[to_type] ^= (1ull << to);
 
   if (capture_sq != SquareNone) {
-    pos.colors_bb[color ^ 1] -= (1ull << capture_sq);
-    pos.pieces_bb[capt_type] -= (1ull << capture_sq);
+    pos.colors_bb[color ^ 1] ^= (1ull << capture_sq);
+    pos.pieces_bb[capt_type] ^= (1ull << capture_sq);
   }
 }
 
-constexpr inline uint64_t shift_pawns(uint64_t bb, int dir) {
+constexpr inline uint64_t shift_pawns(uint64_t bb, int dir) noexcept {
   if (dir >= 0) {
     return bb << dir;
   } else {

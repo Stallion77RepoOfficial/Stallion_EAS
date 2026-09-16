@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
-#include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -58,15 +57,16 @@ inline std::unique_ptr<NNUE_Params> read_nnue_binary(const std::string &path) {
   if (!file) return nullptr;
   const auto length = file.tellg();
   if (length != std::streamoff(payload) && length != std::streamoff(padded)) return nullptr;
-  std::vector<unsigned char> data(payload);
+  std::vector<uint8_t> data(payload);
   file.seekg(0);
   if (!file.read(reinterpret_cast<char *>(data.data()), payload)) return nullptr;
   auto loaded_params = std::make_unique<NNUE_Params>();
   size_t offset = 0;
-  auto read_value = [&]() {
-    const int value = data[offset] | (unsigned(data[offset + 1]) << 8);
+  auto read_value = [&]() noexcept -> int16_t {
+    const uint16_t u = static_cast<uint16_t>(data[offset]) |
+                       (static_cast<uint16_t>(data[offset + 1]) << 8);
     offset += 2;
-    return static_cast<int16_t>(value >= 32768 ? value - 65536 : value);
+    return static_cast<int16_t>(u);
   };
   for (auto &v : loaded_params->feature_v) v = read_value();
   for (auto &v : loaded_params->feature_bias) v = read_value();
@@ -97,7 +97,7 @@ inline bool load_nnue_aggressive(const std::string &path = "nets/aggressive.nnue
   return false;
 }
 
-inline void select_active_nnue(int phase) {
+inline void select_active_nnue(int phase) noexcept {
   if (!nnue_loaded) {
     g_nnue = nullptr;
     return;
@@ -117,7 +117,7 @@ constexpr inline std::pair<size_t, size_t> feature_indices(int piece, int sq) no
   constexpr size_t color_stride = 384;
   constexpr size_t piece_stride = 64;
 
-  const size_t base = static_cast<size_t>(piece / 2 - 1);
+  const size_t base = static_cast<size_t>((piece >> 1) - 1);
   const size_t color = static_cast<size_t>(piece & 1);
 
   const size_t whiteIdx = color * color_stride + base * piece_stride + static_cast<size_t>(sq);
@@ -131,17 +131,17 @@ struct alignas(64) Accumulator {
   alignas(64) std::array<int32_t, HiddenSize> white;
   alignas(64) std::array<int32_t, HiddenSize> black;
 
-  inline void init(const int16_t *bias_ptr) {
+  inline void init(const int16_t *bias_ptr) noexcept {
     std::copy_n(bias_ptr, HiddenSize, white.begin());
     std::copy_n(bias_ptr, HiddenSize, black.begin());
   }
 
   Accumulator() = default;
-  Accumulator(const Accumulator &other) {
+  Accumulator(const Accumulator &other) noexcept {
     std::memcpy(white.data(), other.white.data(), sizeof(white));
     std::memcpy(black.data(), other.black.data(), sizeof(black));
   }
-  Accumulator &operator=(const Accumulator &other) {
+  Accumulator &operator=(const Accumulator &other) noexcept {
     if (this != &other) {
       std::memcpy(white.data(), other.white.data(), sizeof(white));
       std::memcpy(black.data(), other.black.data(), sizeof(black));
@@ -151,19 +151,19 @@ struct alignas(64) Accumulator {
 };
 
 constexpr inline int32_t screlu(int32_t x) noexcept {
-  const int32_t clipped = std::clamp(static_cast<int32_t>(x), SCRELU_MIN, SCRELU_MAX);
+  const int32_t clipped = std::clamp(x, SCRELU_MIN, SCRELU_MAX);
   return clipped * clipped;
 }
 
 inline int64_t screlu_flatten(const std::array<int32_t, LAYER1_SIZE> &us,
                              const std::array<int32_t, LAYER1_SIZE> &them,
-                             const std::array<int16_t, LAYER1_SIZE * 2> &weights) {
+                             const std::array<int16_t, LAYER1_SIZE * 2> &weights) noexcept {
 #if defined(STALLION_SIMD_AVX2)
   const __m256i zero = _mm256_setzero_si256();
   const __m256i max255 = _mm256_set1_epi32(255);
   __m256i acc64 = _mm256_setzero_si256();
 
-  auto process = [&](const int32_t *acc_in, const int16_t *w_in) {
+  auto process = [&](const int32_t *acc_in, const int16_t *w_in) noexcept {
     for (size_t i = 0; i < LAYER1_SIZE; i += 16) {
       __m256i u0 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(acc_in + i));
       __m256i u1 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(acc_in + i + 8));
@@ -208,7 +208,7 @@ inline int64_t screlu_flatten(const std::array<int32_t, LAYER1_SIZE> &us,
   int64x2_t acc0 = vdupq_n_s64(0);
   int64x2_t acc1 = vdupq_n_s64(0);
 
-  auto process = [&](const int32_t *acc_in, const int16_t *w_in) {
+  auto process = [&](const int32_t *acc_in, const int16_t *w_in) noexcept {
     for (size_t i = 0; i < LAYER1_SIZE; i += 8) {
       int32x4_t a0 = vld1q_s32(acc_in + i);
       int32x4_t a1 = vld1q_s32(acc_in + i + 4);
@@ -259,8 +259,8 @@ public:
   int m_idx = 0;
 
   NNUE_State() = default;
-  NNUE_State(const NNUE_State &other) { *this = other; }
-  NNUE_State &operator=(const NNUE_State &other) {
+  NNUE_State(const NNUE_State &other) noexcept { *this = other; }
+  NNUE_State &operator=(const NNUE_State &other) noexcept {
     if (this != &other) {
       m_idx = other.m_idx;
       std::copy_n(other.m_accumulator_stack, m_idx + 1, m_accumulator_stack);
@@ -269,21 +269,21 @@ public:
     return *this;
   }
 
-  inline void pop() {
+  inline void pop() noexcept {
     if (m_idx > 0) {
       --m_idx;
       m_curr = &m_accumulator_stack[m_idx];
     }
   }
 
-  inline void push_null() {
+  inline void push_null() noexcept {
     if (m_idx >= MaxSearchDepth - 1 || !g_nnue || !nnue_loaded) return;
     m_accumulator_stack[m_idx + 1] = m_accumulator_stack[m_idx];
     ++m_idx;
     m_curr = &m_accumulator_stack[m_idx];
   }
 
-  inline int evaluate(int color) {
+  inline int evaluate(int color) const noexcept {
     if (!g_nnue || !nnue_loaded) return 0;
     const auto &us = (color == Colors::White) ? m_curr->white : m_curr->black;
     const auto &them = (color == Colors::White) ? m_curr->black : m_curr->white;
@@ -292,15 +292,17 @@ public:
         (output + g_nnue->output_bias) * SCALE / QAB, -MaxEval, MaxEval));
   }
 
-  inline void reset_nnue(const BoardState &position) {
+  inline void reset_nnue(const BoardState &position) noexcept {
     m_idx = 0;
     m_curr = &m_accumulator_stack[0];
     if (!g_nnue || !nnue_loaded) return;
 
     m_curr->init(g_nnue->feature_bias.data());
 
-    for (int sq = 0; sq < 64; sq++) {
-      int piece = position.board[sq];
+    uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
+    while (occ) {
+      const int sq = pop_lsb(occ);
+      const int piece = position.board[sq];
       if (piece >= Pieces::WPawn && piece <= Pieces::BKing) {
         const auto [white_idx, black_idx] = feature_indices(piece, sq);
         const size_t white_off = white_idx * LAYER1_SIZE;
@@ -314,12 +316,12 @@ public:
     }
   }
 
-  inline void add_sub(int from_piece, int from, int to_piece, int to) {
+  inline void add_sub(int from_piece, int from, int to_piece, int to) noexcept {
     if (m_idx >= MaxSearchDepth - 1 || !g_nnue || !nnue_loaded) return;
     const auto [wf, bf] = feature_indices(from_piece, from);
     const auto [wt, bt] = feature_indices(to_piece, to);
 
-    auto &curr = m_accumulator_stack[m_idx];
+    const auto &curr = m_accumulator_stack[m_idx];
     auto &next = m_accumulator_stack[m_idx + 1];
 
     const size_t off_wt = wt * LAYER1_SIZE, off_wf = wf * LAYER1_SIZE;
@@ -334,13 +336,13 @@ public:
     m_curr = &m_accumulator_stack[m_idx];
   }
 
-  inline void add_sub_sub(int from_piece, int from, int to_piece, int to, int captured, int captured_sq) {
+  inline void add_sub_sub(int from_piece, int from, int to_piece, int to, int captured, int captured_sq) noexcept {
     if (m_idx >= MaxSearchDepth - 1 || !g_nnue || !nnue_loaded) return;
     const auto [wf, bf] = feature_indices(from_piece, from);
     const auto [wt, bt] = feature_indices(to_piece, to);
     const auto [wc, bc] = feature_indices(captured, captured_sq);
 
-    auto &curr = m_accumulator_stack[m_idx];
+    const auto &curr = m_accumulator_stack[m_idx];
     auto &next = m_accumulator_stack[m_idx + 1];
 
     const size_t off_wt = wt * LAYER1_SIZE, off_wf = wf * LAYER1_SIZE, off_wc = wc * LAYER1_SIZE;
@@ -355,14 +357,14 @@ public:
     m_curr = &m_accumulator_stack[m_idx];
   }
 
-  inline void add_add_sub_sub(int p1, int from1, int to1, int p2, int from2, int to2) {
+  inline void add_add_sub_sub(int p1, int from1, int to1, int p2, int from2, int to2) noexcept {
     if (m_idx >= MaxSearchDepth - 1 || !g_nnue || !nnue_loaded) return;
     const auto [w1f, b1f] = feature_indices(p1, from1);
     const auto [w1t, b1t] = feature_indices(p1, to1);
     const auto [w2f, b2f] = feature_indices(p2, from2);
     const auto [w2t, b2t] = feature_indices(p2, to2);
 
-    auto &curr = m_accumulator_stack[m_idx];
+    const auto &curr = m_accumulator_stack[m_idx];
     auto &next = m_accumulator_stack[m_idx + 1];
 
     const size_t off_w1t = w1t * LAYER1_SIZE, off_w1f = w1f * LAYER1_SIZE;

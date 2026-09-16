@@ -797,6 +797,13 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
   int base_eval;
   if (use_nnue && nnue_loaded) {
     base_eval = thread_info.nnue_state.evaluate(color);
+    const int mat = material_eval(position);
+    constexpr int max_compensation = 900;
+    if (base_eval > mat + max_compensation) {
+      base_eval = mat + max_compensation;
+    } else if (base_eval < mat - max_compensation) {
+      base_eval = mat - max_compensation;
+    }
   } else {
     int hce = material_eval(position);
     hce += eval_sacrifice_patterns(position, color);
@@ -951,7 +958,7 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
       const int file = get_file(sq);
       const int rank = get_rank(sq);
       const int r_rank = (side_c == Colors::White) ? rank : (7 - rank);
-      if (r_rank >= 5) {
+      if (r_rank >= 4) {
         bool is_passed = true;
         for (int f = std::max(0, file - 1); f <= std::min(7, file + 1); ++f) {
           uint64_t ahead_mask = 0;
@@ -963,7 +970,7 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
           if (opp_p & ahead_mask) { is_passed = false; break; }
         }
         if (is_passed) {
-          int bonus = (r_rank >= 6) ? 120 : 50;
+          int bonus = (r_rank >= 6) ? 450 : (r_rank == 5 ? 200 : 70);
           const int ahead_sq = sq + (side_c == Colors::White ? 8 : -8);
           if (is_valid_square(ahead_sq) && position.board[ahead_sq] != Pieces::Blank) {
             bonus /= 2;
@@ -976,9 +983,9 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
 
     const uint64_t opp_q = position.pieces_bb[PieceTypes::Queen] & position.colors_bb[opp_c];
     const uint64_t opp_r = position.pieces_bb[PieceTypes::Rook] & position.colors_bb[opp_c];
-    if (opp_q || opp_r) {
-      const int k_sq = get_king_pos(position, side_c);
-      if (is_valid_square(k_sq)) {
+    const int k_sq = get_king_pos(position, side_c);
+    if (is_valid_square(k_sq)) {
+      if (opp_q || opp_r) {
         const int k_file = get_file(k_sq);
         int open_file_penalty = 0;
         for (int f = std::max(0, k_file - 1); f <= std::min(7, k_file + 1); ++f) {
@@ -998,6 +1005,27 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
         }
         if (side_c == color) positional_bonus -= open_file_penalty;
         else positional_bonus += open_file_penalty;
+      }
+
+      const uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
+      uint64_t snipers = (get_rook_attacks(k_sq, 0) & (position.pieces_bb[PieceTypes::Rook] | position.pieces_bb[PieceTypes::Queen])) |
+                         (get_bishop_attacks(k_sq, 0) & (position.pieces_bb[PieceTypes::Bishop] | position.pieces_bb[PieceTypes::Queen]));
+      snipers &= position.colors_bb[opp_c];
+      while (snipers) {
+        const int s_sq = pop_lsb(snipers);
+        const uint64_t between = (BetweenBBs[k_sq][s_sq] & occ) & ~(1ULL << s_sq);
+        if (between && !(between & (between - 1))) {
+          if (between & position.colors_bb[side_c]) {
+            const int pinned_sq = get_lsb(between);
+            const int pt = get_piece_type(position.board[pinned_sq]);
+            int pin_penalty = 0;
+            if (pt == PieceTypes::Rook) pin_penalty = 120;
+            else if (pt == PieceTypes::Queen) pin_penalty = 180;
+            else if (pt == PieceTypes::Knight || pt == PieceTypes::Bishop) pin_penalty = 40;
+            if (side_c == color) positional_bonus -= pin_penalty;
+            else positional_bonus += pin_penalty;
+          }
+        }
       }
     }
   }

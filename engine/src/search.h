@@ -150,7 +150,8 @@ inline bool out_of_time(ThreadInfo &thread_info) noexcept {
       const uint64_t elapsed = time_elapsed(thread_info.start_time);
       bool in_trouble = false;
       if (thread_info.time_manager.should_stop(
-              elapsed, thread_info.best_move_stable, in_trouble) ||
+              elapsed, thread_info.best_move_stable, in_trouble,
+              thread_info.is_movetime) ||
           elapsed > thread_info.max_time) {
         thread_data.stop = true;
         return true;
@@ -1564,7 +1565,7 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
           thread_data.stop = true;
         }
 
-        else if (thread_info.multipv == 1 && depth > 6) {
+        else if (!thread_info.is_movetime && thread_info.multipv == 1 && depth > 6) {
           if (thread_info.best_moves[0] == prev_best) {
             bm_stability = std::min(bm_stability + 1, 8);
             thread_info.stability_counter++;
@@ -1576,9 +1577,10 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
             thread_info.previous_best_move = prev_best;
           }
 
+          RootAction *ra = find_root_move(thread_info, thread_info.best_moves[0]);
           adjust_soft_limit(
               thread_info,
-              find_root_move(thread_info, thread_info.best_moves[0])->nodes,
+              ra ? ra->nodes : 0,
               bm_stability, thread_info.best_scores[0]);
         }
       }

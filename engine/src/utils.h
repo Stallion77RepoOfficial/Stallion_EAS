@@ -79,7 +79,8 @@ struct TimeManager {
 
   void initialize(uint64_t time_left, uint64_t increment, int moves_to_go,
                   uint32_t game_move) noexcept;
-  bool should_stop(uint64_t elapsed, bool best_move_stable, bool in_trouble) noexcept;
+  bool should_stop(uint64_t elapsed, bool best_move_stable, bool in_trouble,
+                   bool is_movetime = false) noexcept;
 };
 
 struct ThreadInfoBase {
@@ -166,6 +167,7 @@ struct ThreadInfoBase {
   std::string syzygy_path;
 
   TimeManager time_manager;
+  bool is_movetime = false;
   bool best_move_stable = false;
   int stability_counter = 0;
   Action previous_best_move = MoveNone;
@@ -723,10 +725,13 @@ inline void TimeManager::initialize(uint64_t time_left, uint64_t increment,
 }
 
 inline bool TimeManager::should_stop(uint64_t elapsed, bool best_move_stable,
-                                     bool in_trouble) noexcept {
+                                     bool in_trouble, bool is_movetime) noexcept {
 
   if (elapsed >= hard_limit)
     return true;
+
+  if (is_movetime)
+    return false;
 
   if (in_trouble && !use_panic_mode && elapsed < panic_time) {
     use_panic_mode = true;

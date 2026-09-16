@@ -150,6 +150,7 @@ inline void bench(BoardState &position, ThreadInfo &thread_info, int depth = 12)
   thread_info.time_manager.hard_limit = thread_info.max_time;
   thread_info.time_manager.soft_limit = thread_info.opt_time;
   thread_info.max_nodes_searched = thread_info.opt_nodes_searched = UINT64_MAX / 2;
+  thread_info.is_movetime = false;
   thread_info.pondering = false;
   thread_data.pondering = false;
   uint64_t total_nodes = 0;
@@ -630,6 +631,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     else if (command == "ucinewgame") {
       new_game(thread_info, TT);
       thread_info.time_manager = TimeManager();
+      thread_info.is_movetime = false;
       thread_info.best_move_stable = false;
       thread_info.stability_counter = 0;
       thread_info.previous_best_move = MoveNone;
@@ -878,6 +880,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
       constexpr uint64_t unlimited = UINT64_MAX / 2;
       thread_info.max_time = thread_info.opt_time = unlimited;
+      thread_info.is_movetime = (move_time >= 0);
       if (!thread_info.infinite_search) {
         if (move_time >= 0) {
           const auto overhead = std::min<uint64_t>(thread_info.move_overhead, static_cast<uint64_t>(move_time / 10));

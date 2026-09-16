@@ -1312,7 +1312,7 @@ inline void prepare_search_evaluator(const BoardState &position, ThreadInfo &inf
   }
   select_active_nnue(info.phase);
   const NNUE_Params *network = use_nnue ? g_nnue : nullptr;
-  if (info.cached_eval_network != network || info.cached_eval_phase != info.phase) {
+  if (info.cached_eval_network != network) {
     std::fill(table.begin(), table.end(), TTBucket{});
     info.PawnCorrHist.fill({});
     info.NonPawnCorrHist.fill({});

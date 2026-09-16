@@ -432,6 +432,11 @@ inline int eval_king_safety(const BoardState &position, int color) noexcept {
                                  position.colors_bb[opp_color] & file_bb;
       if (!opp_pawns) {
         score += KSOpenFile;
+        const bool opp_has_queen = (position.pieces_bb[PieceTypes::Queen] &
+                                    position.colors_bb[opp_color]) != 0;
+        if (opp_has_queen) {
+          score += (f == king_file) ? KSOpenFile * 3 : KSOpenFile;
+        }
       }
     }
 
@@ -966,6 +971,33 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
           if (side_c == color) positional_bonus += bonus;
           else positional_bonus -= bonus;
         }
+      }
+    }
+
+    const uint64_t opp_q = position.pieces_bb[PieceTypes::Queen] & position.colors_bb[opp_c];
+    const uint64_t opp_r = position.pieces_bb[PieceTypes::Rook] & position.colors_bb[opp_c];
+    if (opp_q || opp_r) {
+      const int k_sq = get_king_pos(position, side_c);
+      if (is_valid_square(k_sq)) {
+        const int k_file = get_file(k_sq);
+        int open_file_penalty = 0;
+        for (int f = std::max(0, k_file - 1); f <= std::min(7, k_file + 1); ++f) {
+          const uint64_t file_bb = Files[f];
+          const bool my_pawn = (position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[side_c] & file_bb) != 0;
+          if (!my_pawn) {
+            const bool enemy_pawn = (position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[opp_c] & file_bb) != 0;
+            int pen = 0;
+            if (!enemy_pawn) {
+              pen = (f == k_file) ? 100 : 50;
+            } else {
+              pen = (f == k_file) ? 50 : 25;
+            }
+            if (opp_q) pen = (pen * 3) / 2;
+            open_file_penalty += pen;
+          }
+        }
+        if (side_c == color) positional_bonus -= open_file_penalty;
+        else positional_bonus += open_file_penalty;
       }
     }
   }

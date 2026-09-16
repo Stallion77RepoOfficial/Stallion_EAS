@@ -145,7 +145,7 @@ struct ThreadInfoBase {
   float opening_aggressiveness = 1.50f;
   float middlegame_aggressiveness = 1.50f;
   float late_middlegame_aggressiveness = 1.50f;
-  float endgame_aggressiveness = 1.50f;
+  float endgame_aggressiveness = 1.00f;
 
   int sacrifice_lookahead = 1;
   int sacrifice_lookahead_time_multiplier = 200;

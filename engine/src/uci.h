@@ -262,7 +262,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           "max 150\n"
           "option name LateMiddlegameAggressiveness type spin default 150 min "
           "50 max 150\n"
-          "option name EndgameAggressiveness type spin default 150 min 50 max "
+          "option name EndgameAggressiveness type spin default 100 min 50 max "
           "150\n"
           "option name SacrificeLookAhead type spin default 1 min 0 max 1\n"
           "option name SacrificeLookAheadTimeMultiplier type spin default 200 "

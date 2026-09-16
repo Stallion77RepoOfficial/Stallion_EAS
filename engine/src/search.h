@@ -798,7 +798,7 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
   if (use_nnue && nnue_loaded) {
     base_eval = thread_info.nnue_state.evaluate(color);
     const int mat = material_eval(position);
-    constexpr int max_compensation = 900;
+    const int max_compensation = std::clamp(250 + (total_material - EndgameMaterial) * 600 / 3000, 250, 850);
     if (base_eval > mat + max_compensation) {
       base_eval = mat + max_compensation;
     } else if (base_eval < mat - max_compensation) {
@@ -973,7 +973,11 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
           int bonus = (r_rank >= 6) ? 450 : (r_rank == 5 ? 200 : 70);
           const int ahead_sq = sq + (side_c == Colors::White ? 8 : -8);
           if (is_valid_square(ahead_sq) && position.board[ahead_sq] != Pieces::Blank) {
-            bonus /= 2;
+            if (get_color(position.board[ahead_sq]) == (side_c ^ 1)) {
+              bonus = (r_rank >= 6) ? 35 : 15;
+            } else {
+              bonus /= 3;
+            }
           }
           if (side_c == color) positional_bonus += bonus;
           else positional_bonus -= bonus;
@@ -1852,7 +1856,8 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
       int max_child_depth = std::max(0, depth - 1 + extension);
       return std::clamp(child_depth, 0, max_child_depth);
     };
-    if (!extension && root && thread_info.sacrifice_lookahead && !in_check &&
+    if (!extension && root && thread_info.sacrifice_lookahead && !endgame_node &&
+        total_material_here > EndgameMaterial && !in_check &&
         !SEE(position, move, 0) && !out_of_time(thread_info)) {
       const int compensation = analyze_sacrifice(moved_position, thread_info, 1, 0, color);
       const int required = std::max(60, 150 - thread_info.sacrifice_lookahead_aggressiveness);

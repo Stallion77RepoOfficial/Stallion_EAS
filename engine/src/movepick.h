@@ -168,6 +168,16 @@ inline Action next_move(MovePicker &picker, const Position &position,
           if (counter_move != MoveNone && move == counter_move) {
             picker.quiets.scores[i] += 8000;
           }
+
+          const int pt = get_piece_type(piece);
+          if (pt == PieceTypes::Pawn) {
+            const int rel_rank = (position.color == Colors::White) ? get_rank(to) : (7 - get_rank(to));
+            if (rel_rank >= 6) {
+              picker.quiets.scores[i] += 14000;
+            } else if (rel_rank == 5) {
+              picker.quiets.scores[i] += 7000;
+            }
+          }
         }
       }
       picker.stage++;

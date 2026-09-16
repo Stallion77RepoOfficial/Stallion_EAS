@@ -936,6 +936,40 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
     positional_bonus -= undeveloped_count * UndevelopedPenalty;
   }
 
+  for (int c = 0; c < 2; ++c) {
+    const int side_c = c;
+    const int opp_c = c ^ 1;
+    uint64_t my_p = position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[side_c];
+    const uint64_t opp_p = position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[opp_c];
+    while (my_p) {
+      const int sq = pop_lsb(my_p);
+      const int file = get_file(sq);
+      const int rank = get_rank(sq);
+      const int r_rank = (side_c == Colors::White) ? rank : (7 - rank);
+      if (r_rank >= 5) {
+        bool is_passed = true;
+        for (int f = std::max(0, file - 1); f <= std::min(7, file + 1); ++f) {
+          uint64_t ahead_mask = 0;
+          if (side_c == Colors::White) {
+            for (int r = rank + 1; r <= 7; ++r) ahead_mask |= (1ULL << (f + r * 8));
+          } else {
+            for (int r = rank - 1; r >= 0; --r) ahead_mask |= (1ULL << (f + r * 8));
+          }
+          if (opp_p & ahead_mask) { is_passed = false; break; }
+        }
+        if (is_passed) {
+          int bonus = (r_rank >= 6) ? 120 : 50;
+          const int ahead_sq = sq + (side_c == Colors::White ? 8 : -8);
+          if (is_valid_square(ahead_sq) && position.board[ahead_sq] != Pieces::Blank) {
+            bonus /= 2;
+          }
+          if (side_c == color) positional_bonus += bonus;
+          else positional_bonus -= bonus;
+        }
+      }
+    }
+  }
+
   bonus3 = center_control;
   bonus4 = mobility_bonus;
   bonus5 = positional_bonus;
@@ -1647,19 +1681,26 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
 
     uint64_t curr_nodes = thread_info.nodes.load();
 
+    const int from_sq = extract_from(move);
+    const int to_sq = extract_to(move);
+    const int moving_piece = is_valid_square(from_sq) ? position.board[from_sq] : Pieces::Blank;
+    const bool is_pawn = (get_piece_type(moving_piece) == PieceTypes::Pawn);
+    const int rel_rank = is_pawn ? ((position.color == Colors::White) ? get_rank(to_sq) : (7 - get_rank(to_sq))) : 0;
+    const bool is_advanced_pawn = is_pawn && (rel_rank >= 5);
+
     int hist_score =
-        thread_info.HistoryScores[position.board[extract_from(move)]]
-                                 [extract_to(move)];
+        thread_info.HistoryScores[moving_piece]
+                                 [to_sq];
 
     is_capture = is_cap(position, move);
     if (!is_capture && !is_pv && best_score > -MateScore) {
 
-      if (!endgame_node && !in_check && depth < LMPDepth &&
+      if (!is_advanced_pawn && !endgame_node && !in_check && depth < LMPDepth &&
           moves_played >= LMPBase + depth * depth / (2 - improving)) {
         skip = true;
       }
 
-      if (!endgame_node && !in_check && depth < FPDepth &&
+      if (!is_advanced_pawn && !endgame_node && !in_check && depth < FPDepth &&
           picker.stage > Stages::Captures) {
         int fp_margin = FPMargin1 + FPMargin2 * depth;
         if (thread_info.attack_mode)
@@ -1669,13 +1710,13 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
         }
       }
 
-      if (!endgame_node && !in_check && !is_pv && !is_capture && depth < HistPruneDepth &&
+      if (!is_advanced_pawn && !endgame_node && !in_check && !is_pv && !is_capture && depth < HistPruneDepth &&
           hist_score < -HistPruneThreshold * depth) {
         skip = true;
       }
     }
 
-    if (!root && !in_check && best_score > -MateThreshold && depth < SeePruningDepth &&
+    if (!root && !in_check && !is_advanced_pawn && best_score > -MateThreshold && depth < SeePruningDepth &&
         (!endgame_node || is_capture)) {
 
       int margin =
@@ -1722,19 +1763,8 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
       }
     }
 
-    if (extension == 0 && !is_capture && endgame_node && depth >= 2) {
-      int from_sq = extract_from(move);
-      int to_sq = extract_to(move);
-      int moving_piece = position.board[from_sq];
-      if (is_valid_square(to_sq) &&
-          get_piece_type(moving_piece) == PieceTypes::Pawn) {
-        int rel_rank =
-            (position.color == Colors::White) ? get_rank(to_sq)
-                                              : (7 - get_rank(to_sq));
-        if (rel_rank >= 5) {
-          extension = 1;
-        }
-      }
+    if (extension == 0 && !is_capture && is_advanced_pawn && depth >= 2) {
+      extension = (rel_rank >= 6) ? 2 : 1;
     }
 
     BoardState moved_position = position;
@@ -1793,6 +1823,10 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
 
       if (gives_check && depth >= 6)
         R -= 1;
+
+      if (is_advanced_pawn && R > 0) {
+        R = (rel_rank >= 6) ? 0 : std::max(0, R - 2);
+      }
 
       if (thread_info.attack_mode && R > 0) {
         R = std::max(0, R - 2);

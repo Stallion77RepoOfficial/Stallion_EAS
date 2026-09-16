@@ -636,6 +636,164 @@ def extract_sbin_base(args: argparse.Namespace, source: Path, output: Path,
             "duplicate_rows": duplicates, "next_offset": next_offset}
 
 
+def mine_hard_dataset(args: argparse.Namespace) -> Path:
+    """Evaluate positions with a champion NNUE model on GPU and extract the hardest examples."""
+    torch = dependency("torch")
+    np = dependency("numpy")
+    sbin = dependency("training.sbin_tool" if __package__ else "sbin_tool")
+    import ctypes
+
+    source = None
+    if getattr(args, "source", None):
+        source = resolve_path(args.source)
+    elif getattr(args, "zst", None) and Path(args.zst).is_file():
+        source = resolve_path(args.zst)
+    elif (ROOT / "data" / "evals.sbin").is_file():
+        source = ROOT / "data" / "evals.sbin"
+    else:
+        source = resolve_path(getattr(args, "zst", None) or DEFAULT_EVAL)
+    source = require_file(source, "Eval SBIN kaynağı")
+    model_path = resolve_path(getattr(args, "model", None), NETS / "base.nnue")
+    model_path = require_network(model_path, "Madencilik Modeli")
+    output = resolve_path(args.output, ROOT / "data" / "base_hard.sbin")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    target = int(args.target or 5_000_000)
+    pool_size = int(getattr(args, "pool_size", 0) or max(target * 3, 15_000_000))
+    device_name = getattr(args, "device", "auto")
+    device = _torch_device(torch, device_name)
+
+    print(f"\n=== Zor Örnek Madenciliği (Hard Example Mining) Başlatılıyor ===", flush=True)
+    print(f"Referans Model: {model_path} ({file_sha256(model_path)[:16]})", flush=True)
+    print(f"Kaynak Veri: {source} ({source.stat().st_size // (1024*1024):,} MB)", flush=True)
+    print(f"Tarama Havuzu: {pool_size:,} pozisyon", flush=True)
+    print(f"Hedeflenen Zor Pozisyon: {target:,}", flush=True)
+    print(f"İşlem Cihazı: {device}\n", flush=True)
+
+    model = _make_nnue_model().to(device)
+    load_nnue(model, model_path)
+    model.eval()
+
+    offset_file = resolve_path(args.offset_file)
+    skip = 0
+    if offset_file and offset_file.exists() and not getattr(args, "no_offset", False):
+        try:
+            state = json.loads(offset_file.read_text(encoding="utf-8"))
+            skip = int(state.get("hard_offset", state.get("base_offset", 0)) or 0)
+        except Exception:
+            skip = 0
+
+    chunk_size = 65536
+    all_errors = np.empty(pool_size, dtype=np.float32)
+    start_indices = np.empty(pool_size, dtype=np.int64)
+
+    started = time.perf_counter()
+    scanned = 0
+    features_buf = np.empty((chunk_size, 2, 32), dtype=np.int16)
+    targets_buf = np.empty(chunk_size, dtype=np.float32)
+    indices_buf = np.empty(chunk_size, dtype=np.uint32)
+    f_ptr = features_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_int16))
+    t_ptr = targets_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    i_ptr = indices_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_uint32))
+
+    with sbin.SbinDataset(source) as ds:
+        total_in_ds = ds.count
+        if skip >= total_in_ds:
+            skip = 0
+        cur = skip
+        while scanned < pool_size:
+            count = min(chunk_size, pool_size - scanned)
+            if cur + count > total_in_ds:
+                cur = 0
+            count = min(count, total_in_ds - cur)
+
+            pos_ptr = ctypes.byref(ds._array[cur])
+            try:
+                decoded = ds.lib.sbin_batch_decode_indexed(pos_ptr, count, f_ptr, t_ptr, i_ptr)
+            finally:
+                del pos_ptr
+
+            if decoded == 0:
+                cur += count
+                continue
+
+            tensor = torch.as_tensor(features_buf[:decoded], device=device, dtype=torch.int64)
+            mask = (tensor >= 0).to(dtype=torch.float32)
+            tensor = tensor.clamp_min(0)
+            labels = torch.as_tensor(targets_buf[:decoded], device=device)
+
+            with torch.no_grad():
+                logits = model(tensor[:, 0], tensor[:, 1], mask[:, 0], mask[:, 1])
+                preds = torch.sigmoid(logits)
+                errors = torch.abs(preds - labels)
+                err_np = errors.cpu().numpy()
+
+            take = min(decoded, pool_size - scanned)
+            all_errors[scanned:scanned + take] = err_np[:take]
+            start_indices[scanned:scanned + take] = cur + indices_buf[:take].astype(np.int64)
+
+            scanned += take
+            cur += count
+
+            if scanned % (chunk_size * 16) == 0 or scanned >= pool_size:
+                elapsed = time.perf_counter() - started
+                rate = scanned / elapsed if elapsed > 0 else 0
+                mean_err = float(np.mean(all_errors[:scanned]))
+                print(f"Tarandı: {scanned:,}/{pool_size:,} ({rate:,.0f} pos/s) - Ortalama Hata: {mean_err:.4f}", flush=True)
+
+        if offset_file and not getattr(args, "no_offset", False):
+            try:
+                state = json.loads(offset_file.read_text(encoding="utf-8")) if offset_file.exists() else {}
+                state["hard_offset"] = cur
+                atomic_json(offset_file, state)
+            except Exception:
+                pass
+
+        total_elapsed = time.perf_counter() - started
+        print(f"\n--- Tarama Tamamlandı ({total_elapsed:.1f} sn, {scanned / max(0.001, total_elapsed):,.0f} pos/s). En Zor {target:,} Pozisyon Seçiliyor... ---", flush=True)
+        if target >= pool_size:
+            selected_local = np.arange(pool_size)
+        else:
+            top_k_local = np.argpartition(all_errors, -target)[-target:]
+            selected_local = top_k_local
+
+        mined_indices = start_indices[selected_local]
+        mined_errors = all_errors[selected_local]
+        mined_indices.sort()
+
+        mean_pool_error = float(np.mean(all_errors))
+        mean_hard_error = float(np.mean(mined_errors))
+        min_hard_error = float(np.min(mined_errors))
+        max_hard_error = float(np.max(mined_errors))
+
+        print(f"Genel Havuz Ortalama Hata: {mean_pool_error:.4f}", flush=True)
+        print(f"Seçilen Zor Pozisyonlar Ortalama Hata: {mean_hard_error:.4f} (Min: {min_hard_error:.4f}, Max: {max_hard_error:.4f})", flush=True)
+        print(f"Zorluk Artış Katsayısı: {mean_hard_error / max(1e-5, mean_pool_error):.2f}x daha zor!", flush=True)
+
+        print(f"Zor pozisyonlar diske yazılıyor: {output}...", flush=True)
+        temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("wb") as stream:
+                for begin in range(0, len(mined_indices), 65536):
+                    data = b"".join(ds._mmap[idx * 32:(idx + 1) * 32] for idx in mined_indices[begin:begin + 65536])
+                    stream.write(sbin.calibrate_eval_records(data))
+            temporary.replace(output)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+        atomic_json(output.with_suffix(".extract.json"), {
+            "source": str(source), "output": str(output), "model": str(model_path),
+            "model_sha256": file_sha256(model_path),
+            "pool_size": pool_size, "target": target, "rows": len(mined_indices),
+            "mean_pool_error": mean_pool_error, "mean_hard_error": mean_hard_error,
+            "min_hard_error": min_hard_error, "max_hard_error": max_hard_error,
+            "difficulty_multiplier": mean_hard_error / max(1e-5, mean_pool_error),
+            "created_at": datetime.now().isoformat(),
+        })
+
+    print(f"[BAŞARILI] {len(mined_indices):,} zor pozisyon {output} dosyasına kaydedildi ({output.stat().st_size:,} byte).\n", flush=True)
+    return output
+
+
 def extract_dataset(args: argparse.Namespace, phase: str | None = None,
                     output: Path | None = None) -> Path:
     zstd = dependency("zstandard")
@@ -1491,7 +1649,8 @@ def _torch_device(torch: Any, requested: str) -> Any:
 
 def train_nnue(dataset: Path, output: Path, *, epochs: int, batch_size: int,
                lr: float, resume: Path | None, device_name: str, seed: int,
-               patience: int, validation: float, swa: bool = True) -> Path:
+               patience: int, validation: float, swa: bool = True,
+               feature_dropout: float = 0.0) -> Path:
     """Train and export one base or aggressive engine-compatible network."""
     torch = dependency("torch")
     np = dependency("numpy")
@@ -1572,38 +1731,91 @@ def train_nnue(dataset: Path, output: Path, *, epochs: int, batch_size: int,
         restored_best.load_state_dict(best_model)
         export_nnue(restored_best, output)
 
-    def batches(ids: Any) -> Iterator[tuple[Any, Any, Any, Any, Any]]:
-        for begin in range(0, len(ids), batch_size):
-            selected = ids[begin:begin + batch_size]
-            packed = np.asarray(features[selected], dtype=np.int64)
-            tensor = torch.as_tensor(packed, device=device)
-            mask = (tensor >= 0).to(dtype=torch.float32)
-            tensor = tensor.clamp_min(0)
-            labels = torch.as_tensor(
-                np.asarray(targets[selected], dtype=np.float32), device=device
-            )
-            yield tensor[:, 0], tensor[:, 1], mask[:, 0], mask[:, 1], labels
+    def chunked_batches(ids: Any, shuffle_chunks: bool = True, epoch_seed: int = 42) -> Iterator[tuple[Any, Any, Any, Any, Any]]:
+        n = len(ids)
+        if n == 0:
+            return
+        chunk_size = 262144
+        num_chunks = (n + chunk_size - 1) // chunk_size
+        rng = np.random.default_rng(epoch_seed)
+        chunk_order = rng.permutation(num_chunks) if shuffle_chunks else np.arange(num_chunks)
+
+        for c_idx in chunk_order:
+            c_start = int(c_idx * chunk_size)
+            c_end = min(c_start + chunk_size, n)
+            chunk_ids = ids[c_start:c_end]
+            if len(chunk_ids) == 0:
+                continue
+
+            w_start = int(chunk_ids[0])
+            w_end = int(chunk_ids[-1]) + 1
+            w_feat = np.array(features[w_start:w_end])
+            w_targ = np.array(targets[w_start:w_end])
+
+            local_idx = chunk_ids - w_start
+            c_feat = w_feat[local_idx]
+            c_targ = w_targ[local_idx]
+
+            perm = rng.permutation(len(chunk_ids)) if shuffle_chunks else np.arange(len(chunk_ids))
+            c_feat = c_feat[perm]
+            c_targ = c_targ[perm]
+
+            for b in range(0, len(perm), batch_size):
+                b_feat = c_feat[b:b + batch_size]
+                b_targ = c_targ[b:b + batch_size]
+                tensor = torch.as_tensor(b_feat.astype(np.int64), device=device)
+                mask = (tensor >= 0).to(dtype=torch.float32)
+                tensor = tensor.clamp_min(0)
+                labels = torch.as_tensor(b_targ, device=device)
+                yield tensor[:, 0], tensor[:, 1], mask[:, 0], mask[:, 1], labels
 
     history: list[dict[str, Any]] = []
     if resume and resume.suffix.lower() != ".nnue":
         history = list(saved.get("history", []))
     for epoch in range(start_epoch, epochs):
         started = time.perf_counter()
-        epoch_ids = np.random.default_rng(seed + epoch).permutation(training_ids)
         model.train()
         train_sum = 0.0
-        for us, them, us_mask, them_mask, labels in batches(epoch_ids):
+        train_processed = 0
+        last_log_time = started
+        last_log_pos = 0
+        total_train = len(training_ids)
+
+        for us, them, us_mask, them_mask, labels in chunked_batches(training_ids, shuffle_chunks=True, epoch_seed=seed + epoch):
             optimizer.zero_grad(set_to_none=True)
+            if feature_dropout > 0.0:
+                us_mask = us_mask * (torch.rand_like(us_mask) > feature_dropout).float()
+                them_mask = them_mask * (torch.rand_like(them_mask) > feature_dropout).float()
             loss = functional.binary_cross_entropy_with_logits(
                 model(us, them, us_mask, them_mask), labels
             )
             loss.backward()
             optimizer.step()
-            train_sum += float(loss.detach().item()) * len(labels)
+            batch_len = len(labels)
+            train_sum += float(loss.detach().item()) * batch_len
+            train_processed += batch_len
+
+            if train_processed - last_log_pos >= 5_000_000:
+                now = time.perf_counter()
+                seg_speed = (train_processed - last_log_pos) / max(0.001, now - last_log_time)
+                overall_speed = train_processed / max(0.001, now - started)
+                current_loss = train_sum / train_processed
+                remaining_pos = total_train - train_processed
+                eta_min = (remaining_pos / overall_speed) / 60.0
+                pct = (train_processed / total_train) * 100
+                print(
+                    f"  [Epoch {epoch + 1}/{epochs}] {train_processed:,}/{total_train:,} "
+                    f"({pct:.1f}%) loss={current_loss:.6f} "
+                    f"{seg_speed:,.0f} pos/s (ETA: {eta_min:.1f} dk)",
+                    flush=True,
+                )
+                last_log_pos = train_processed
+                last_log_time = now
+
         model.eval()
         validation_sum = 0.0
         with torch.no_grad():
-            for us, them, us_mask, them_mask, labels in batches(validation_ids):
+            for us, them, us_mask, them_mask, labels in chunked_batches(validation_ids, shuffle_chunks=False, epoch_seed=seed):
                 validation_sum += float(functional.binary_cross_entropy_with_logits(
                     model(us, them, us_mask, them_mask), labels, reduction="sum"
                 ).item())
@@ -1676,7 +1888,7 @@ def train_nnue(dataset: Path, output: Path, *, epochs: int, batch_size: int,
         swa_model.eval()
         swa_val_sum = 0.0
         with torch.no_grad():
-            for us, them, us_mask, them_mask, labels in batches(validation_ids):
+            for us, them, us_mask, them_mask, labels in chunked_batches(validation_ids, shuffle_chunks=False, epoch_seed=seed):
                 swa_val_sum += float(functional.binary_cross_entropy_with_logits(
                     swa_model(us, them, us_mask, them_mask), labels, reduction="sum"
                 ).item())
@@ -2497,7 +2709,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "command", nargs="?", default="pipeline",
-        choices=["pipeline", "extract", "prepare", "datagen", "train", "match", "eas", "sacrifices"],
+        choices=["pipeline", "extract", "prepare", "datagen", "train", "match", "eas", "sacrifices", "mine"],
     )
     parser.add_argument("--phase", "--mode", "--net-type", dest="phase",
                         choices=["all", "base", "aggressive"], default="all")
@@ -2551,6 +2763,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Son epoch'larda Stokastik Ağırlık Ortalaması (SWA) modeli üret (varsayılan: True)")
     parser.add_argument("--no-swa", dest="swa", action="store_false",
                         help="SWA model üretimini devre dışı bırak")
+    parser.add_argument("--feature-dropout", type=float, default=0.0,
+                        help="Eğitim sırasında rastgele özellik maskeleme oranı (varsayılan: 0.0)")
+    parser.add_argument("--model", default=None,
+                        help="Madencilik (mine) için referans şampiyon NNUE modeli")
+    parser.add_argument("--pool-size", type=int, default=15_000_000,
+                        help="Madencilikte taranacak pozisyon havuzu boyutu (varsayılan: 15,000,000)")
 
     parser.add_argument("--engine", default=None)
     parser.add_argument("--assets", default=str(DEFAULT_ASSETS),
@@ -2658,6 +2876,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "datagen":
             run_datagen(args)
             return 0
+        if args.command == "mine":
+            mine_hard_dataset(args)
+            return 0
         if args.command == "train":
             if args.dataset is None:
                 raise ValueError("train için --dataset gerekli.")
@@ -2666,6 +2887,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 batch_size=args.batch_size, lr=args.lr, resume=args.resume,
                 device_name=args.device, seed=args.seed, patience=args.patience,
                 validation=args.validation, swa=getattr(args, "swa", True),
+                feature_dropout=getattr(args, "feature_dropout", 0.0),
             )
             return 0
         if args.command == "match":

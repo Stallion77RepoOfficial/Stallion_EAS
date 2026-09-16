@@ -37,6 +37,14 @@ size_t sbin_batch_decode(
     float* out_targets
 );
 
+size_t sbin_batch_decode_indexed(
+    const PackedPosition* in_positions,
+    size_t count,
+    int16_t* out_features,
+    float* out_targets,
+    uint32_t* out_indices
+);
+
 enum SbinValidationStatus {
     SBIN_MISSING_FULLMOVE = 1,
     SBIN_NONZERO_PADDING = 2,

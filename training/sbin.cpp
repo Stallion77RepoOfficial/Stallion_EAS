@@ -333,11 +333,12 @@ size_t sbin_validate_batch(const PackedPosition* positions, size_t count, uint8_
     return valid;
 }
 
-size_t sbin_batch_decode(
+size_t sbin_batch_decode_indexed(
     const PackedPosition* in_positions,
     size_t count,
     int16_t* out_features,
-    float* out_targets
+    float* out_targets,
+    uint32_t* out_indices
 ) {
     if (!in_positions || !out_features || !out_targets) return 0;
 
@@ -353,9 +354,19 @@ size_t sbin_batch_decode(
 
         float wdl_val = static_cast<float>(pos.wdl) / 65535.0f;
         out_targets[decoded] = white_turn ? wdl_val : (1.0f - wdl_val);
+        if (out_indices) out_indices[decoded] = static_cast<uint32_t>(i);
         decoded++;
     }
     return decoded;
+}
+
+size_t sbin_batch_decode(
+    const PackedPosition* in_positions,
+    size_t count,
+    int16_t* out_features,
+    float* out_targets
+) {
+    return sbin_batch_decode_indexed(in_positions, count, out_features, out_targets, nullptr);
 }
 
 int sbin_classify_phase(const PackedPosition* pos) {

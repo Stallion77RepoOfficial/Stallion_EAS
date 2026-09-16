@@ -73,6 +73,9 @@ def load_native_lib():
     lib.sbin_batch_decode.argtypes = [POINTER(PackedPosition), c_size_t, POINTER(c_int16), POINTER(c_float)]
     lib.sbin_batch_decode.restype = c_size_t
 
+    lib.sbin_batch_decode_indexed.argtypes = [POINTER(PackedPosition), c_size_t, POINTER(c_int16), POINTER(c_float), POINTER(ctypes.c_uint32)]
+    lib.sbin_batch_decode_indexed.restype = c_size_t
+
     lib.sbin_validate_batch.argtypes = [POINTER(PackedPosition), c_size_t, POINTER(ctypes.c_uint8)]
     lib.sbin_validate_batch.restype = c_size_t
 

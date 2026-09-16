@@ -97,17 +97,13 @@ inline bool load_nnue_aggressive(const std::string &path = "nets/aggressive.nnue
   return false;
 }
 
-inline void select_active_nnue(int phase) noexcept {
+inline void select_active_nnue([[maybe_unused]] int phase) noexcept {
   if (!nnue_loaded) {
     g_nnue = nullptr;
     return;
   }
 
-  if (phase == PhaseTypes::Sacrifice && g_nnue_aggressive) {
-    g_nnue = g_nnue_aggressive.get();
-  } else {
-    g_nnue = g_nnue_base ? g_nnue_base.get() : g_nnue_aggressive.get();
-  }
+  g_nnue = g_nnue_base ? g_nnue_base.get() : g_nnue_aggressive.get();
 }
 
 constexpr inline std::pair<size_t, size_t> feature_indices(int piece, int sq) noexcept {

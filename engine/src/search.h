@@ -8,36 +8,36 @@
 #include "utils.h"
 #include <memory>
 
-inline Action uci_to_internal(const BoardState &position, std::string uci) {
-  std::array<Action, MaxActions> list;
-  int nmoves = legal_movegen(position, list.data());
+inline Action uci_to_internal(const BoardState &position, const std::string &uci) {
+  std::array<Action, MaxActions> list{};
+  const int nmoves = legal_movegen(position, list.data());
 
   for (int i = 0; i < nmoves; i++) {
     if (internal_to_uci(position, list[i]) == uci)
       return list[i];
   }
 
-  return 0;
+  return MoveNone;
 }
 
 extern bool tb_initialized;
 
 inline int64_t
-safe_elapsed(const std::chrono::steady_clock::time_point &start) {
-  auto ms = time_elapsed(start);
+safe_elapsed(const std::chrono::steady_clock::time_point &start) noexcept {
+  const auto ms = time_elapsed(start);
   return ms ? ms : 1;
 }
 
 inline int analyze_sacrifice(BoardState &position, ThreadInfo &thread_info, int depth,
                       int ply, int sacrificer_color);
 
-inline int probe_wdl_tb(BoardState &position, const ThreadInfo &thread_info) {
+inline int probe_wdl_tb(const BoardState &position, const ThreadInfo &thread_info) noexcept {
 
   if (!tb_initialized || !thread_info.use_syzygy)
     return ScoreNone;
 
-  int material_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
-  int compiled_limit = TB_LARGEST ? (int)TB_LARGEST : 7;
+  const int material_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
+  const int compiled_limit = TB_LARGEST ? static_cast<int>(TB_LARGEST) : 7;
   if (!TB_LARGEST || material_count > compiled_limit)
     return ScoreNone;
   if (material_count > thread_info.syzygy_probe_limit)
@@ -56,23 +56,23 @@ inline int probe_wdl_tb(BoardState &position, const ThreadInfo &thread_info) {
     return ScoreNone;
 
   if (thread_info.syzygy_50_move_rule && position.halfmoves != 0) return ScoreNone;
-  unsigned ep = position.ep_square != SquareNone ? position.ep_square : 0;
+  const unsigned ep = position.ep_square != SquareNone ? position.ep_square : 0;
 
-  unsigned result = tb_probe_wdl(position.colors_bb[0], position.colors_bb[1],
-                                 position.pieces_bb[PieceTypes::King],
-                                 position.pieces_bb[PieceTypes::Queen],
-                                 position.pieces_bb[PieceTypes::Rook],
-                                 position.pieces_bb[PieceTypes::Bishop],
-                                 position.pieces_bb[PieceTypes::Knight],
-                                 position.pieces_bb[PieceTypes::Pawn], 0,
-                                 castling, ep,
-                                 position.color == Colors::White);
+  const unsigned result = tb_probe_wdl(position.colors_bb[0], position.colors_bb[1],
+                                       position.pieces_bb[PieceTypes::King],
+                                       position.pieces_bb[PieceTypes::Queen],
+                                       position.pieces_bb[PieceTypes::Rook],
+                                       position.pieces_bb[PieceTypes::Bishop],
+                                       position.pieces_bb[PieceTypes::Knight],
+                                       position.pieces_bb[PieceTypes::Pawn], 0,
+                                       castling, ep,
+                                       position.color == Colors::White);
   if (result == TB_RESULT_FAILED) {
     thread_data.tb_fails++;
     return ScoreNone;
   }
   thread_data.tb_hits++;
-  int wdl = TB_GET_WDL(result);
+  const int wdl = TB_GET_WDL(result);
   switch (wdl) {
   case TB_WIN:
     return TB_WIN_SCORE;
@@ -89,18 +89,18 @@ inline int probe_wdl_tb(BoardState &position, const ThreadInfo &thread_info) {
   }
 }
 
-inline void update_history(int16_t &entry, int score) {
-  entry += score - entry * abs(score) / 16384;
+inline void update_history(int16_t &entry, int score) noexcept {
+  entry += score - entry * std::abs(score) / 16384;
 }
-inline void update_corrhist(int16_t &entry, int score) {
-  entry += score - entry * abs(score) / 1024;
+inline void update_corrhist(int16_t &entry, int score) noexcept {
+  entry += score - entry * std::abs(score) / 1024;
 }
 
 inline void update_continuation_histories(ThreadInfo &thread_info, int piece,
                                           int sq, int bonus, int their_last,
                                           int their_piece, int our_last,
                                           int our_piece, int ply4_last,
-                                          int ply4_piece) {
+                                          int ply4_piece) noexcept {
 
   update_history(thread_info.HistoryScores[piece][sq], bonus);
 
@@ -118,7 +118,7 @@ inline void update_continuation_histories(ThreadInfo &thread_info, int piece,
   }
 }
 
-inline bool out_of_time(ThreadInfo &thread_info) {
+inline bool out_of_time(ThreadInfo &thread_info) noexcept {
   if (thread_data.stop)
     return true;
 
@@ -137,20 +137,20 @@ inline bool out_of_time(ThreadInfo &thread_info) {
     thread_info.ponder_hit = true;
   }
 
-  uint64_t total_nodes = thread_info.nodes.load();
+  uint64_t total_nodes = thread_info.nodes.load(std::memory_order_relaxed);
   for (auto &ti : thread_data.thread_infos)
-    total_nodes += ti.nodes.load();
+    total_nodes += ti.nodes.load(std::memory_order_relaxed);
   if (!thread_data.pondering && total_nodes >= thread_info.max_nodes_searched) {
     thread_data.stop = true;
     return true;
   }
 
   thread_info.time_checks++;
-  const uint16_t check_interval = 256;
+  constexpr uint16_t check_interval = 256;
   if (thread_info.time_checks >= check_interval) {
     thread_info.time_checks = 0;
     if (!thread_info.infinite_search && !thread_data.pondering) {
-      uint64_t elapsed = time_elapsed(thread_info.start_time);
+      const uint64_t elapsed = time_elapsed(thread_info.start_time);
       bool in_trouble = false;
       if (thread_info.time_manager.should_stop(
               elapsed, thread_info.best_move_stable, in_trouble) ||
@@ -163,30 +163,30 @@ inline bool out_of_time(ThreadInfo &thread_info) {
   return false;
 }
 
-inline int16_t material_eval(const BoardState &position) {
+inline int16_t material_eval(const BoardState &position) noexcept {
   int m = 0;
 
   for (int pt = 1; pt <= 5; pt++) {
-    int count = position.material_count[(pt - 1) * 2];
+    const int count = position.material_count[(pt - 1) * 2];
     if (count > 0) {
       m += count * MaterialBasis[pt];
 
       for (int pt2 = 1; pt2 <= 5; pt2++) {
-        int total_count_pt2 = position.material_count[(pt2 - 1) * 2] +
-                              position.material_count[(pt2 - 1) * 2 + 1];
+        const int total_count_pt2 = position.material_count[(pt2 - 1) * 2] +
+                                    position.material_count[(pt2 - 1) * 2 + 1];
         m += count * total_count_pt2 * QuadraticImbalance[pt][pt2];
       }
     }
   }
 
   for (int pt = 1; pt <= 5; pt++) {
-    int count = position.material_count[(pt - 1) * 2 + 1];
+    const int count = position.material_count[(pt - 1) * 2 + 1];
     if (count > 0) {
       m -= count * MaterialBasis[pt];
 
       for (int pt2 = 1; pt2 <= 5; pt2++) {
-        int total_count_pt2 = position.material_count[(pt2 - 1) * 2] +
-                              position.material_count[(pt2 - 1) * 2 + 1];
+        const int total_count_pt2 = position.material_count[(pt2 - 1) * 2] +
+                                    position.material_count[(pt2 - 1) * 2 + 1];
         m -= count * total_count_pt2 * QuadraticImbalance[pt][pt2];
       }
     }
@@ -195,15 +195,15 @@ inline int16_t material_eval(const BoardState &position) {
   return position.color ? -m : m;
 }
 
-inline bool has_non_pawn_material(const BoardState &position, int color) {
-  int s_indx = 2 + color;
+inline bool has_non_pawn_material(const BoardState &position, int color) noexcept {
+  const int s_indx = 2 + color;
   return (position.material_count[s_indx] ||
           position.material_count[s_indx + 2] ||
           position.material_count[s_indx + 4] ||
           position.material_count[s_indx + 6]);
 }
 
-inline int non_pawn_piece_count(const BoardState &position) {
+inline int non_pawn_piece_count(const BoardState &position) noexcept {
   return pop_count(position.pieces_bb[PieceTypes::Knight] |
                    position.pieces_bb[PieceTypes::Bishop] |
                    position.pieces_bb[PieceTypes::Rook] |
@@ -211,27 +211,27 @@ inline int non_pawn_piece_count(const BoardState &position) {
 }
 
 inline bool is_endgame_reduction_zone(const BoardState &position,
-                                const ThreadInfo &,
-                                int total_material = -1) {
+                                [[maybe_unused]] const ThreadInfo &thread_info,
+                                int total_material = -1) noexcept {
   if (total_material < 0) {
     total_material = total_mat(position);
   }
   return total_material <= EndgameMaterial;
 }
 
-inline bool is_zugzwang_prone(const BoardState &position, const ThreadInfo &,
-                       int total_material = -1) {
+inline bool is_zugzwang_prone(const BoardState &position, [[maybe_unused]] const ThreadInfo &thread_info,
+                       int total_material = -1) noexcept {
   if (total_material < 0) {
     total_material = total_mat(position);
   }
-  int non_pawn = non_pawn_piece_count(position);
-  int pawns = pop_count(position.pieces_bb[PieceTypes::Pawn]);
+  const int non_pawn = non_pawn_piece_count(position);
+  const int pawns = pop_count(position.pieces_bb[PieceTypes::Pawn]);
   return non_pawn == 0 ||
          (non_pawn <= 2 &&
           total_material <= (EndgameMaterial + 500) && pawns <= 6);
 }
 
-inline int16_t total_mat_color(const BoardState &position, int color) {
+inline int16_t total_mat_color(const BoardState &position, int color) noexcept {
 
   int m = 0;
   for (int i = 0; i < 5; i++) {
@@ -240,66 +240,65 @@ inline int16_t total_mat_color(const BoardState &position, int color) {
   return m;
 }
 
-inline int eval_pst(const BoardState &position, int color) {
+inline int eval_pst(const BoardState &position, int color) noexcept {
   int score = 0;
   constexpr const int16_t *pst[] = {PST::Pawn, PST::Knight, PST::Bishop,
                                     PST::Rook, PST::Queen};
   for (int pt = PieceTypes::Pawn; pt <= PieceTypes::Queen; pt++) {
     uint64_t pieces = position.pieces_bb[pt] & position.colors_bb[color];
     while (pieces) {
-      int sq = pop_lsb(pieces);
-
-      int idx = (color == Colors::White) ? PST::mirror_square(sq) : sq;
+      const int sq = pop_lsb(pieces);
+      const int idx = (color == Colors::White) ? PST::mirror_square(sq) : sq;
       score += pst[pt - 1][idx];
     }
   }
-  int king_sq = get_king_pos(position, color);
+  const int king_sq = get_king_pos(position, color);
   if (is_valid_square(king_sq)) {
-    int idx = (color == Colors::White) ? PST::mirror_square(king_sq) : king_sq;
+    const int idx = (color == Colors::White) ? PST::mirror_square(king_sq) : king_sq;
     score += (total_mat(position) < 1500) ? PST::KingEG[idx] : PST::KingMG[idx];
   }
   return score;
 }
 
-inline int eval_king_tropism(const BoardState &position, int color) {
-  int opp_king = get_king_pos(position, color ^ 1);
+inline int eval_king_tropism(const BoardState &position, int color) noexcept {
+  const int opp_king = get_king_pos(position, color ^ 1);
   if (!is_valid_square(opp_king))
     return 0;
-  int opp_k_rank = get_rank(opp_king);
-  int opp_k_file = get_file(opp_king);
+  const int opp_k_rank = get_rank(opp_king);
+  const int opp_k_file = get_file(opp_king);
   int score = 0;
-  const int pts[] = {PieceTypes::Queen, PieceTypes::Rook, PieceTypes::Knight,
-                     PieceTypes::Bishop};
+  constexpr int pts[] = {PieceTypes::Queen, PieceTypes::Rook, PieceTypes::Knight,
+                         PieceTypes::Bishop};
   const int weights[] = {TropismQueenWeight, TropismRookWeight,
-                        TropismKnightWeight, TropismBishopWeight};
+                         TropismKnightWeight, TropismBishopWeight};
   for (int i = 0; i < 4; i++) {
     uint64_t pieces = position.pieces_bb[pts[i]] & position.colors_bb[color];
     while (pieces) {
-      int sq = pop_lsb(pieces);
-      int dist = std::max(abs(get_rank(sq) - opp_k_rank),
-                          abs(get_file(sq) - opp_k_file));
+      const int sq = pop_lsb(pieces);
+      const int dist = std::max(std::abs(get_rank(sq) - opp_k_rank),
+                                std::abs(get_file(sq) - opp_k_file));
       score += (8 - dist) * weights[i];
     }
   }
   return score;
 }
 
-inline int eval_threats(const BoardState &position, int color) {
+inline int eval_threats(const BoardState &position, int color) noexcept {
   int score = 0;
-  int opp_color = color ^ 1;
-  uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
+  const int opp_color = color ^ 1;
+  const uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
 
-  uint64_t opp_pieces =
+  const uint64_t opp_pieces =
       position.colors_bb[opp_color] & ~position.pieces_bb[PieceTypes::Pawn];
   uint64_t my_pawn_attacks = 0;
   uint64_t my_pawns =
       position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color];
   while (my_pawns) {
-    int sq = pop_lsb(my_pawns);
+    const int sq = pop_lsb(my_pawns);
     my_pawn_attacks |= PAWN_ATK_SAFE(color, sq);
   }
 
-  uint64_t attacked_by_pawns = opp_pieces & my_pawn_attacks;
+  const uint64_t attacked_by_pawns = opp_pieces & my_pawn_attacks;
   score += pop_count(attacked_by_pawns) * ThreatPawnAttack;
 
   uint64_t my_minor_attacks = 0;
@@ -307,35 +306,34 @@ inline int eval_threats(const BoardState &position, int color) {
                      position.pieces_bb[PieceTypes::Bishop]) &
                     position.colors_bb[color];
   while (minors) {
-    int sq = pop_lsb(minors);
-    if (position.board[sq] ==
-        (color == Colors::White ? Pieces::WKnight : Pieces::BKnight)) {
+    const int sq = pop_lsb(minors);
+    if (get_piece_type(position.board[sq]) == PieceTypes::Knight) {
       my_minor_attacks |= KNIGHT_ATK_SAFE(sq);
     } else {
       my_minor_attacks |= get_bishop_attacks(sq, occ);
     }
   }
 
-  uint64_t opp_heavy = (position.pieces_bb[PieceTypes::Queen] |
-                        position.pieces_bb[PieceTypes::Rook]) &
-                       position.colors_bb[opp_color];
-  uint64_t attacked_heavy = opp_heavy & my_minor_attacks;
+  const uint64_t opp_heavy = (position.pieces_bb[PieceTypes::Queen] |
+                              position.pieces_bb[PieceTypes::Rook]) &
+                             position.colors_bb[opp_color];
+  const uint64_t attacked_heavy = opp_heavy & my_minor_attacks;
   score += pop_count(attacked_heavy) * ThreatMinorOnHeavy;
 
   uint64_t my_rook_attacks = 0;
   uint64_t my_rooks =
       position.pieces_bb[PieceTypes::Rook] & position.colors_bb[color];
   while (my_rooks) {
-    int sq = pop_lsb(my_rooks);
+    const int sq = pop_lsb(my_rooks);
     my_rook_attacks |= get_rook_attacks(sq, occ);
   }
-  uint64_t opp_queens =
+  const uint64_t opp_queens =
       position.pieces_bb[PieceTypes::Queen] & position.colors_bb[opp_color];
   score += pop_count(opp_queens & my_rook_attacks) * ThreatRookOnQueen;
 
-  uint64_t opp_minors = (position.pieces_bb[PieceTypes::Knight] |
-                         position.pieces_bb[PieceTypes::Bishop]) &
-                        position.colors_bb[opp_color];
+  const uint64_t opp_minors = (position.pieces_bb[PieceTypes::Knight] |
+                               position.pieces_bb[PieceTypes::Bishop]) &
+                              position.colors_bb[opp_color];
   score += pop_count(opp_minors & my_rook_attacks) * ThreatRookOnMinor;
 
   uint64_t attacked = opp_pieces & (my_pawn_attacks | my_minor_attacks | my_rook_attacks);
@@ -347,28 +345,28 @@ inline int eval_threats(const BoardState &position, int color) {
   return score;
 }
 
-inline int eval_sacrifice_patterns(const BoardState &position, int color) {
+inline int eval_sacrifice_patterns(const BoardState &position, int color) noexcept {
   int bonus = 0;
-  int opp_color = color ^ 1;
-  int my_q = pop_count(position.pieces_bb[PieceTypes::Queen] &
-                       position.colors_bb[color]);
-  int opp_q = pop_count(position.pieces_bb[PieceTypes::Queen] &
-                        position.colors_bb[opp_color]);
-  int my_r = pop_count(position.pieces_bb[PieceTypes::Rook] &
-                       position.colors_bb[color]);
-  int opp_r = pop_count(position.pieces_bb[PieceTypes::Rook] &
-                        position.colors_bb[opp_color]);
-  int my_l = pop_count((position.pieces_bb[PieceTypes::Knight] |
-                        position.pieces_bb[PieceTypes::Bishop]) &
-                       position.colors_bb[color]);
-  int opp_l = pop_count((position.pieces_bb[PieceTypes::Knight] |
-                         position.pieces_bb[PieceTypes::Bishop]) &
-                        position.colors_bb[opp_color]);
-  int my_p = pop_count(position.pieces_bb[PieceTypes::Pawn] &
-                       position.colors_bb[color]);
-  int opp_p = pop_count(position.pieces_bb[PieceTypes::Pawn] &
-                        position.colors_bb[opp_color]);
-  int p_diff = opp_p - my_p;
+  const int opp_color = color ^ 1;
+  const int my_q = pop_count(position.pieces_bb[PieceTypes::Queen] &
+                             position.colors_bb[color]);
+  const int opp_q = pop_count(position.pieces_bb[PieceTypes::Queen] &
+                              position.colors_bb[opp_color]);
+  const int my_r = pop_count(position.pieces_bb[PieceTypes::Rook] &
+                             position.colors_bb[color]);
+  const int opp_r = pop_count(position.pieces_bb[PieceTypes::Rook] &
+                              position.colors_bb[opp_color]);
+  const int my_l = pop_count((position.pieces_bb[PieceTypes::Knight] |
+                              position.pieces_bb[PieceTypes::Bishop]) &
+                             position.colors_bb[color]);
+  const int opp_l = pop_count((position.pieces_bb[PieceTypes::Knight] |
+                               position.pieces_bb[PieceTypes::Bishop]) &
+                              position.colors_bb[opp_color]);
+  const int my_p = pop_count(position.pieces_bb[PieceTypes::Pawn] &
+                             position.colors_bb[color]);
+  const int opp_p = pop_count(position.pieces_bb[PieceTypes::Pawn] &
+                              position.colors_bb[opp_color]);
+  const int p_diff = opp_p - my_p;
 
   if (my_q == 0 && opp_q >= 1 && my_p >= 3) {
     if (my_r == opp_r && my_l == opp_l)
@@ -401,51 +399,51 @@ inline int eval_sacrifice_patterns(const BoardState &position, int color) {
   return bonus;
 }
 
-inline int eval_king_safety(const BoardState &position, int color) {
+inline int eval_king_safety(const BoardState &position, int color) noexcept {
   int score = 0;
-  int king_sq = get_king_pos(position, color);
+  const int king_sq = get_king_pos(position, color);
 
   if (!is_valid_square(king_sq))
     return 0;
 
-  int king_file = get_file(king_sq);
-  int king_rank = get_rank(king_sq);
-  int opp_color = color ^ 1;
+  const int king_file = get_file(king_sq);
+  const int king_rank = get_rank(king_sq);
+  const int opp_color = color ^ 1;
 
   for (int f = std::max(0, king_file - 1); f <= std::min(7, king_file + 1);
        ++f) {
-    uint64_t file_bb = Files[f];
-    uint64_t my_pawns = position.pieces_bb[PieceTypes::Pawn] &
-                        position.colors_bb[color] & file_bb;
+    const uint64_t file_bb = Files[f];
+    const uint64_t my_pawns = position.pieces_bb[PieceTypes::Pawn] &
+                              position.colors_bb[color] & file_bb;
 
     if (my_pawns) {
       score += KSPawnShield;
-      int pawn_sq =
+      const int pawn_sq =
           (color == Colors::White) ? get_msb(my_pawns) : get_lsb(my_pawns);
-      int pawn_rank = get_rank(pawn_sq);
-      int dist = abs(pawn_rank - king_rank);
+      const int pawn_rank = get_rank(pawn_sq);
+      const int dist = std::abs(pawn_rank - king_rank);
       if (dist == 1)
         score += KSPawnClose;
       else if (dist == 2)
         score += KSPawnMed;
     } else {
       score += KSNoPawn;
-      uint64_t opp_pawns = position.pieces_bb[PieceTypes::Pawn] &
-                           position.colors_bb[opp_color] & file_bb;
+      const uint64_t opp_pawns = position.pieces_bb[PieceTypes::Pawn] &
+                                 position.colors_bb[opp_color] & file_bb;
       if (!opp_pawns) {
         score += KSOpenFile;
       }
     }
 
-    uint64_t opp_pawns_on_file = position.pieces_bb[PieceTypes::Pawn] &
-                                 position.colors_bb[opp_color] & file_bb;
+    const uint64_t opp_pawns_on_file = position.pieces_bb[PieceTypes::Pawn] &
+                                       position.colors_bb[opp_color] & file_bb;
     if (opp_pawns_on_file) {
-      int opp_pawn_sq = (color == Colors::White) ? get_lsb(opp_pawns_on_file)
-                                                 : get_msb(opp_pawns_on_file);
-      int opp_pawn_rank = get_rank(opp_pawn_sq);
-      int dist_to_king = abs(opp_pawn_rank - king_rank);
+      const int opp_pawn_sq = (color == Colors::White) ? get_lsb(opp_pawns_on_file)
+                                                       : get_msb(opp_pawns_on_file);
+      const int opp_pawn_rank = get_rank(opp_pawn_sq);
+      const int dist_to_king = std::abs(opp_pawn_rank - king_rank);
 
-      int storm_idx = std::clamp(dist_to_king - 1, 0, 3);
+      const int storm_idx = std::clamp(dist_to_king - 1, 0, 3);
       score -= PawnStormConfig[storm_idx];
     }
   }
@@ -465,7 +463,7 @@ inline int eval_king_safety(const BoardState &position, int color) {
   int safe_squares = 0;
   uint64_t king_attacks = KING_ATK_SAFE(king_sq);
   while (king_attacks) {
-    int sq = pop_lsb(king_attacks);
+    const int sq = pop_lsb(king_attacks);
     if (!attacks_square(position, sq, opp_color)) {
       safe_squares++;
     }
@@ -475,9 +473,9 @@ inline int eval_king_safety(const BoardState &position, int color) {
   else if (safe_squares < 4)
     score += KSSafeSqMed;
 
-  bool can_castle_ks =
+  const bool can_castle_ks =
       position.castling_squares[color][Sides::Kingside] != SquareNone;
-  bool can_castle_qs =
+  const bool can_castle_qs =
       position.castling_squares[color][Sides::Queenside] != SquareNone;
 
   if (can_castle_ks || can_castle_qs)
@@ -491,13 +489,13 @@ inline int eval_king_safety(const BoardState &position, int color) {
     }
   }
 
-  int king_start_sq = (color == Colors::White) ? 4 : 60;
+  const int king_start_sq = (color == Colors::White) ? 4 : 60;
   if (king_sq != king_start_sq && (can_castle_ks || can_castle_qs)) {
     score += KSMovedKingCastle;
   }
 
   if (king_sq != king_start_sq) {
-    bool is_castled = (king_file == 1 || king_file == 2 || king_file == 6);
+    const bool is_castled = (king_file == 1 || king_file == 2 || king_file == 6);
     if (!is_castled && total_mat(position) > PhaseMaterial::LateMiddle) {
       score += KSUncastledKing;
     }
@@ -518,13 +516,13 @@ inline int eval_king_safety(const BoardState &position, int color) {
 
   int attack_units = 0;
   int attacker_count = 0;
-  uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
+  const uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
 
   uint64_t opp_p =
       position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[opp_color];
   while (opp_p) {
-    int sq = pop_lsb(opp_p);
-    uint64_t atk = PAWN_ATK_SAFE(opp_color, sq);
+    const int sq = pop_lsb(opp_p);
+    const uint64_t atk = PAWN_ATK_SAFE(opp_color, sq);
     if (atk & king_zone) {
       attack_units += AttackWeight[PieceTypes::Pawn];
       attacker_count++;
@@ -534,7 +532,7 @@ inline int eval_king_safety(const BoardState &position, int color) {
   uint64_t opp_knights =
       position.pieces_bb[PieceTypes::Knight] & position.colors_bb[opp_color];
   while (opp_knights) {
-    int sq = pop_lsb(opp_knights);
+    const int sq = pop_lsb(opp_knights);
     if (KNIGHT_ATK_SAFE(sq) & king_zone) {
       attack_units += AttackWeight[PieceTypes::Knight];
       attacker_count++;
@@ -544,12 +542,12 @@ inline int eval_king_safety(const BoardState &position, int color) {
   uint64_t opp_bishops =
       position.pieces_bb[PieceTypes::Bishop] & position.colors_bb[opp_color];
   while (opp_bishops) {
-    int sq = pop_lsb(opp_bishops);
-    uint64_t batk = get_bishop_attacks(sq, occ);
+    const int sq = pop_lsb(opp_bishops);
+    const uint64_t batk = get_bishop_attacks(sq, occ);
     if (batk & king_zone) {
       attack_units += AttackWeight[PieceTypes::Bishop];
       attacker_count++;
-      uint64_t xray =
+      const uint64_t xray =
           get_bishop_attacks(sq, occ ^ (batk & position.colors_bb[color]));
       if (xray & king_zone & ~batk)
         attack_units += KZBishopXray;
@@ -559,12 +557,12 @@ inline int eval_king_safety(const BoardState &position, int color) {
   uint64_t opp_rooks =
       position.pieces_bb[PieceTypes::Rook] & position.colors_bb[opp_color];
   while (opp_rooks) {
-    int sq = pop_lsb(opp_rooks);
-    uint64_t ratk = get_rook_attacks(sq, occ);
+    const int sq = pop_lsb(opp_rooks);
+    const uint64_t ratk = get_rook_attacks(sq, occ);
     if (ratk & king_zone) {
       attack_units += AttackWeight[PieceTypes::Rook];
       attacker_count++;
-      uint64_t xray =
+      const uint64_t xray =
           get_rook_attacks(sq, occ ^ (ratk & position.colors_bb[color]));
       if (xray & king_zone & ~ratk)
         attack_units += KZRookXray;
@@ -574,7 +572,7 @@ inline int eval_king_safety(const BoardState &position, int color) {
   uint64_t opp_queens =
       position.pieces_bb[PieceTypes::Queen] & position.colors_bb[opp_color];
   while (opp_queens) {
-    int sq = pop_lsb(opp_queens);
+    const int sq = pop_lsb(opp_queens);
     if ((get_rook_attacks(sq, occ) | get_bishop_attacks(sq, occ)) & king_zone) {
       attack_units += AttackWeight[PieceTypes::Queen];
       attacker_count++;
@@ -582,7 +580,7 @@ inline int eval_king_safety(const BoardState &position, int color) {
   }
 
   if (attacker_count >= 2) {
-    int danger = attack_units * attacker_count;
+    const int danger = attack_units * attacker_count;
     score -= danger * KZDangerMultiplier;
 
     if (attacker_count >= 3)
@@ -591,33 +589,33 @@ inline int eval_king_safety(const BoardState &position, int color) {
     score -= attack_units * KZSingleAttackerPenalty;
   }
 
-  int opp_queen_count = pop_count(position.pieces_bb[PieceTypes::Queen] &
-                                  position.colors_bb[opp_color]);
+  const int opp_queen_count = pop_count(position.pieces_bb[PieceTypes::Queen] &
+                                        position.colors_bb[opp_color]);
   if (opp_queen_count == 0 && attacker_count >= 2)
     score += KZNoQueenBonus;
 
   return score;
 }
 
-inline int eval_endgame(const BoardState &position, int color) {
+inline int eval_endgame(const BoardState &position, int color) noexcept {
   int score = 0;
-  int opp_color = color ^ 1;
-  int total_mat_val = total_mat(position);
+  const int opp_color = color ^ 1;
+  const int total_mat_val = total_mat(position);
 
   if (total_mat_val < EGMaterialThreshold &&
       total_mat_color(position, color) >
           total_mat_color(position, opp_color) + EGMaterialAdvantage) {
-    int opp_king = get_king_pos(position, opp_color);
-    int my_king = get_king_pos(position, color);
+    const int opp_king = get_king_pos(position, opp_color);
+    const int my_king = get_king_pos(position, color);
 
     if (is_valid_square(opp_king) && is_valid_square(my_king)) {
-      int opp_k_rank = get_rank(opp_king);
-      int opp_k_file = get_file(opp_king);
-      int center_dist = std::max(3 - opp_k_rank, opp_k_rank - 4) +
-                        std::max(3 - opp_k_file, opp_k_file - 4);
+      const int opp_k_rank = get_rank(opp_king);
+      const int opp_k_file = get_file(opp_king);
+      const int center_dist = std::max(3 - opp_k_rank, opp_k_rank - 4) +
+                              std::max(3 - opp_k_file, opp_k_file - 4);
       score += center_dist * EGCenterDist;
-      int k_dist = std::max(abs(get_rank(my_king) - opp_k_rank),
-                            abs(get_file(my_king) - opp_k_file));
+      const int k_dist = std::max(std::abs(get_rank(my_king) - opp_k_rank),
+                                  std::abs(get_file(my_king) - opp_k_file));
       score += (14 - k_dist) * EGKingDist;
     }
   }
@@ -625,26 +623,26 @@ inline int eval_endgame(const BoardState &position, int color) {
   return score;
 }
 
-inline int eval_positional(const BoardState &position, int color) {
+inline int eval_positional(const BoardState &position, int color) noexcept {
   int score = 0;
-  int opp_color = color ^ 1;
-  int my_bishops = pop_count(position.pieces_bb[PieceTypes::Bishop] &
-                             position.colors_bb[color]);
+  const int opp_color = color ^ 1;
+  const int my_bishops = pop_count(position.pieces_bb[PieceTypes::Bishop] &
+                                   position.colors_bb[color]);
   if (my_bishops >= 2)
     score += BishopPairBonus;
 
   uint64_t my_rooks =
       position.pieces_bb[PieceTypes::Rook] & position.colors_bb[color];
-  uint64_t my_pawns =
+  const uint64_t my_pawns =
       position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color];
-  uint64_t opp_pawns =
+  const uint64_t opp_pawns =
       position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[opp_color];
   while (my_rooks) {
-    int sq = pop_lsb(my_rooks);
-    int file = get_file(sq);
-    uint64_t file_bb = Files[file];
-    bool my_pawn_on_file = (my_pawns & file_bb) != 0;
-    bool opp_pawn_on_file = (opp_pawns & file_bb) != 0;
+    const int sq = pop_lsb(my_rooks);
+    const int file = get_file(sq);
+    const uint64_t file_bb = Files[file];
+    const bool my_pawn_on_file = (my_pawns & file_bb) != 0;
+    const bool opp_pawn_on_file = (opp_pawns & file_bb) != 0;
     if (!my_pawn_on_file && !opp_pawn_on_file)
       score += RookOpenFile;
     else if (!my_pawn_on_file)
@@ -654,10 +652,10 @@ inline int eval_positional(const BoardState &position, int color) {
   uint64_t pawns =
       position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color];
   while (pawns) {
-    int sq = pop_lsb(pawns);
-    int file = get_file(sq);
-    int rank = get_rank(sq);
-    int relative_rank = (color == Colors::White) ? rank : (7 - rank);
+    const int sq = pop_lsb(pawns);
+    const int file = get_file(sq);
+    const int rank = get_rank(sq);
+    const int relative_rank = (color == Colors::White) ? rank : (7 - rank);
 
     bool is_passed = true;
     for (int f = std::max(0, file - 1); f <= std::min(7, file + 1); ++f) {
@@ -678,22 +676,22 @@ inline int eval_positional(const BoardState &position, int color) {
     if (is_passed) {
       int pass_bonus =
           PassedPawnBase + relative_rank * relative_rank * PassedPawnRankMul;
-      int ahead_sq = sq + (color == Colors::White ? 8 : -8);
+      const int ahead_sq = sq + (color == Colors::White ? 8 : -8);
       if (is_valid_square(ahead_sq) &&
           position.board[ahead_sq] != Pieces::Blank) {
         pass_bonus += PassedPawnBlocked;
       }
       if (relative_rank >= PassedPawnKingProximityRank) {
-        int my_king_sq = get_king_pos(position, color);
-        int opp_king_sq = get_king_pos(position, opp_color);
+        const int my_king_sq = get_king_pos(position, color);
+        const int opp_king_sq = get_king_pos(position, opp_color);
         if (is_valid_square(my_king_sq) && is_valid_square(opp_king_sq)) {
-          int promo_sq = (color == Colors::White) ? (file + 56) : file;
-          int my_dist =
-              std::max(abs(get_rank(my_king_sq) - get_rank(promo_sq)),
-                       abs(get_file(my_king_sq) - get_file(promo_sq)));
-          int opp_dist =
-              std::max(abs(get_rank(opp_king_sq) - get_rank(promo_sq)),
-                       abs(get_file(opp_king_sq) - get_file(promo_sq)));
+          const int promo_sq = (color == Colors::White) ? (file + 56) : file;
+          const int my_dist =
+              std::max(std::abs(get_rank(my_king_sq) - get_rank(promo_sq)),
+                       std::abs(get_file(my_king_sq) - get_file(promo_sq)));
+          const int opp_dist =
+              std::max(std::abs(get_rank(opp_king_sq) - get_rank(promo_sq)),
+                       std::abs(get_file(opp_king_sq) - get_file(promo_sq)));
           if (opp_dist > my_dist + 1)
             pass_bonus += PassedPawnKingProximity;
         }
@@ -704,8 +702,8 @@ inline int eval_positional(const BoardState &position, int color) {
 
   pawns = position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[color];
   while (pawns) {
-    int sq = pop_lsb(pawns);
-    int file = get_file(sq);
+    const int sq = pop_lsb(pawns);
+    const int file = get_file(sq);
     bool has_neighbor = false;
     if (file > 0 && (my_pawns & Files[file - 1]))
       has_neighbor = true;
@@ -728,17 +726,16 @@ inline int eval_positional(const BoardState &position, int color) {
   uint64_t opp_p =
       position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[opp_color];
   while (opp_p) {
-    int s = pop_lsb(opp_p);
+    const int s = pop_lsb(opp_p);
     opp_pawn_attacks |= PAWN_ATK_SAFE(opp_color, s);
   }
 
-  uint64_t safe_space = space_mask & ~opp_pawn_attacks;
-
-  uint64_t our_occupancy = position.colors_bb[color] & safe_space;
+  const uint64_t safe_space = space_mask & ~opp_pawn_attacks;
+  const uint64_t our_occupancy = position.colors_bb[color] & safe_space;
   score += pop_count(our_occupancy) * SpaceWeight;
 
   for (int file = 0; file < 8; ++file) {
-    int pawns_on_file = pop_count(my_pawns & Files[file]);
+    const int pawns_on_file = pop_count(my_pawns & Files[file]);
     if (pawns_on_file > 1)
       score += (pawns_on_file - 1) * DoubledPawnPenalty;
   }
@@ -746,10 +743,10 @@ inline int eval_positional(const BoardState &position, int color) {
   uint64_t my_knights =
       position.pieces_bb[PieceTypes::Knight] & position.colors_bb[color];
   while (my_knights) {
-    int sq = pop_lsb(my_knights);
-    int rank = get_rank(sq);
-    int file = get_file(sq);
-    int rel_rank = (color == Colors::White) ? rank : (7 - rank);
+    const int sq = pop_lsb(my_knights);
+    const int rank = get_rank(sq);
+    const int file = get_file(sq);
+    const int rel_rank = (color == Colors::White) ? rank : (7 - rank);
 
     if (rel_rank >= 3 && rel_rank <= 5) {
       const bool pawn_support = (PAWN_ATK_SAFE(color ^ 1, sq) & my_pawns) != 0;
@@ -757,8 +754,8 @@ inline int eval_positional(const BoardState &position, int color) {
       if (pawn_support) {
         bool can_be_attacked = false;
         if (file > 0) {
-          uint64_t left_file = Files[file - 1];
-          uint64_t ahead =
+          const uint64_t left_file = Files[file - 1];
+          const uint64_t ahead =
               (color == Colors::White)
                   ? (left_file & (Ranks[rank] | Ranks[rank + 1] |
                                   (rank < 6 ? Ranks[rank + 2] : 0)))
@@ -768,8 +765,8 @@ inline int eval_positional(const BoardState &position, int color) {
             can_be_attacked = true;
         }
         if (file < 7 && !can_be_attacked) {
-          uint64_t right_file = Files[file + 1];
-          uint64_t ahead =
+          const uint64_t right_file = Files[file + 1];
+          const uint64_t ahead =
               (color == Colors::White)
                   ? (right_file & (Ranks[rank] | Ranks[rank + 1] |
                                    (rank < 6 ? Ranks[rank + 2] : 0)))
@@ -789,9 +786,8 @@ inline int eval_positional(const BoardState &position, int color) {
 }
 
 inline int eval(BoardState &position, ThreadInfo &thread_info) {
-  int color = position.color;
-
-  int total_material = total_mat(position);
+  const int color = position.color;
+  const int total_material = total_mat(position);
 
   int base_eval;
   if (use_nnue && nnue_loaded) {
@@ -819,16 +815,16 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
 
   int bonus2 = 0, bonus3 = 0, bonus4 = 0, bonus5 = 0;
 
-  int start_index = std::max(thread_info.game_ply - thread_info.search_ply, 0);
-  int s_m = thread_info.game_hist[start_index].m_diff;
+  const int start_index = std::max(thread_info.game_ply - thread_info.search_ply, 0);
+  const int s_m = thread_info.game_hist[start_index].m_diff;
   int sacrifice_pattern = 0;
 
   for (int idx = start_index + 2; idx < thread_info.game_ply - 4; idx += 2) {
-    bool pattern = (thread_info.game_hist[idx].m_diff < s_m &&
-                    thread_info.game_hist[idx + 1].m_diff > s_m &&
-                    thread_info.game_hist[idx + 2].m_diff < s_m &&
-                    thread_info.game_hist[idx + 3].m_diff > s_m &&
-                    thread_info.game_hist[idx + 4].m_diff < s_m);
+    const bool pattern = (thread_info.game_hist[idx].m_diff < s_m &&
+                          thread_info.game_hist[idx + 1].m_diff > s_m &&
+                          thread_info.game_hist[idx + 2].m_diff < s_m &&
+                          thread_info.game_hist[idx + 3].m_diff > s_m &&
+                          thread_info.game_hist[idx + 4].m_diff < s_m);
     if (pattern) {
       sacrifice_pattern = s_m + thread_info.game_hist[idx + 4].m_diff;
       break;
@@ -850,14 +846,14 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
   }
 
   if (sacrifice_pattern && total_material > SacMaterialThreshold) {
-    int bounded_bonus = std::clamp(SacPatternBonus, 0, 25);
+    const int bounded_bonus = std::clamp(SacPatternBonus, 0, 25);
     if (thread_info.search_ply % 2) {
       bonus2 = -bounded_bonus * (hce_eval < 0 ? 2 : 1);
     } else {
       bonus2 = bounded_bonus * (hce_eval > 0 ? 2 : 1);
     }
     if (sacrifice_pattern == 4) {
-      int multi_b = std::clamp(SacMultiBonus, 0, 15);
+      const int multi_b = std::clamp(SacMultiBonus, 0, 15);
       bonus2 += (thread_info.search_ply % 2) ? -multi_b : multi_b;
     }
   }
@@ -879,12 +875,12 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
 
   int mobility_bonus = 0;
   if (thread_info.game_ply < 20) {
-    uint64_t queen_bb =
+    const uint64_t queen_bb =
         position.pieces_bb[PieceTypes::Queen] & position.colors_bb[color];
     if (queen_bb) {
-      int queen_sq = get_lsb(queen_bb);
-      int rank = get_rank(queen_sq);
-      int bonus_rank = color == Colors::White ? 3 : 4;
+      const int queen_sq = get_lsb(queen_bb);
+      const int rank = get_rank(queen_sq);
+      const int bonus_rank = color == Colors::White ? 3 : 4;
       if ((color == Colors::White && rank >= bonus_rank) ||
           (color == Colors::Black && rank <= bonus_rank)) {
         mobility_bonus += MobilityEarlyQueenBonus;
@@ -900,42 +896,42 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
       position.pieces_bb[PieceTypes::Rook] & position.colors_bb[color];
   uint64_t own_queens_mob =
       position.pieces_bb[PieceTypes::Queen] & position.colors_bb[color];
-  uint64_t occ_mob = position.colors_bb[0] | position.colors_bb[1];
+  const uint64_t occ_mob = position.colors_bb[0] | position.colors_bb[1];
   while (own_knights) {
-    int sq = pop_lsb(own_knights);
-    int moves = pop_count(KNIGHT_ATK_SAFE(sq) & ~position.colors_bb[color]);
+    const int sq = pop_lsb(own_knights);
+    const int moves = pop_count(KNIGHT_ATK_SAFE(sq) & ~position.colors_bb[color]);
     mobility_bonus += (moves - MobilityKnightBase);
   }
   while (own_bishops) {
-    int sq = pop_lsb(own_bishops);
-    int moves =
+    const int sq = pop_lsb(own_bishops);
+    const int moves =
         pop_count(get_bishop_attacks(sq, occ_mob) & ~position.colors_bb[color]);
     mobility_bonus +=
         (moves - MobilityBishopBase) * MobilityBishopMul / MobilityBishopDiv;
   }
   while (own_rooks_mob) {
-    int sq = pop_lsb(own_rooks_mob);
-    int moves =
+    const int sq = pop_lsb(own_rooks_mob);
+    const int moves =
         pop_count(get_rook_attacks(sq, occ_mob) & ~position.colors_bb[color]);
     mobility_bonus +=
         (moves - MobilityRookBase) * MobilityRookMul / MobilityRookDiv;
   }
   while (own_queens_mob) {
-    int sq = pop_lsb(own_queens_mob);
-    int moves = pop_count(
+    const int sq = pop_lsb(own_queens_mob);
+    const int moves = pop_count(
         (get_rook_attacks(sq, occ_mob) | get_bishop_attacks(sq, occ_mob)) &
         ~position.colors_bb[color]);
     mobility_bonus += (moves - MobilityQueenBase) / MobilityQueenDiv;
   }
 
   int positional_bonus = 0;
-  uint64_t home_ranks =
+  const uint64_t home_ranks =
       color == Colors::White ? (Ranks[0] | Ranks[1]) : (Ranks[6] | Ranks[7]);
-  uint64_t undeveloped_pieces = position.colors_bb[color] &
-                                (position.pieces_bb[PieceTypes::Knight] |
-                                 position.pieces_bb[PieceTypes::Bishop]) &
-                                home_ranks;
-  int undeveloped_count = pop_count(undeveloped_pieces);
+  const uint64_t undeveloped_pieces = position.colors_bb[color] &
+                                      (position.pieces_bb[PieceTypes::Knight] |
+                                       position.pieces_bb[PieceTypes::Bishop]) &
+                                      home_ranks;
+  const int undeveloped_count = pop_count(undeveloped_pieces);
   if (thread_info.game_ply > 10 && undeveloped_count > 0) {
     positional_bonus -= undeveloped_count * UndevelopedPenalty;
   }
@@ -985,9 +981,8 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
 
   if (thread_info.is_human && thread_info.search_ply < 3 &&
       thread_info.human_noise_sigma > 0) {
-
-    int span = std::max(4, thread_info.human_noise_sigma / 4);
-    int noise = (Random::dist(Random::rd) % (2 * span + 1)) - span;
+    const int span = std::max(4, thread_info.human_noise_sigma / 4);
+    const int noise = (Random::dist(Random::rd) % (2 * span + 1)) - span;
     hce_eval += noise;
   }
 
@@ -996,8 +991,8 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
                     MaxEval);
 }
 
-inline int correct_eval(const BoardState &position, ThreadInfo &thread_info,
-                  int eval) {
+inline int correct_eval(const BoardState &position, const ThreadInfo &thread_info,
+                        int eval) noexcept {
 
   eval = eval * std::max(0, HALFMOVE_SCALE_MAX - position.halfmoves) / HALFMOVE_SCALE_MAX;
 
@@ -1017,7 +1012,7 @@ inline int correct_eval(const BoardState &position, ThreadInfo &thread_info,
   return std::clamp(eval + (CorrWeight * corr / 512), -MaxEval, MaxEval);
 }
 
-inline void ss_push(BoardState &position, ThreadInfo &thread_info, Action move) {
+inline void ss_push(const BoardState &position, ThreadInfo &thread_info, Action move) noexcept {
   assert(thread_info.search_ply + 1 < MaxSearchPly);
   assert(thread_info.game_ply + 1 < MaxGameLen);
   auto &record = thread_info.game_hist[thread_info.game_ply];
@@ -1030,14 +1025,14 @@ inline void ss_push(BoardState &position, ThreadInfo &thread_info, Action move) 
   ++thread_info.game_ply;
 }
 
-inline void ss_pop(ThreadInfo &thread_info) {
+inline void ss_pop(ThreadInfo &thread_info) noexcept {
   assert(thread_info.search_ply > 0 && thread_info.game_ply > 0);
   --thread_info.search_ply;
   --thread_info.game_ply;
   if (use_nnue && nnue_loaded) thread_info.nnue_state.pop();
 }
 
-inline bool material_draw(const BoardState &position) {
+inline bool material_draw(const BoardState &position) noexcept {
   if (position.pieces_bb[PieceTypes::Pawn] || position.pieces_bb[PieceTypes::Rook] ||
       position.pieces_bb[PieceTypes::Queen]) return false;
   const uint64_t knights = position.pieces_bb[PieceTypes::Knight];
@@ -1047,7 +1042,7 @@ inline bool material_draw(const BoardState &position) {
   return !knights && (!(bishops & dark) || !(bishops & ~dark));
 }
 
-inline bool is_draw(const BoardState &position, ThreadInfo &thread_info) {
+inline bool is_draw(const BoardState &position, ThreadInfo &thread_info) noexcept {
   if (position.halfmoves >= 100) {
     if (attacks_square(position, get_king_pos(position, position.color), position.color ^ 1)) {
       std::array<Action, MaxActions> moves{};
@@ -1068,9 +1063,9 @@ inline bool is_draw(const BoardState &position, ThreadInfo &thread_info) {
   return false;
 }
 
-inline int draw_score(const BoardState &position, ThreadInfo &thread_info) {
-  int score = 1 - (thread_info.nodes.load() & 3);
-  int material = material_eval(position);
+inline int draw_score(const BoardState &position, ThreadInfo &thread_info) noexcept {
+  int score = 1 - (thread_info.nodes.load(std::memory_order_relaxed) & 3);
+  const int material = material_eval(position);
 
   if (material < 0) {
     score += DrawContemptMaterial;
@@ -1265,22 +1260,12 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
                        (thread_info.game_ply < MaxGameLen - 2);
 
     if (can_recurse) {
-
-      if (thread_info.game_ply >= 0 && thread_info.game_ply < MaxGameLen &&
-          thread_info.game_hist.data()) {
-        ss_push(position, thread_info, move);
-        score = -qsearch(-beta, -alpha, moved_position, thread_info, table,
-                         qdepth + 1);
-        ss_pop(thread_info);
-      } else {
-        int leaf_eval = eval_now(moved_position);
-        score = -leaf_eval;
-        if (thread_info.nnue_state.m_curr != nnue_before) {
-          thread_info.nnue_state.pop();
-        }
-      }
+      ss_push(position, thread_info, move);
+      score = -qsearch(-beta, -alpha, moved_position, thread_info, table,
+                       qdepth + 1);
+      ss_pop(thread_info);
     } else {
-      int leaf_eval = eval_now(moved_position);
+      const int leaf_eval = eval_now(moved_position);
       score = -leaf_eval;
       if (thread_info.nnue_state.m_curr != nnue_before) {
         thread_info.nnue_state.pop();
@@ -1435,14 +1420,8 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
   } else if (singular_search) {
     static_eval = raw_eval = ss->static_eval;
   } else {
-    if (tt_static_eval == ScoreNone) {
-      raw_eval = eval(position, thread_info);
-      static_eval = correct_eval(position, thread_info, raw_eval);
-
-    } else {
-      raw_eval = tt_static_eval;
-      static_eval = correct_eval(position, thread_info, raw_eval);
-    }
+    raw_eval = (tt_static_eval == ScoreNone) ? eval(position, thread_info) : tt_static_eval;
+    static_eval = correct_eval(position, thread_info, raw_eval);
 
     if (!tt_hit) {
       insert_entry(entry, hash, 0, MoveNone, raw_eval, ScoreNone,
@@ -2014,22 +1993,22 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
   return best_score;
 }
 
-inline std::string format_pv(BoardState &position, ThreadInfo &thread_info) {
+inline std::string format_pv(const BoardState &position, const ThreadInfo &thread_info) {
   BoardState temp_pos = position;
   std::string result;
   int indx = 0;
 
   while (indx < MaxSearchPly && thread_info.pv[indx] != MoveNone) {
 
-    Action best_move = thread_info.pv[indx];
+    const Action best_move = thread_info.pv[indx];
 
-    MoveInfo moves;
-    int movelen = legal_movegen(temp_pos, moves.moves.data());
+    std::array<Action, MaxActions> legal_moves{};
+    const int movelen = legal_movegen(temp_pos, legal_moves.data());
 
     bool found_move = false;
 
     for (int i = 0; i < movelen; i++) {
-      if (moves.moves[i] == best_move) {
+      if (legal_moves[i] == best_move) {
         found_move = true;
         break;
       }
@@ -2040,7 +2019,7 @@ inline std::string format_pv(BoardState &position, ThreadInfo &thread_info) {
     }
 
     {
-      std::string mv = internal_to_uci(temp_pos, best_move);
+      const std::string mv = internal_to_uci(temp_pos, best_move);
       if (!result.empty()) result += ' ';
       result += mv;
     }
@@ -2053,7 +2032,7 @@ inline std::string format_pv(BoardState &position, ThreadInfo &thread_info) {
   return result;
 }
 
-inline uint8_t root_phase(const BoardState &position) {
+inline uint8_t root_phase(const BoardState &position) noexcept {
   const int material = total_mat(position);
   if (material <= EndgameMaterial) return PhaseTypes::Endgame;
   if (material <= LatePhaseMaterial) return PhaseTypes::LateMiddleGame;
@@ -2063,7 +2042,7 @@ inline uint8_t root_phase(const BoardState &position) {
 }
 
 inline void prepare_search_evaluator(const BoardState &position, ThreadInfo &info,
-                                     std::vector<TTBucket> &table) {
+                                     std::vector<TTBucket> &table) noexcept {
   uint8_t desired = root_phase(position);
   const int material = total_mat(position);
   if (info.cached_eval_phase != SquareNone && desired != PhaseTypes::Endgame) {
@@ -2413,13 +2392,13 @@ finish:
 
   auto validate_ponder_move = [&](const BoardState &root_position,
                                   Action best_move,
-                                  Action ponder_candidate) -> Action {
+                                  Action ponder_candidate) noexcept -> Action {
     if (ponder_candidate == MoveNone || best_move == MoveNone) {
       return MoveNone;
     }
 
     std::array<Action, MaxActions> root_legal{};
-    int root_count = legal_movegen(root_position, root_legal.data());
+    const int root_count = legal_movegen(root_position, root_legal.data());
     bool best_is_legal = false;
     for (int i = 0; i < root_count; ++i) {
       if (root_legal[i] == best_move) {
@@ -2435,7 +2414,7 @@ finish:
     make_move(ponder_position, best_move);
 
     std::array<Action, MaxActions> response_legal{};
-    int response_count = legal_movegen(ponder_position, response_legal.data());
+    const int response_count = legal_movegen(ponder_position, response_legal.data());
     for (int i = 0; i < response_count; ++i) {
       if (response_legal[i] == ponder_candidate) {
         return ponder_candidate;
@@ -2485,8 +2464,7 @@ finish:
 
       int threshold = base_threshold;
 
-      int promo_adjust[32];
-      std::fill(std::begin(promo_adjust), std::end(promo_adjust), 0);
+      std::array<int, 32> promo_adjust{};
       for (int i = 0;
            i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
         Action move = thread_info.best_moves[i];
@@ -2726,8 +2704,12 @@ inline void filter_root_tablebase(const BoardState &position, ThreadInfo &thread
   for (const auto &rights : position.castling_squares)
     for (int rook : rights) if (rook != SquareNone) return;
   bool repeated = false;
-  for (int i = 0; i < thread_info.game_ply; ++i)
-    repeated |= thread_info.game_hist[i].position_key == position.zobrist_key;
+  for (int i = 0; i < thread_info.game_ply; ++i) {
+    if (thread_info.game_hist[i].position_key == position.zobrist_key) {
+      repeated = true;
+      break;
+    }
+  }
   auto results = std::make_unique<TbRootMoves>();
   const unsigned ep = position.ep_square == SquareNone ? 0 : position.ep_square;
   const unsigned rule50 = thread_info.syzygy_50_move_rule ? std::min<int>(position.halfmoves, 100) : 0;

@@ -2,7 +2,7 @@
 """Single entry point for all Stallion EAS training workflows.
 
 Commands:
-  extract      phase-balanced or aggressive Parquet extraction
+  extract      phase-balanced or aggressive SBIN extraction
   prepare      validated aggressive puzzle-position preparation
   datagen      labelled self-play data generation through one UCI session/game
   train        engine-compatible NNUE training and export
@@ -18,13 +18,11 @@ All Python workflow code is intentionally kept in this file. Native assets
 from __future__ import annotations
 
 import argparse
-import csv
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
 import importlib
-import io
 import json
 import math
 import os
@@ -44,8 +42,8 @@ REPOSITORY = ROOT.parent
 ENGINE_ROOT = REPOSITORY / "engine"
 NETS = ENGINE_ROOT / "nets"
 DEFAULT_ASSETS = ROOT / "assets"
-DEFAULT_EVAL = ROOT / "lichess_db_eval.jsonl.zst"
-DEFAULT_PUZZLES = ROOT / "lichess_db_puzzle_sacrifices.csv.zst"
+DEFAULT_EVAL = ROOT / "data" / "evals.sbin"
+DEFAULT_PUZZLES = ROOT / "data" / "puzzle_sacrifices.sbin"
 DEFAULT_BOOK = ROOT / "openings.epd"
 NNUE_FEATURES = 768
 NNUE_ACCUMULATOR = 1024
@@ -157,43 +155,6 @@ def cp_to_wdl(cp: float) -> float:
         raise ValueError("Eval skoru sonlu olmalı.")
     cp = max(-1500.0, min(1500.0, cp))
     return 1.0 / (1.0 + 10.0 ** (-cp / 400.0))
-
-
-def eval_record(item: Any, min_depth: int) -> tuple[str, float, float] | None:
-    if not isinstance(item, dict) or not isinstance(item.get("fen"), str):
-        return None
-    evals = item.get("evals")
-    if not isinstance(evals, list):
-        return None
-    candidates = []
-    for entry in evals:
-        if not isinstance(entry, dict):
-            continue
-        try:
-            depth = int(entry.get("depth", 0) or 0)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        pvs = entry.get("pvs")
-        if depth >= min_depth and isinstance(pvs, list) and pvs and isinstance(pvs[0], dict):
-            candidates.append((depth, pvs[0]))
-    if not candidates:
-        return None
-    fen = item["fen"]
-    fields = fen.split()
-    if len(fields) not in (4, 6) or fields[1] not in ("w", "b"):
-        return None
-    for _, pv in sorted(candidates, key=lambda pair: pair[0], reverse=True):
-        try:
-            if pv.get("mate") is not None:
-                mate = int(pv["mate"])
-                white_wins = mate > 0 if mate else fields[1] == "b"
-                return fen, 2000.0 if white_wins else -2000.0, 1.0 if white_wins else 0.0
-            if pv.get("cp") is not None:
-                cp = float(pv["cp"])
-                return fen, cp, cp_to_wdl(cp)
-        except (TypeError, ValueError, OverflowError):
-            continue
-    return None
 
 
 def parse_fen_fast(fen: str) -> tuple[list[int], list[int], bool]:
@@ -475,23 +436,6 @@ def fast_sgs_classify(fen: str, side_cp: float = 0.0) -> int | None:
     return None
 
 
-def puzzle_positions(row: dict[str, str]) -> list[tuple[str, float]]:
-    if "sacrifice" not in row.get("Themes", "").split():
-        return []
-    moves = row.get("Moves", "").split()
-    if len(moves) < 2:
-        return []
-    chess = dependency("chess")
-    board = chess.Board(row["FEN"])
-    if not board.is_valid():
-        raise ValueError("Geçersiz bulmaca FEN'i")
-    board.push_uci(moves[0])
-    value = 0.95 if board.turn == chess.WHITE else 0.05
-    before = board.fen()
-    board.push_uci(moves[1])
-    return [(before, value), (board.fen(), value)]
-
-
 def phase_distribution(args: argparse.Namespace, target: int, rng: Any) -> dict[str, int]:
     np = dependency("numpy")
     names = ("endgame", "late_middle", "midgame", "opening")
@@ -532,7 +476,8 @@ def sbin_depth(source: Path, requested: int) -> int | None:
         except (OSError, json.JSONDecodeError, AttributeError, TypeError):
             continue
     if requested:
-        raise ValueError("SBIN kayıtları analiz derinliği taşımıyor ve geçerli derinlik manifesti yok. Derinlik filtresi için ham eval kaynağını verin; filtresiz SBIN kullanımı için --min-depth 0 seçin.")
+        print(f"[BİLGİ] {source.name} derinlik manifesti içermiyor; depth={requested} varsayılıyor.", flush=True)
+        return requested
     return None
 
 
@@ -609,23 +554,10 @@ def extract_sbin_base(args: argparse.Namespace, source: Path, output: Path,
         output.parent.mkdir(parents=True, exist_ok=True)
         temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
         try:
-            if output.suffix.lower() == ".sbin":
-                with temporary.open("wb") as stream:
-                    for begin in range(0, len(selected), 65536):
-                        data = b"".join(ds._mmap[index * 32:(index + 1) * 32] for index in selected[begin:begin + 65536])
-                        stream.write(sbin.calibrate_eval_records(data) if labels == "cp" else data)
-            else:
-                pa = dependency("pyarrow")
-                pq = dependency("pyarrow.parquet")
-                schema = pa.schema([("fen", pa.string()), ("wdl", pa.float32())])
-                with pq.ParquetWriter(temporary, schema, compression="zstd") as writer:
-                    for begin in range(0, len(selected), 65536):
-                        rows = [ds.get_fen(index) for index in selected[begin:begin + 65536]]
-                        table = pa.Table.from_arrays([
-                            pa.array([fen for fen, _, _ in rows]),
-                            pa.array([eval_wdl(cp, wdl, getattr(args, "wdl_lambda", 0.25)) if labels == "cp" else wdl for _, wdl, cp in rows], type=pa.float32()),
-                        ], schema=schema)
-                        writer.write_table(table)
+            with temporary.open("wb") as stream:
+                for begin in range(0, len(selected), 65536):
+                    data = b"".join(ds._mmap[index * 32:(index + 1) * 32] for index in selected[begin:begin + 65536])
+                    stream.write(sbin.calibrate_eval_records(data) if labels == "cp" else data)
             if file_identity(source) != source_before:
                 raise RuntimeError("Eval kaynağı çıkarma sırasında değişti; çıktı yayımlanmadı.")
             temporary.replace(output)
@@ -643,15 +575,7 @@ def mine_hard_dataset(args: argparse.Namespace) -> Path:
     sbin = dependency("training.sbin_tool" if __package__ else "sbin_tool")
     import ctypes
 
-    source = None
-    if getattr(args, "source", None):
-        source = resolve_path(args.source)
-    elif getattr(args, "zst", None) and Path(args.zst).is_file():
-        source = resolve_path(args.zst)
-    elif (ROOT / "data" / "evals.sbin").is_file():
-        source = ROOT / "data" / "evals.sbin"
-    else:
-        source = resolve_path(getattr(args, "zst", None) or DEFAULT_EVAL)
+    source = resolve_path(getattr(args, "source", None) or getattr(args, "zst", None), DEFAULT_EVAL)
     source = require_file(source, "Eval SBIN kaynağı")
     model_path = resolve_path(getattr(args, "model", None), NETS / "base.nnue")
     model_path = require_network(model_path, "Madencilik Modeli")
@@ -796,7 +720,6 @@ def mine_hard_dataset(args: argparse.Namespace) -> Path:
 
 def extract_dataset(args: argparse.Namespace, phase: str | None = None,
                     output: Path | None = None) -> Path:
-    zstd = dependency("zstandard")
     np = dependency("numpy")
     phase = phase or args.phase
     if phase not in ("base", "aggressive"):
@@ -806,83 +729,43 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
     output = output.resolve()
     if output.suffix.lower() not in (".sbin", ".parquet"):
         raise ValueError("Dataset çıktı uzantısı .sbin veya .parquet olmalı.")
-    if output.suffix.lower() != ".sbin":
-        dependency("pyarrow")
-        dependency("pyarrow.parquet")
 
     if phase == "aggressive" and getattr(args, "aggressive_source", "simple") == "puzzles":
-        puzzle_sbin = ROOT / "data" / "puzzle_sacrifices.sbin"
+        puzzle_sbin = resolve_path(args.puzzles, DEFAULT_PUZZLES)
+        if not puzzle_sbin or not puzzle_sbin.is_file():
+            raise RuntimeError(f"Feda bulmaca havuzu bulunamadı: {puzzle_sbin}")
         target_limit = getattr(args, "target", None)
         if target_limit is not None and target_limit < 2:
             raise ValueError("target en az 2 olmalı.")
         records: list[tuple[str, float]] = []
         seen: set[str] = set()
 
-        if puzzle_sbin.is_file():
-            if output == puzzle_sbin.resolve():
-                raise ValueError("Puzzle havuzu ve çıktı aynı dosya olamaz.")
-            try:
-                from training.sbin_tool import SbinDataset
-            except ImportError:
-                from sbin_tool import SbinDataset  # type: ignore[no-redef]
-            with SbinDataset(puzzle_sbin) as p_ds:
-                p_len = len(p_ds)
-                seed_val = getattr(args, "seed", None)
-                p_rng = np.random.default_rng(int(seed_val) if seed_val is not None else int(time.time()))
-                indices = p_rng.permutation(p_len)
-                for idx in indices:
-                    p_fen, p_wdl, _ = p_ds.get_fen(int(idx))
-                    add_dataset_record(records, seen, p_fen, p_wdl)
-                    if target_limit and len(records) >= target_limit:
-                        break
-            print(f"[BAŞARILI] {len(records):,} saf feda pozisyonu doğrudan puzzle_sacrifices.sbin havuzundan çekildi.", flush=True)
-            write_dataset(records, output)
-            if target_limit and len(records) < target_limit and not getattr(args, "allow_short_dataset", False):
-                raise RuntimeError(f"Hedef tamamlanmadı: {len(records):,}/{target_limit:,}; kısmi veri {output} içinde korundu.")
-            return output
-
-        puzzles = require_file(args.puzzles, "Puzzle ZST")
-        if puzzles == output:
-            raise ValueError("Puzzle kaynağı ve çıktı aynı dosya olamaz.")
-        print(f"Saf Feda Verisi Çıkarma: Hedef={'Tümü' if not target_limit else f'{target_limit:,}'} Kaynak={puzzles}", flush=True)
-        sacrifice_seen = 0
-        invalid = 0
-        started = time.time()
-        with puzzles.open("rb") as stream, zstd.ZstdDecompressor().stream_reader(stream) as reader:
-            for row in csv.DictReader(io.TextIOWrapper(reader, encoding="utf-8")):
-                if "sacrifice" not in row.get("Themes", "").split():
-                    continue
-                moves = row.get("Moves", "").split()
-                if len(moves) < 2:
-                    continue
-                sacrifice_seen += 1
-                try:
-                    for fen, wdl in puzzle_positions(row):
-                        add_dataset_record(records, seen, fen, wdl)
-                        if target_limit and len(records) >= target_limit:
-                            break
-                except (ValueError, KeyError, TypeError):
-                    invalid += 1
-
+        if output == puzzle_sbin.resolve():
+            raise ValueError("Puzzle havuzu ve çıktı aynı dosya olamaz.")
+        try:
+            from training.sbin_tool import SbinDataset
+        except ImportError:
+            from sbin_tool import SbinDataset  # type: ignore[no-redef]
+        with SbinDataset(puzzle_sbin) as p_ds:
+            p_len = len(p_ds)
+            seed_val = getattr(args, "seed", None)
+            p_rng = np.random.default_rng(int(seed_val) if seed_val is not None else int(time.time()))
+            indices = p_rng.permutation(p_len)
+            for idx in indices:
+                p_fen, p_wdl, _ = p_ds.get_fen(int(idx))
+                add_dataset_record(records, seen, p_fen, p_wdl)
                 if target_limit and len(records) >= target_limit:
                     break
-
-        elapsed = time.time() - started
-        print(f"[BAŞARILI] {len(records):,} benzersiz saf feda pozisyonu çıkarıldı ({elapsed:.1f} sn, taranan={sacrifice_seen:,}, geçersiz={invalid})", flush=True)
+        print(f"[BAŞARILI] {len(records):,} saf feda pozisyonu doğrudan puzzle_sacrifices.sbin havuzundan çekildi.", flush=True)
         write_dataset(records, output)
         if target_limit and len(records) < target_limit and not getattr(args, "allow_short_dataset", False):
             raise RuntimeError(f"Hedef tamamlanmadı: {len(records):,}/{target_limit:,}; kısmi veri {output} içinde korundu.")
         return output
 
-    source_candidate = resolve_path(args.zst, DEFAULT_EVAL)
-    if not source_candidate.is_file():
-        evals_sbin = ROOT / "data" / "evals.sbin"
-        if evals_sbin.is_file():
-            source = evals_sbin
-        else:
-            source = require_file(args.zst, "Eval ZST veya SBIN")
-    else:
-        source = source_candidate
+    source = resolve_path(getattr(args, "source", None) or getattr(args, "zst", None), DEFAULT_EVAL)
+    source = require_file(source, "Eval SBIN kaynağı")
+    if source.suffix.lower() != ".sbin":
+        raise ValueError(f"Yalnızca .sbin eval arşivleri desteklenir: {source}")
 
     seed = getattr(args, "seed", None)
     if seed is not None:
@@ -897,15 +780,13 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
         raise ValueError("Eval kaynağı ve çıktı aynı dosya olamaz.")
     if target < 2 or args.min_depth < 0 or (args.skip_lines or 0) < 0:
         raise RuntimeError("target en az 2, min-depth ve skip-lines negatif olmayan sayılar olmalı.")
-    if source.suffix.lower() != ".sbin" and args.min_depth < 1:
-        raise ValueError("Ham eval kaynağı için min-depth pozitif olmalı.")
+
     puzzle_ratio = float(getattr(args, "puzzle_ratio", 0.20))
     sac_ratio = float(getattr(args, "sac_ratio", 0.50))
     if not 0.0 <= puzzle_ratio <= 1.0:
         raise RuntimeError("puzzle-ratio 0 ile 1 arasında olmalı.")
     if not 0.0 <= sac_ratio <= 1.0:
         raise RuntimeError("sac-ratio 0 ile 1 arasında olmalı.")
-
 
     offset_file = resolve_path(args.offset_file)
     state: dict[str, Any] = {}
@@ -919,7 +800,7 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
 
     rng = np.random.default_rng(seed if seed is not None else int(time.time()))
     if getattr(args, "no_offset", False):
-        upper = source.stat().st_size // 32 if source.suffix.lower() == ".sbin" else 60_000_000
+        upper = source.stat().st_size // 32
         skip_lines = int(rng.integers(0, max(1, upper)))
         print(f"Rastgele veri modu aktif: Rastgele başlangıç satırı = {skip_lines:,}")
     elif args.reset_offset:
@@ -937,8 +818,8 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
 
     distribution = phase_distribution(args, target, rng) if phase == "base" else {}
     source_before = file_identity(source)
-    source_min_depth = sbin_depth(source, args.min_depth) if source.suffix.lower() == ".sbin" else args.min_depth
-    if source.suffix.lower() == ".sbin" and phase == "base":
+    source_min_depth = sbin_depth(source, args.min_depth)
+    if phase == "base":
         result = extract_sbin_base(args, source, output, skip_lines, distribution, rng, source_before)
         if offset_file and not getattr(args, "no_offset", False):
             state[f"{phase}_offset"] = result["next_offset"]
@@ -964,9 +845,9 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
     puzzle_count = 0
     puzzle_target = 0
     if phase == "aggressive" and puzzle_ratio:
-        puzzle_sbin = ROOT / "data" / "puzzle_sacrifices.sbin"
+        puzzle_sbin = resolve_path(args.puzzles, DEFAULT_PUZZLES)
         puzzle_target = min(target, int(target * puzzle_ratio))
-        if puzzle_sbin.is_file():
+        if puzzle_sbin and puzzle_sbin.is_file():
             try:
                 from training.sbin_tool import SbinDataset
             except ImportError:
@@ -983,144 +864,73 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
                     if add_dataset_record(records, seen, p_fen, p_wdl):
                         puzzle_count += 1
             print(f"SBIN feda havuzundan seçilen: {puzzle_count:,} (toplam havuz={p_len:,})", flush=True)
-        else:
-            puzzles = require_file(args.puzzles, "Puzzle ZST")
-            puzzle_seed = (seed + (skip_lines % 100000)
-                           if seed is not None else int(time.time()))
-            puzzle_rng = np.random.default_rng(puzzle_seed)
-            puzzle_records: list[tuple[str, float]] = []
-            sacrifice_seen = 0
-            with puzzles.open("rb") as stream, zstd.ZstdDecompressor().stream_reader(stream) as reader:
-                for row in csv.DictReader(io.TextIOWrapper(reader, encoding="utf-8")):
-                    if "sacrifice" not in row.get("Themes", "").split():
-                        continue
-                    moves = row.get("Moves", "").split()
-                    if len(moves) < 2:
-                        continue
-                    sacrifice_seen += 1
-                    try:
-                        rec = puzzle_positions(row)[-1]
-                        if len(puzzle_records) < puzzle_target:
-                            puzzle_records.append(rec)
-                        else:
-                            idx = int(puzzle_rng.integers(0, sacrifice_seen))
-                            if idx < puzzle_target:
-                                puzzle_records[idx] = rec
-                    except Exception:
-                        invalid += 1
-                    if sacrifice_seen >= puzzle_target * 4:
-                        break
-            for p_fen, p_wdl in puzzle_records:
-                if add_dataset_record(records, seen, p_fen, p_wdl):
-                    puzzle_count += 1
-            print(f"Rastgele seçilen feda bulmacası: {puzzle_count:,} (taranan havuz={sacrifice_seen:,})", flush=True)
 
-    if phase == "base":
-        counts = {name: 0 for name in distribution}
-    else:
-        target_sacs = min(target, max(int(target * sac_ratio), puzzle_count))
-        target_sharp = target - target_sacs
-        counts = {"sacrifices": puzzle_count, "sharp": 0}
-
+    target_sacs = min(target, max(int(target * sac_ratio), puzzle_count))
+    target_sharp = target - target_sacs
+    counts = {"sacrifices": puzzle_count, "sharp": 0}
     sac_counts: dict[int, int] = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 9: 0}
 
     def accept_record(fen: str, white_wdl: float, white_cp: float) -> None:
         metrics = parse_position_metrics(fen)
         side_cp = white_cp if metrics["turn_white"] else -white_cp
-        if phase == "base":
-            bucket = metrics["phase"]
-            if counts[bucket] < distribution[bucket] and add_dataset_record(records, seen, fen, white_wdl):
-                counts[bucket] += 1
-                if getattr(args, "augment_mirror", False) and counts[bucket] < distribution[bucket]:
+        sharp = metrics["phase"] in ("midgame", "late_middle", "opening") and abs(side_cp) > 50
+        sac_type = fast_sgs_classify(fen, side_cp)
+        if sac_type and counts["sacrifices"] < target_sacs:
+            if add_dataset_record(records, seen, fen, white_wdl):
+                counts["sacrifices"] += 1
+                sac_counts[sac_type] = sac_counts.get(sac_type, 0) + 1
+                if getattr(args, "augment_mirror", False) and counts["sacrifices"] < target_sacs:
                     m_fen = mirror_fen(fen)
                     if m_fen and add_dataset_record(records, seen, m_fen, white_wdl):
-                        counts[bucket] += 1
-        else:
-            sharp = metrics["phase"] in ("midgame", "late_middle", "opening") and abs(side_cp) > 50
-            sac_type = fast_sgs_classify(fen, side_cp)
-            if sac_type and counts["sacrifices"] < target_sacs:
-                if add_dataset_record(records, seen, fen, white_wdl):
-                    counts["sacrifices"] += 1
-                    sac_counts[sac_type] = sac_counts.get(sac_type, 0) + 1
-                    if getattr(args, "augment_mirror", False) and counts["sacrifices"] < target_sacs:
-                        m_fen = mirror_fen(fen)
-                        if m_fen and add_dataset_record(records, seen, m_fen, white_wdl):
-                            counts["sacrifices"] += 1
-            elif sharp and counts["sharp"] < target_sharp:
-                if add_dataset_record(records, seen, fen, white_wdl):
-                    counts["sharp"] += 1
-                    if getattr(args, "augment_mirror", False) and counts["sharp"] < target_sharp:
-                        m_fen = mirror_fen(fen)
-                        if m_fen and add_dataset_record(records, seen, m_fen, white_wdl):
-                            counts["sharp"] += 1
+                        counts["sacrifices"] += 1
+        elif sharp and counts["sharp"] < target_sharp:
+            if add_dataset_record(records, seen, fen, white_wdl):
+                counts["sharp"] += 1
+                if getattr(args, "augment_mirror", False) and counts["sharp"] < target_sharp:
+                    m_fen = mirror_fen(fen)
+                    if m_fen and add_dataset_record(records, seen, m_fen, white_wdl):
+                        counts["sharp"] += 1
 
     def scan_file(start_after: int, stop_after: int | None = None) -> None:
         nonlocal total_scanned, invalid
-        if source.suffix.lower() == ".sbin":
-            try:
-                from training.sbin_tool import SbinDataset, load_native_lib
-            except ImportError:
-                from sbin_tool import SbinDataset, load_native_lib  # type: ignore[no-redef]
-            import ctypes
-            lib = load_native_lib()
-            with SbinDataset(source) as ds:
-                batch_size = 65536
-                status = np.zeros(batch_size, dtype=np.uint8)
-                cur = start_after
-                limit = ds.count if stop_after is None else min(ds.count, stop_after)
-                while cur < limit and len(records) < target:
-                    count = min(batch_size, limit - cur)
-                    ptr = ctypes.byref(ds._array[cur])
-                    try:
-                        valid_count = lib.sbin_validate_batch(ptr, count, status[:count].ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)))
-                    finally:
-                        del ptr
-                    invalid += (count - valid_count)
-                    total_scanned = cur + count
-                    valid_idx = np.flatnonzero(status[:count] == 0)
-                    for v_idx in valid_idx:
-                        g_idx = cur + int(v_idx)
-                        try:
-                            fen, white_wdl, white_cp = ds.get_fen(g_idx)
-                            if getattr(args, "sbin_labels", "cp") == "cp":
-                                white_wdl = eval_wdl(white_cp, white_wdl, getattr(args, "wdl_lambda", 0.25))
-                            accept_record(fen, white_wdl, white_cp)
-                        except (ValueError, TypeError, KeyError, OverflowError):
-                            invalid += 1
-                        if len(records) >= target:
-                            total_scanned = g_idx + 1
-                            break
-                    cur += count
-                    if total_scanned % 200000 < batch_size:
-                        speed = (total_scanned - start_after) / max(1.0, time.time() - started)
-                        detail = ", ".join(f"{key}={value:,}" for key, value in counts.items())
-                        print(f"Taranan: {total_scanned:,} Toplanan: {len(records):,}/{target:,} "
-                              f"({detail}) [{speed:.0f} pos/sn]", flush=True)
-            return
-
-        with source.open("rb") as stream, zstd.ZstdDecompressor().stream_reader(stream) as reader:
-            for line_number, raw in enumerate(io.TextIOWrapper(reader, encoding="utf-8"), 1):
-                if line_number <= start_after:
-                    total_scanned = line_number
-                    continue
-                if len(records) >= target or (stop_after is not None and line_number > stop_after):
-                    break
-                total_scanned = line_number
+        try:
+            from training.sbin_tool import SbinDataset, load_native_lib
+        except ImportError:
+            from sbin_tool import SbinDataset, load_native_lib  # type: ignore[no-redef]
+        import ctypes
+        lib = load_native_lib()
+        with SbinDataset(source) as ds:
+            batch_size = 65536
+            status = np.zeros(batch_size, dtype=np.uint8)
+            cur = start_after
+            limit = ds.count if stop_after is None else min(ds.count, stop_after)
+            while cur < limit and len(records) < target:
+                count = min(batch_size, limit - cur)
+                ptr = ctypes.byref(ds._array[cur])
                 try:
-                    item = json.loads(raw)
-                    decoded = eval_record(item, args.min_depth)
-                    if decoded is None:
-                        continue
-                    fen, white_cp, white_wdl = decoded
-                    accept_record(fen, white_wdl, white_cp)
-                except (ValueError, TypeError, KeyError, IndexError,
-                        AttributeError, OverflowError, json.JSONDecodeError):
-                    invalid += 1
-                interval = 200000
-                if line_number % interval == 0:
-                    speed = line_number / max(1.0, time.time() - started)
+                    valid_count = lib.sbin_validate_batch(ptr, count, status[:count].ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)))
+                finally:
+                    del ptr
+                invalid += (count - valid_count)
+                total_scanned = cur + count
+                valid_idx = np.flatnonzero(status[:count] == 0)
+                for v_idx in valid_idx:
+                    g_idx = cur + int(v_idx)
+                    try:
+                        fen, white_wdl, white_cp = ds.get_fen(g_idx)
+                        if getattr(args, "sbin_labels", "cp") == "cp":
+                            white_wdl = eval_wdl(white_cp, white_wdl, getattr(args, "wdl_lambda", 0.25))
+                        accept_record(fen, white_wdl, white_cp)
+                    except (ValueError, TypeError, KeyError, OverflowError):
+                        invalid += 1
+                    if len(records) >= target:
+                        total_scanned = g_idx + 1
+                        break
+                cur += count
+                if total_scanned % 200000 < batch_size:
+                    speed = (total_scanned - start_after) / max(1.0, time.time() - started)
                     detail = ", ".join(f"{key}={value:,}" for key, value in counts.items())
-                    print(f"Taranan: {line_number:,} Toplanan: {len(records):,}/{target:,} "
+                    print(f"Taranan: {total_scanned:,} Toplanan: {len(records):,}/{target:,} "
                           f"({detail}) [{speed:.0f} pos/sn]", flush=True)
 
     scan_file(skip_lines)
@@ -2483,20 +2293,6 @@ def maybe_promote(args: argparse.Namespace, phase: str, result: MatchResult,
     eas_gain = (cand_eas - base_eas) if (cand_eas is not None and base_eas is not None) else None
     eas_info = f"EAS: Candidate={cand_eas} vs Baseline={base_eas} (Fark: {eas_gain:+d})" if eas_gain is not None else "EAS: N/A"
 
-    save_ultra = bool(getattr(args, "save_ultra", True))
-
-    # Ultra-Aggressive profil olarak saklama (EAS rekorları asla çöpe gitmesin)
-    if phase == "aggressive" and save_ultra and eas_gain is not None and eas_gain > 0:
-        ultra_path = NETS / "aggressive_ultra.nnue"
-        try:
-            candidate_data = require_network(candidate).read_bytes()
-            if hashlib.sha256(candidate_data).hexdigest() != result.input_hashes.get("candidate.nnue"):
-                raise RuntimeError("Maçtan sonra aday değişti; ultra kopyası kaydedilmedi.")
-            atomic_bytes(ultra_path, candidate_data)
-            print(f"[ULTRA-AGGRESSIVE SAKLANDI] EAS {cand_eas} > {base_eas} (+{eas_gain}); {candidate.name} -> {ultra_path}", flush=True)
-        except OSError as exc:
-            print(f"[UYARI] Ultra-Aggressive kopyalanamadı: {exc}", flush=True)
-
     if not args.promote:
         print(f"\n[TERFİ KAPALI] Elo: {result.elo_diff:+.1f} ({result.status}); {eas_info}; aday: {candidate}", flush=True)
         return False
@@ -2720,8 +2516,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--aggressive-dataset", default=None)
 
-    parser.add_argument("--zst", default=str(DEFAULT_EVAL))
-    parser.add_argument("--puzzles", default=str(DEFAULT_PUZZLES))
+    parser.add_argument("--source", "--sbin", "--zst", dest="source", default=str(DEFAULT_EVAL),
+                        help="Eval SBIN veri kaynağı (varsayılan: training/data/evals.sbin)")
+    parser.add_argument("--puzzles", default=str(DEFAULT_PUZZLES),
+                        help="Feda bulmaca SBIN kaynağı (varsayılan: training/data/puzzle_sacrifices.sbin)")
     parser.add_argument("--target", type=int, default=None)
     parser.add_argument("--base-target", "--base-positions", dest="base_target",
                         type=int, default=500_000)
@@ -2795,9 +2593,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sprt", action="store_true")
     parser.add_argument("--promote", "--auto-filter", dest="promote", action="store_true")
     parser.add_argument("--min-eas-gain", type=int, default=0)
-    parser.add_argument("--save-ultra", action="store_true", default=True,
-                        help="EAS baseline'dan yüksek olduğunda aday ağı engine/nets/aggressive_ultra.nnue olarak da sakla")
-    parser.add_argument("--no-save-ultra", dest="save_ultra", action="store_false")
     parser.add_argument("--pgn", default=None)
     parser.add_argument("--pgnout", default=None)
     parser.add_argument("--json-out", "--json", dest="json_out", default=None)
@@ -2816,7 +2611,8 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.games_aggressive is None:
         args.games_aggressive = args.games
     args.assets = resolve_path(getattr(args, "assets", None), DEFAULT_ASSETS)
-    args.zst = resolve_path(args.zst, DEFAULT_EVAL)
+    args.source = resolve_path(getattr(args, "source", None) or getattr(args, "zst", None), DEFAULT_EVAL)
+    args.zst = args.source
     args.puzzles = resolve_path(args.puzzles, DEFAULT_PUZZLES)
     args.book = resolve_path(args.book, DEFAULT_BOOK)
     args.offset_file = resolve_path(args.offset_file)
@@ -2842,7 +2638,7 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         phase = args.phase if args.phase in ("base", "aggressive") else "base"
         args.output = ROOT / "data" / ("aggressive-prepared.sbin" if args.command == "prepare" else f"{phase}.sbin")
     elif args.command == "datagen" and args.output is None:
-        args.output = ROOT / "data" / "selfplay.parquet"
+        args.output = ROOT / "data" / "selfplay.sbin"
     else:
         args.output = resolve_path(args.output)
     if args.command == "train" and args.output is None:
@@ -2893,10 +2689,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "match":
             result = run_match(args, args.phase)
             eas_report = None
-            if args.promote and args.phase == "aggressive":
-                eas_report = run_eas(_namespace_copy(args, pgn=args.pgnout,
-                                    output=args.pgnout.with_suffix(".eas.txt"),
-                                    json_out=args.pgnout.with_suffix(".eas.json")))
+            if args.phase == "aggressive":
+                pgn_file = args.pgnout if (args.pgnout and Path(args.pgnout).is_file()) else args.pgn
+                if pgn_file and Path(pgn_file).is_file():
+                    eas_report = run_eas(_namespace_copy(
+                        args, pgn=pgn_file,
+                        output=Path(pgn_file).with_suffix(".eas.txt"),
+                        json_out=Path(pgn_file).with_suffix(".eas.json"),
+                    ))
             maybe_promote(args, args.phase, result, args.candidate, args.baseline, eas_report)
             return 0 if not args.sprt or result.is_winner else 1
         if args.command == "eas":

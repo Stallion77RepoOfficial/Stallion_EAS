@@ -340,7 +340,7 @@ inline bool can_castle(const BoardState &position, int from, int rook) noexcept 
   return !attacks_square(position, king_to, color ^ 1, cleared | (1ULL << rook_to));
 }
 
-inline void make_move(BoardState &position, Action move) {
+inline void make_move(BoardState &position, Action move) noexcept {
   if (move == MoveNone) {
     if (position.halfmoves < UINT16_MAX) ++position.halfmoves;
     position.zobrist_key ^= ep_key(position);

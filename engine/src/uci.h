@@ -1,31 +1,30 @@
 #pragma once
-#include <array>
-
-#include "../fathom/src/tbprobe.h"
-#include "search.h"
-
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cinttypes>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <random>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
+
+#include "../fathom/src/tbprobe.h"
+#include "search.h"
 
 inline bool tb_initialized = false;
 
-inline void compute_human_params(ThreadInfo &thread_info) {
-  int elo = thread_info.human_elo;
-  int delta = 3401 - elo;
-  if (delta < 0)
-    delta = 0;
-  if (delta > 3000)
-    delta = 3000;
-  thread_info.human_value_margin = 15 + delta / 30;
-  if (thread_info.human_value_margin > 120)
-    thread_info.human_value_margin = 120;
-  thread_info.human_noise_sigma = delta / 25;
-  if (thread_info.human_noise_sigma > 120)
-    thread_info.human_noise_sigma = 120;
+inline void compute_human_params(ThreadInfo &thread_info) noexcept {
+  const int elo = thread_info.human_elo;
+  const int delta = std::clamp(3401 - elo, 0, 3000);
+  thread_info.human_value_margin = std::min(15 + delta / 30, 120);
+  thread_info.human_noise_sigma = std::min(delta / 25, 120);
   int depth_cap = 0;
   if (elo < 3300) {
     if (elo <= 1300)
@@ -43,34 +42,31 @@ inline void compute_human_params(ThreadInfo &thread_info) {
 }
 
 inline void run_thread(BoardState &position, ThreadInfo &thread_info, std::thread &s) {
-
   thread_data.stop = false;
   s = std::thread(search_position, std::ref(position), std::ref(thread_info),
                   std::ref(TT));
 }
 
 inline uint64_t perft(int depth, BoardState &position, bool first,
-               ThreadInfo &thread_info)
-
-{
+                      ThreadInfo &thread_info) {
   if (depth == 0) return 1;
   uint64_t total_nodes = 0;
-  uint64_t checkers = attacks_square(
+  const uint64_t checkers = attacks_square(
       position, get_king_pos(position, position.color), position.color ^ 1);
 
   if (depth <= 1) {
-    std::array<Action, MaxActions> list;
-    int nmoves = legal_movegen(position, list.data());
+    std::array<Action, MaxActions> list{};
+    const int nmoves = legal_movegen(position, list.data());
     if (first) {
       for (int i = 0; i < nmoves; i++) {
-        std::string move_uci = internal_to_uci(position, list[i]);
+        const std::string move_uci = internal_to_uci(position, list[i]);
         safe_printf("%s: 1\n", move_uci.c_str());
       }
     }
     return nmoves;
   }
 
-  MovePicker picker;
+  MovePicker picker{};
   init_picker(picker, position, -107, checkers,
               &(thread_info.game_hist[thread_info.game_ply]));
 
@@ -85,10 +81,10 @@ inline uint64_t perft(int depth, BoardState &position, bool first,
     BoardState new_position = position;
     make_move(new_position, move);
 
-    uint64_t nodes = perft(depth - 1, new_position, false, thread_info);
+    const uint64_t nodes = perft(depth - 1, new_position, false, thread_info);
 
     if (first) {
-      std::string move_uci = internal_to_uci(position, move);
+      const std::string move_uci = internal_to_uci(position, move);
       safe_printf("%s: %" PRIu64 "\n", move_uci.c_str(), nodes);
     }
     total_nodes += nodes;
@@ -98,7 +94,7 @@ inline uint64_t perft(int depth, BoardState &position, bool first,
 }
 
 inline void bench(BoardState &position, ThreadInfo &thread_info, int depth = 12) {
-  std::vector<std::string> fens = {
+  static const std::array<std::string, 49> fens = {
       "2r2k2/8/4P1R1/1p6/8/P4K1N/7b/2B5 b - - 0 55",
       "2r4r/1p4k1/1Pnp4/3Qb1pq/8/4BpPp/5P2/2RR1BK1 w - - 0 42",
       "6k1/5pp1/8/2bKP2P/2P5/p4PNb/B7/8 b - - 1 44",
@@ -149,7 +145,7 @@ inline void bench(BoardState &position, ThreadInfo &thread_info, int depth = 12)
       "2rr2k1/1p4bp/p1q1p1p1/4Pp1n/2PB4/1PN3P1/P3Q2P/2RR2K1 w - f6 0 20",
       "2r2b2/5p2/5k2/p1r1pP2/P2pB3/1P3P2/K1P3R1/7R w - - 23 93"};
 
-  thread_info.max_time = UINT64_MAX / 2, thread_info.opt_time = UINT64_MAX / 2;
+  thread_info.max_time = thread_info.opt_time = UINT64_MAX / 2;
   thread_info.max_iter_depth = std::clamp(depth, 1, MaxRootDepth);
   thread_info.time_manager.hard_limit = thread_info.max_time;
   thread_info.time_manager.soft_limit = thread_info.opt_time;
@@ -158,9 +154,9 @@ inline void bench(BoardState &position, ThreadInfo &thread_info, int depth = 12)
   thread_data.pondering = false;
   uint64_t total_nodes = 0;
 
-  auto start = std::chrono::steady_clock::now();
+  const auto start = std::chrono::steady_clock::now();
 
-  for (std::string fen : fens) {
+  for (const std::string &fen : fens) {
     new_game(thread_info, TT);
     set_board(position, thread_info, fen);
     thread_info.start_time = std::chrono::steady_clock::now();
@@ -173,7 +169,7 @@ inline void bench(BoardState &position, ThreadInfo &thread_info, int depth = 12)
   }
 
   safe_printf("Bench: %" PRIu64 " nodes %" PRIi64 " nps\n", total_nodes,
-              (int64_t)(total_nodes * 1000 / safe_elapsed(start)));
+              static_cast<int64_t>(total_nodes * 1000 / safe_elapsed(start)));
 }
 
 inline void uci(ThreadInfo &thread_info, BoardState &position,
@@ -530,7 +526,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         }
       };
       auto to_bool = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         return s == "true" || s == "1" || s == "yes" || s == "on";
       };
       auto set_spin = [&](int lo, int hi, int &out) {
@@ -554,7 +550,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       };
 
       auto lowercase = [](std::string value) {
-        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         return value;
       };
       optName = lowercase(optName);
@@ -1189,11 +1185,11 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       thread_info.max_time = thread_info.opt_time = unlimited;
       if (!thread_info.infinite_search) {
         if (move_time >= 0) {
-          const auto overhead = std::min<uint64_t>(thread_info.move_overhead, move_time / 10);
-          thread_info.max_time = thread_info.opt_time = std::max<uint64_t>(1, move_time - overhead);
+          const auto overhead = std::min<uint64_t>(thread_info.move_overhead, static_cast<uint64_t>(move_time / 10));
+          thread_info.max_time = thread_info.opt_time = std::max<uint64_t>(1, static_cast<uint64_t>(move_time) - overhead);
         } else if (time >= 0) {
-          const int overhead = std::min<int>(thread_info.move_overhead, time / 10);
-          const uint64_t usable = std::max(1, time - overhead);
+          const auto overhead = std::min<uint64_t>(thread_info.move_overhead, static_cast<uint64_t>(time / 10));
+          const uint64_t usable = std::max<uint64_t>(1, static_cast<uint64_t>(time) - overhead);
           thread_info.time_manager.initialize(usable, increment, movestogo, position.fullmove);
           thread_info.max_time = thread_info.time_manager.hard_limit;
           thread_info.opt_time = thread_info.time_manager.soft_limit;
@@ -1215,27 +1211,22 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           thread_info.use_opening_book &&
           thread_info.opening_book.is_loaded() &&
           (thread_info.book_depth_limit == 0 ||
-           uint64_t(position.fullmove - 1) * 2 + position.color < static_cast<unsigned>(thread_info.book_depth_limit))) {
+           uint64_t(position.fullmove - 1) * 2 + position.color < static_cast<uint64_t>(thread_info.book_depth_limit))) {
 
-        uint64_t book_key = thread_info.opening_book.polyglot_key(position);
+        const uint64_t book_key = thread_info.opening_book.polyglot_key(position);
         Action book_move = thread_info.opening_book.probe_book(
             position, thread_info.book_min_weight);
 
         if (book_move != MoveNone && thread_info.variety > 0) {
-
-          bool seen = false;
-          for (auto k : thread_info.recent_book_keys)
-            if (k == book_key) {
-              seen = true;
-              break;
-            }
+          const bool seen = std::find(thread_info.recent_book_keys.begin(),
+                                      thread_info.recent_book_keys.end(),
+                                      book_key) != thread_info.recent_book_keys.end();
           if (seen) {
-
-            int v = (int)thread_info.variety;
+            const int v = static_cast<int>(thread_info.variety);
             int skip_chance = (v * v) / 225;
             if (skip_chance > 100)
               skip_chance = 100;
-            thread_local static std::mt19937 rng(Random::rd());
+            static thread_local std::mt19937 rng(Random::rd());
             if ((std::uniform_int_distribution<int>(0, 99)(rng)) <
                 skip_chance) {
               book_move = MoveNone;
@@ -1249,18 +1240,13 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         }
 
         if (book_move != MoveNone) {
-
-          std::array<Action, MaxActions> legal_moves;
-          int num_legal = legal_movegen(position, legal_moves.data());
-          bool is_legal = false;
-          for (int i = 0; i < num_legal; i++) {
-            if (legal_moves[i] == book_move) {
-              is_legal = true;
-              break;
-            }
-          }
+          std::array<Action, MaxActions> legal_moves{};
+          const int num_legal = legal_movegen(position, legal_moves.data());
+          const bool is_legal = std::find(legal_moves.begin(),
+                                          legal_moves.begin() + num_legal,
+                                          book_move) != (legal_moves.begin() + num_legal);
           if (is_legal) {
-            std::string bm = internal_to_uci(position, book_move);
+            const std::string bm = internal_to_uci(position, book_move);
             safe_printf("bestmove %s\n", bm.c_str());
             continue;
           }
@@ -1288,6 +1274,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
       if (searchmoves_specified) {
         thread_info.root_moves.clear();
+        thread_info.root_moves.reserve(searchmoves.size());
         for (Action move : searchmoves) {
           thread_info.root_moves.push_back({move, 0});
         }
@@ -1316,12 +1303,12 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     }
 
     else if (command == "perft") {
-      int perft_depth;
+      int perft_depth = 0;
       if ((input_stream >> perft_depth) && perft_depth >= 0 && perft_depth <= 10) {
-        auto perft_start = std::chrono::steady_clock::now();
-        uint64_t nodes = perft(perft_depth, position, true, thread_info);
-        uint64_t elapsed_ms = time_elapsed(perft_start);
-        uint64_t nps = (elapsed_ms > 0) ? (nodes * 1000 / elapsed_ms) : 0;
+        const auto perft_start = std::chrono::steady_clock::now();
+        const uint64_t nodes = perft(perft_depth, position, true, thread_info);
+        const uint64_t elapsed_ms = time_elapsed(perft_start);
+        const uint64_t nps = (elapsed_ms > 0) ? (nodes * 1000 / elapsed_ms) : 0;
         safe_printf("%" PRIu64 " nodes %" PRIu64 " nps\n", nodes, nps);
       }
     }
@@ -1361,7 +1348,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       {
         std::lock_guard<std::mutex> lg(thread_data.data_mutex);
         for (int i = 0; i < sample_size; i++) {
-          for (auto &entry : TT[i].entries) {
+          for (const auto &entry : TT[i].entries) {
             if (entry.score != 0 || entry.get_type() != EntryTypes::None) {
               filled++;
               break;

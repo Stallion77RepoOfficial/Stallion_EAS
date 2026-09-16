@@ -142,15 +142,6 @@ struct ThreadInfoBase {
   const NNUE_Params *cached_eval_network = nullptr;
   bool infinite_search = false;
 
-  float opening_aggressiveness = 1.50f;
-  float middlegame_aggressiveness = 1.50f;
-  float late_middlegame_aggressiveness = 1.50f;
-  float endgame_aggressiveness = 1.00f;
-
-  int sacrifice_lookahead = 1;
-  int sacrifice_lookahead_time_multiplier = 200;
-  int sacrifice_lookahead_aggressiveness = 150;
-
   bool attack_mode = false;
   int last_root_eval = 0;
   int prev_root_eval = 0;

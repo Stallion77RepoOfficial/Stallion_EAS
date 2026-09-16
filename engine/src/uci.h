@@ -256,19 +256,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
           "option name UCI_Elo type spin default 3401 min 500 max 3401\n"
           "option name UCI_Chess960 type check default false\n"
-          "option name OpeningAggressiveness type spin default 150 min 50 max "
-          "150\n"
-          "option name MiddlegameAggressiveness type spin default 150 min 50 "
-          "max 150\n"
-          "option name LateMiddlegameAggressiveness type spin default 150 min "
-          "50 max 150\n"
-          "option name EndgameAggressiveness type spin default 100 min 50 max "
-          "150\n"
-          "option name SacrificeLookAhead type spin default 1 min 0 max 1\n"
-          "option name SacrificeLookAheadTimeMultiplier type spin default 200 "
-          "min 50 max 200\n"
-          "option name SacrificeLookAheadAggressiveness type spin default 150 "
-          "min 50 max 150\n"
           "option name MaxMoveTime type spin default 0 min 0 max 10000\n"
           "option name MoveOverhead type spin default 30 min 0 max 1000\n"
           "option name Ponder type check default true\n"
@@ -286,106 +273,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           "option name PonderTimeFactor type spin default 200 min 0 max 200\n"
 
           "option name Contempt type spin default -15 min -100 max 100\n"
-          "option name TempoBonus type spin default 16 min 0 max 50\n"
-
-          "option name TropismQueenWeight type spin default 6 min 0 max 15\n"
-          "option name TropismRookWeight type spin default 4 min 0 max 15\n"
-          "option name TropismKnightWeight type spin default 4 min 0 max 15\n"
-          "option name TropismBishopWeight type spin default 3 min 0 max 15\n"
-
-          "option name ThreatPawnAttack type spin default 28 min 0 max 80\n"
-          "option name ThreatMinorOnHeavy type spin default 40 min 0 max 100\n"
-          "option name ThreatRookOnQueen type spin default 35 min 0 max 100\n"
-          "option name ThreatRookOnMinor type spin default 15 min 0 max 60\n"
-          "option name ThreatHanging type spin default 18 min 0 max 60\n"
-
-          "option name KSPawnShield type spin default 20 min 0 max 60\n"
-          "option name KSPawnClose type spin default 15 min 0 max 40\n"
-          "option name KSPawnMed type spin default 10 min 0 max 30\n"
-          "option name KSNoPawn type spin default -30 min -80 max 0\n"
-          "option name KSOpenFile type spin default -25 min -60 max 0\n"
-          "option name KSSafeSqLow type spin default -60 min -120 max 0\n"
-          "option name KSSafeSqMed type spin default -20 min -60 max 0\n"
-          "option name KSCastleBonus type spin default 10 min 0 max 40\n"
-          "option name KSCastledFlank type spin default 30 min 0 max 60\n"
-          "option name KSCentralKingMajor type spin default -50 min -120 max "
-          "0\n"
-          "option name KSCentralKingMinor type spin default -25 min -60 max 0\n"
-          "option name KSAdvancedKing type spin default -40 min -100 max 0\n"
-          "option name KSMovedKingCastle type spin default -60 min -120 max 0\n"
-          "option name KSUncastledKing type spin default -40 min -100 max 0\n"
-
-          "option name KZDangerMultiplier type spin default 5 min 1 max 15\n"
-          "option name KZMultiAttackerBonus type spin default 2 min 0 max 10\n"
-          "option name KZSingleAttackerThreshold type spin default 5 min 1 max "
-          "15\n"
-          "option name KZSingleAttackerPenalty type spin default 3 min 0 max "
-          "10\n"
-          "option name KZNoQueenBonus type spin default 30 min 0 max 80\n"
-
-          "option name EGCenterDist type spin default 10 min 0 max 30\n"
-          "option name EGKingDist type spin default 5 min 0 max 20\n"
-
-          "option name EGMaterialThreshold type spin default 2000 min 500 max "
-          "5000\n"
-          "option name EGMaterialAdvantage type spin default 200 min 50 max "
-          "500\n"
-
-          "option name BishopPairBonus type spin default 50 min 0 max 100\n"
-          "option name RookOpenFile type spin default 20 min 0 max 50\n"
-          "option name RookSemiOpenFile type spin default 10 min 0 max 30\n"
-          "option name PassedPawnBase type spin default 20 min 0 max 60\n"
-          "option name PassedPawnRankMul type spin default 4 min 1 max 10\n"
-          "option name PassedPawnBlocked type spin default -12 min -30 max 0\n"
-          "option name PassedPawnKingProximity type spin default 25 min 0 max "
-          "60\n"
-          "option name PassedPawnKingProximityRank type spin default 5 min 3 "
-          "max 7\n"
-          "option name IsolatedPawnPenalty type spin default -15 min -40 max "
-          "0\n"
-          "option name DoubledPawnPenalty type spin default -10 min -30 max 0\n"
-          "option name OutpostBonus type spin default 35 min 0 max 80\n"
-
-          "option name CenterKnight type spin default 15 min 0 max 40\n"
-          "option name CenterBishop type spin default 12 min 0 max 40\n"
-          "option name CenterPawn type spin default 10 min 0 max 40\n"
-
-          "option name MobilityKnightBase type spin default 4 min 0 max 8\n"
-          "option name MobilityBishopBase type spin default 6 min 0 max 12\n"
-          "option name MobilityBishopMul type spin default 3 min 1 max 8\n"
-          "option name MobilityBishopDiv type spin default 4 min 1 max 8\n"
-          "option name MobilityRookBase type spin default 7 min 0 max 14\n"
-          "option name MobilityRookMul type spin default 2 min 1 max 8\n"
-          "option name MobilityRookDiv type spin default 3 min 1 max 8\n"
-          "option name MobilityQueenBase type spin default 14 min 0 max 28\n"
-          "option name MobilityQueenDiv type spin default 3 min 1 max 8\n"
-          "option name MobilityEarlyQueenBonus type spin default 8 min 0 max "
-          "20\n"
-
-          "option name UndevelopedPenalty type spin default 5 min 0 max 20\n"
-
-          "option name EvalMultBase type spin default 800 min 400 max 1200\n"
-          "option name EvalMultMatDiv type spin default 24 min 8 max 64\n"
-          "option name EvalMultNorm type spin default 1024 min 512 max 2048\n"
-          "option name EvalWinningMul type spin default 120 min 100 max 200\n"
-          "option name EvalWinningMatThreshold type spin default 4000 min 2000 "
-          "max 8000\n"
-          "option name EvalSlightWinMul type spin default 110 min 100 max 150\n"
-          "option name EvalSlightWinMatThreshold type spin default 2500 min "
-          "1000 max 5000\n"
-          "option name EvalLosingMul type spin default 90 min 50 max 100\n"
-          "option name EvalLosingThreshold type spin default -150 min -500 max "
-          "0\n"
-          "option name EvalSlightLoseMul type spin default 95 min 50 max 100\n"
-          "option name EvalSlightLoseThreshold type spin default -50 min -200 "
-          "max 0\n"
-
-          "option name SacPatternBonus type spin default 55 min 0 max 150\n"
-          "option name SacKingFileBonus type spin default 25 min 0 max 80\n"
-          "option name SacMultiBonus type spin default 40 min 0 max 100\n"
-          "option name SacMaterialThreshold type spin default 3000 min 1000 "
-          "max 6000\n"
-
           "option name DrawContemptMaterial type spin default 60 min 0 max "
           "200\n"
           "option name RazorMargin type spin default 140 min 100 max 500\n"
@@ -424,7 +311,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           "5500\n"
           "option name OpeningMinPly type spin default 20 min 0 max 60\n"
 
-          "option name SpaceWeight type spin default 7 min 0 max 20\n"
           "option name DeltaMarginBase type spin default 180 min 50 max 400\n"
 
           "option name MaterialBasisPawn type spin default 210 min 100 max "
@@ -438,13 +324,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           "option name MaterialBasisQueen type spin default 2600 min 1500 max "
           "4000\n"
 
-          "option name PawnStorm1 type spin default 110 min 0 max 200\n"
-          "option name PawnStorm2 type spin default 75 min 0 max 150\n"
-          "option name PawnStorm3 type spin default 40 min 0 max 100\n"
-          "option name PawnStorm4 type spin default 15 min 0 max 60\n"
-
-          "option name KZBishopXray type spin default 1 min 0 max 5\n"
-          "option name KZRookXray type spin default 2 min 0 max 8\n"
 
           "option name NormalizationFactor type spin default 195 min 50 max "
           "500\n"
@@ -541,13 +420,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         out = std::clamp(v, lo, hi);
         return true;
       };
-      auto set_aggressiveness = [&](float &out) -> bool {
-        bool ok = false;
-        int v = parse_int(valueStr, ok);
-        if (!ok) return false;
-        out = std::clamp(v, 50, 150) / 100.0f;
-        return true;
-      };
 
       auto lowercase = [](std::string value) {
         std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -624,20 +496,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       } else if (optName == "uci_elo") {
         if (!set_spin_req(500, 3401, thread_info.human_elo)) continue;
         if (thread_info.is_human) compute_human_params(thread_info);
-      } else if (optName == "openingaggressiveness") {
-        if (!set_aggressiveness(thread_info.opening_aggressiveness)) continue;
-      } else if (optName == "middlegameaggressiveness") {
-        if (!set_aggressiveness(thread_info.middlegame_aggressiveness)) continue;
-      } else if (optName == "latemiddlegameaggressiveness") {
-        if (!set_aggressiveness(thread_info.late_middlegame_aggressiveness)) continue;
-      } else if (optName == "endgameaggressiveness") {
-        if (!set_aggressiveness(thread_info.endgame_aggressiveness)) continue;
-      } else if (optName == "sacrificelookahead") {
-        if (!set_spin_req(0, 1, thread_info.sacrifice_lookahead)) continue;
-      } else if (optName == "sacrificelookaheadtimemultiplier") {
-        if (!set_spin_req(50, 200, thread_info.sacrifice_lookahead_time_multiplier)) continue;
-      } else if (optName == "sacrificelookaheadaggressiveness") {
-        if (!set_spin_req(50, 150, thread_info.sacrifice_lookahead_aggressiveness)) continue;
       } else if (optName == "maxmovetime") {
         int v;
         if (!set_spin_req(0, 10000, v)) continue;
@@ -688,155 +546,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         if (!set_spin_req(0, 200, thread_info.ponder_time_factor)) continue;
       } else if (optName == "contempt")
         set_spin(-100, 100, Contempt);
-      else if (optName == "tempobonus")
-        set_spin(0, 50, TempoBonus);
-      else if (optName == "tropismqueenweight")
-        set_spin(0, 15, TropismQueenWeight);
-      else if (optName == "tropismrookweight")
-        set_spin(0, 15, TropismRookWeight);
-      else if (optName == "tropismknightweight")
-        set_spin(0, 15, TropismKnightWeight);
-      else if (optName == "tropismbishopweight")
-        set_spin(0, 15, TropismBishopWeight);
-      else if (optName == "threatpawnattack")
-        set_spin(0, 80, ThreatPawnAttack);
-      else if (optName == "threatminoronheavy")
-        set_spin(0, 100, ThreatMinorOnHeavy);
-      else if (optName == "threatrookonqueen")
-        set_spin(0, 100, ThreatRookOnQueen);
-      else if (optName == "threatrookonminor")
-        set_spin(0, 60, ThreatRookOnMinor);
-      else if (optName == "threathanging")
-        set_spin(0, 60, ThreatHanging);
-
-      else if (optName == "kspawnshield")
-        set_spin(0, 60, KSPawnShield);
-      else if (optName == "kspawnclose")
-        set_spin(0, 40, KSPawnClose);
-      else if (optName == "kspawnmed")
-        set_spin(0, 30, KSPawnMed);
-      else if (optName == "ksnopawn")
-        set_spin(-80, 0, KSNoPawn);
-      else if (optName == "ksopenfile")
-        set_spin(-60, 0, KSOpenFile);
-      else if (optName == "kssafesqlow")
-        set_spin(-120, 0, KSSafeSqLow);
-      else if (optName == "kssafesqmed")
-        set_spin(-60, 0, KSSafeSqMed);
-      else if (optName == "kscastlebonus")
-        set_spin(0, 40, KSCastleBonus);
-      else if (optName == "kscastledflank")
-        set_spin(0, 60, KSCastledFlank);
-      else if (optName == "kscentralkingmajor")
-        set_spin(-120, 0, KSCentralKingMajor);
-      else if (optName == "kscentralkingminor")
-        set_spin(-60, 0, KSCentralKingMinor);
-      else if (optName == "ksadvancedking")
-        set_spin(-100, 0, KSAdvancedKing);
-      else if (optName == "ksmovedkingcastle")
-        set_spin(-120, 0, KSMovedKingCastle);
-      else if (optName == "ksuncastledking")
-        set_spin(-100, 0, KSUncastledKing);
-      else if (optName == "kzdangermultiplier")
-        set_spin(1, 15, KZDangerMultiplier);
-      else if (optName == "kzmultiattackerbonus")
-        set_spin(0, 10, KZMultiAttackerBonus);
-      else if (optName == "kzsingleattackerthreshold")
-        set_spin(1, 15, KZSingleAttackerThreshold);
-      else if (optName == "kzsingleattackerpenalty")
-        set_spin(0, 10, KZSingleAttackerPenalty);
-      else if (optName == "kznoqueenbonus")
-        set_spin(0, 80, KZNoQueenBonus);
-
-      else if (optName == "egcenterdist")
-        set_spin(0, 30, EGCenterDist);
-      else if (optName == "egkingdist")
-        set_spin(0, 20, EGKingDist);
-      else if (optName == "egmaterialthreshold")
-        set_spin(500, 5000, EGMaterialThreshold);
-      else if (optName == "egmaterialadvantage")
-        set_spin(50, 500, EGMaterialAdvantage);
-      else if (optName == "bishoppairbonus")
-        set_spin(0, 100, BishopPairBonus);
-      else if (optName == "rookopenfile")
-        set_spin(0, 50, RookOpenFile);
-      else if (optName == "rooksemiopenfile")
-        set_spin(0, 30, RookSemiOpenFile);
-      else if (optName == "passedpawnbase")
-        set_spin(0, 60, PassedPawnBase);
-      else if (optName == "passedpawnrankmul")
-        set_spin(1, 10, PassedPawnRankMul);
-      else if (optName == "passedpawnblocked")
-        set_spin(-30, 0, PassedPawnBlocked);
-      else if (optName == "passedpawnkingproximity")
-        set_spin(0, 60, PassedPawnKingProximity);
-      else if (optName == "passedpawnkingproximityrank")
-        set_spin(3, 7, PassedPawnKingProximityRank);
-      else if (optName == "isolatedpawnpenalty")
-        set_spin(-40, 0, IsolatedPawnPenalty);
-      else if (optName == "doubledpawnpenalty")
-        set_spin(-30, 0, DoubledPawnPenalty);
-      else if (optName == "outpostbonus")
-        set_spin(0, 80, OutpostBonus);
-      else if (optName == "centerknight")
-        set_spin(0, 40, CenterKnight);
-      else if (optName == "centerbishop")
-        set_spin(0, 40, CenterBishop);
-      else if (optName == "centerpawn")
-        set_spin(0, 40, CenterPawn);
-      else if (optName == "mobilityknightbase")
-        set_spin(0, 8, MobilityKnightBase);
-      else if (optName == "mobilitybishopbase")
-        set_spin(0, 12, MobilityBishopBase);
-      else if (optName == "mobilitybishopmul")
-        set_spin(1, 8, MobilityBishopMul);
-      else if (optName == "mobilitybishopdiv")
-        set_spin(1, 8, MobilityBishopDiv);
-      else if (optName == "mobilityrookbase")
-        set_spin(0, 14, MobilityRookBase);
-      else if (optName == "mobilityrookmul")
-        set_spin(1, 8, MobilityRookMul);
-      else if (optName == "mobilityrookdiv")
-        set_spin(1, 8, MobilityRookDiv);
-      else if (optName == "mobilityqueenbase")
-        set_spin(0, 28, MobilityQueenBase);
-      else if (optName == "mobilityqueendiv")
-        set_spin(1, 8, MobilityQueenDiv);
-      else if (optName == "mobilityearlyqueenbonus")
-        set_spin(0, 20, MobilityEarlyQueenBonus);
-      else if (optName == "undevelopedpenalty")
-        set_spin(0, 20, UndevelopedPenalty);
-
-      else if (optName == "evalmultbase")
-        set_spin(400, 1200, EvalMultBase);
-      else if (optName == "evalmultmatdiv")
-        set_spin(8, 64, EvalMultMatDiv);
-      else if (optName == "evalmultnorm")
-        set_spin(512, 2048, EvalMultNorm);
-      else if (optName == "evalwinningmul")
-        set_spin(100, 200, EvalWinningMul);
-      else if (optName == "evalwinningmatthreshold")
-        set_spin(2000, 8000, EvalWinningMatThreshold);
-      else if (optName == "evalslightwinmul")
-        set_spin(100, 150, EvalSlightWinMul);
-      else if (optName == "evalslightwinmatthreshold")
-        set_spin(1000, 5000, EvalSlightWinMatThreshold);
-      else if (optName == "evallosingmul")
-        set_spin(50, 100, EvalLosingMul);
-      else if (optName == "evallosingthreshold")
-        set_spin(-500, 0, EvalLosingThreshold);
-      else if (optName == "evalslightlosemul")
-        set_spin(50, 100, EvalSlightLoseMul);
-      else if (optName == "evalslightlosethreshold")
-        set_spin(-200, 0, EvalSlightLoseThreshold);
-      else if (optName == "sacpatternbonus")
-        set_spin(0, 150, SacPatternBonus);
-      else if (optName == "sackingfilebonus")
-        set_spin(0, 80, SacKingFileBonus);
-      else if (optName == "sacmultibonus")
-        set_spin(0, 100, SacMultiBonus);
-      else if (optName == "sacmaterialthreshold")
-        set_spin(1000, 6000, SacMaterialThreshold);
       else if (optName == "drawcontemptmaterial")
         set_spin(0, 200, DrawContemptMaterial);
       else if (optName == "histextthreshold")
@@ -873,8 +582,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         set_spin(1500, 5500, EndRecoverMaterial);
       else if (optName == "openingminply")
         set_spin(0, 60, OpeningMinPly);
-      else if (optName == "spaceweight")
-        set_spin(0, 20, SpaceWeight);
       else if (optName == "deltamarginbase")
         set_spin(50, 400, DELTA_MARGIN_BASE);
       else if (optName == "materialbasispawn")
@@ -887,18 +594,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         set_spin(800, 2000, MaterialBasis[4]);
       else if (optName == "materialbasisqueen")
         set_spin(1500, 4000, MaterialBasis[5]);
-      else if (optName == "pawnstorm1")
-        set_spin(0, 200, PawnStormConfig[0]);
-      else if (optName == "pawnstorm2")
-        set_spin(0, 150, PawnStormConfig[1]);
-      else if (optName == "pawnstorm3")
-        set_spin(0, 100, PawnStormConfig[2]);
-      else if (optName == "pawnstorm4")
-        set_spin(0, 60, PawnStormConfig[3]);
-      else if (optName == "kzbishopxray")
-        set_spin(0, 5, KZBishopXray);
-      else if (optName == "kzrookxray")
-        set_spin(0, 8, KZRookXray);
       else if (optName == "normalizationfactor")
         set_spin(50, 500, NormalizationFactor);
       else if (optName == "halfmovescalemax")

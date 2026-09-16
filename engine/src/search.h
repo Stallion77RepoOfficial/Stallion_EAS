@@ -2,7 +2,6 @@
 #include "movepick.h"
 #include "params.h"
 #include "position.h"
-#include "pst.h"
 
 #include "../fathom/src/tbprobe.h"
 #include "utils.h"

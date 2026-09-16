@@ -1,13 +1,19 @@
 
 #include "search.h"
 #include "uci.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
+
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #elif defined(_WIN32)
@@ -17,6 +23,7 @@
 namespace {
 
 std::vector<std::string_view> collect_args(int argc, char* argv[]) {
+    if (argc <= 0 || argv == nullptr) return {};
     return std::vector<std::string_view>(argv, argv + argc);
 }
 
@@ -27,10 +34,16 @@ std::optional<int> handle_cli_mode(const std::vector<std::string_view>& args,
         return std::nullopt;
     }
 
+    size_t total_len = 0;
+    for (size_t i = 1; i < args.size(); ++i) {
+        total_len += args[i].size() + 1;
+    }
+
     std::string cmdline;
+    cmdline.reserve(total_len);
     for (size_t i = 1; i < args.size(); ++i) {
         if (i > 1) cmdline += ' ';
-        cmdline += std::string(args[i]);
+        cmdline.append(args[i]);
     }
 
     std::istringstream cli_stream(cmdline);
@@ -38,7 +51,7 @@ std::optional<int> handle_cli_mode(const std::vector<std::string_view>& args,
     return 0;
 }
 
-}
+} // namespace
 
 int main(int argc, char* argv[]) {
     std::error_code ec;
@@ -55,9 +68,11 @@ int main(int argc, char* argv[]) {
 #else
     executable = std::filesystem::read_symlink("/proc/self/exe", ec);
 #endif
-    if (executable.empty()) executable = std::filesystem::absolute(argv[0], ec);
+    if (executable.empty() && argc > 0 && argv != nullptr && argv[0] != nullptr) {
+        executable = std::filesystem::absolute(argv[0], ec);
+    }
     engine_directory = std::filesystem::weakly_canonical(executable, ec).parent_path();
-    BoardState position;
+    BoardState position{};
     auto thread_info = std::make_unique<ThreadInfo>();
     init_LMR();
     ensure_bbs_initialized();

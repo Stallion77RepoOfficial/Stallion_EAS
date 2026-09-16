@@ -3,7 +3,7 @@
 
 namespace PST {
 
-constexpr int16_t Pawn[64] = {
+alignas(64) constexpr int16_t Pawn[64] = {
     0,   0,   0,   0,   0,   0,   0,   0,
     60,  60,  60,  60,  60,  60,  60,  60,
     15,  15,  25,  35,  35,  25,  15,  15,
@@ -13,7 +13,7 @@ constexpr int16_t Pawn[64] = {
     5,  10,  10, -25, -25,  10,  10,   5,
     0,   0,   0,   0,   0,   0,   0,   0};
 
-constexpr int16_t Knight[64] = {
+alignas(64) constexpr int16_t Knight[64] = {
     -50, -40, -30, -30, -30, -30, -40, -50,
     -40, -15,   5,   5,   5,   5, -15, -40,
     -30,   5,  15,  20,  20,  15,   5, -30,
@@ -23,7 +23,7 @@ constexpr int16_t Knight[64] = {
     -40, -15,   5,  10,  10,   5, -15, -40,
     -50, -40, -30, -30, -30, -30, -40, -50};
 
-constexpr int16_t Bishop[64] = {
+alignas(64) constexpr int16_t Bishop[64] = {
     -20, -10, -10, -10, -10, -10, -10, -20,
     -10,   5,   0,   0,   0,   0,   5, -10,
     -10,  10,  10,  12,  12,  10,  10, -10,
@@ -33,7 +33,7 @@ constexpr int16_t Bishop[64] = {
     -10,   8,   0,   0,   0,   0,   8, -10,
     -20, -10, -15, -10, -10, -15, -10, -20};
 
-constexpr int16_t Rook[64] = {
+alignas(64) constexpr int16_t Rook[64] = {
      5,   5,   5,   5,   5,   5,   5,   5,
     10,  15,  15,  15,  15,  15,  15,  10,
     -5,   0,   0,   0,   0,   0,   0,  -5,
@@ -43,7 +43,7 @@ constexpr int16_t Rook[64] = {
     -5,   0,   0,   0,   0,   0,   0,  -5,
      0,   0,   0,   8,   8,   0,   0,   0};
 
-constexpr int16_t Queen[64] = {
+alignas(64) constexpr int16_t Queen[64] = {
     -20, -10, -10,  -5,  -5, -10, -10, -20,
     -10,   0,   5,   0,   0,   5,   0, -10,
     -10,   5,   8,   8,   8,   8,   5, -10,
@@ -53,7 +53,7 @@ constexpr int16_t Queen[64] = {
     -10,   0,   5,   0,   0,   0,   0, -10,
     -20, -10, -10,  -5,  -5, -10, -10, -20};
 
-constexpr int16_t KingMG[64] = {
+alignas(64) constexpr int16_t KingMG[64] = {
     -40, -50, -50, -60, -60, -50, -50, -40,
     -35, -45, -45, -55, -55, -45, -45, -35,
     -35, -45, -45, -55, -55, -45, -45, -35,
@@ -63,7 +63,7 @@ constexpr int16_t KingMG[64] = {
      25,  25,   0,  -5,  -5,   0,  25,  25,
      25,  35,  15,   0,   0,  15,  35,  25};
 
-constexpr int16_t KingEG[64] = {
+alignas(64) constexpr int16_t KingEG[64] = {
     -50, -40, -30, -20, -20, -30, -40, -50,
     -30, -15,  -5,   0,   0,  -5, -15, -30,
     -30,  -5,  25,  35,  35,  25,  -5, -30,
@@ -75,4 +75,4 @@ constexpr int16_t KingEG[64] = {
 
 constexpr inline int mirror_square(int sq) noexcept { return sq ^ 56; }
 
-}
+} // namespace PST

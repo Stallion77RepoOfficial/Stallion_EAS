@@ -1,9 +1,10 @@
 #pragma once
 #include "defs.h"
 #include "position.h"
+#include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstdint>
-#include <cstdio>
 
 namespace Generate {
 constexpr uint8_t GenQuiets = 0;
@@ -18,20 +19,20 @@ constexpr int BadCaptureBaseScore = -2000000;
 constexpr int KillerMoveScore = 100000;
 
 inline void pawn_moves(const Position &position, uint64_t check_filter,
-                       Move *move_list, int &key, int gen_type) {
+                       Move *move_list, int &key, int gen_type) noexcept {
 
-  uint8_t color = position.color;
-  uint64_t third_rank = color ? Ranks[5] : Ranks[2];
-  uint64_t seventh_rank = color ? Ranks[1] : Ranks[6];
-  int8_t dir = color ? Directions::South : Directions::North;
-  int8_t left = color ? Directions::Southwest : Directions::Northwest;
-  int8_t right = color ? Directions::Southeast : Directions::Northeast;
+  const uint8_t color = position.color;
+  const uint64_t third_rank = color ? Ranks[5] : Ranks[2];
+  const uint64_t seventh_rank = color ? Ranks[1] : Ranks[6];
+  const int8_t dir = color ? Directions::South : Directions::North;
+  const int8_t left = color ? Directions::Southwest : Directions::Northwest;
+  const int8_t right = color ? Directions::Southeast : Directions::Northeast;
 
-  uint64_t empty_squares = ~(position.colors_bb[0] | position.colors_bb[1]);
-  uint64_t our_promos = position.pieces_bb[PieceTypes::Pawn] &
-                        position.colors_bb[color] & seventh_rank;
-  uint64_t our_non_promos = position.pieces_bb[PieceTypes::Pawn] &
-                            position.colors_bb[color] & (~seventh_rank);
+  const uint64_t empty_squares = ~(position.colors_bb[0] | position.colors_bb[1]);
+  const uint64_t our_promos = position.pieces_bb[PieceTypes::Pawn] &
+                              position.colors_bb[color] & seventh_rank;
+  const uint64_t our_non_promos = position.pieces_bb[PieceTypes::Pawn] &
+                                  position.colors_bb[color] & (~seventh_rank);
 
   if (gen_type != Generate::GenCaptures) {
     uint64_t move_1 = shift_pawns(our_non_promos, dir) & empty_squares;
@@ -40,13 +41,13 @@ inline void pawn_moves(const Position &position, uint64_t check_filter,
     move_1 &= check_filter;
 
     while (move_1) {
-      int to = pop_lsb(move_1);
+      const int to = pop_lsb(move_1);
       if (key < ListSize) {
-        move_list[key++] = pack_move(to - (dir), to, MoveTypes::Normal);
+        move_list[key++] = pack_move(to - dir, to, MoveTypes::Normal);
       }
     }
     while (move_2) {
-      int to = pop_lsb(move_2);
+      const int to = pop_lsb(move_2);
       if (key < ListSize) {
         move_list[key++] = pack_move(to - (2 * dir), to, MoveTypes::Normal);
       }
@@ -60,23 +61,23 @@ inline void pawn_moves(const Position &position, uint64_t check_filter,
                          position.colors_bb[color ^ 1] & check_filter;
 
     while (cap_left) {
-      int to = pop_lsb(cap_left);
+      const int to = pop_lsb(cap_left);
       if (key < ListSize) {
-        move_list[key++] = pack_move(to - (left), to, MoveTypes::Normal);
+        move_list[key++] = pack_move(to - left, to, MoveTypes::Normal);
       }
     }
     while (cap_right) {
-      int to = pop_lsb(cap_right);
+      const int to = pop_lsb(cap_right);
       if (key < ListSize) {
-        move_list[key++] = pack_move(to - (right), to, MoveTypes::Normal);
+        move_list[key++] = pack_move(to - right, to, MoveTypes::Normal);
       }
     }
 
     if (position.ep_square != SquareNone) {
-      uint64_t ep_targets = PAWN_ATK_SAFE(color ^ 1, position.ep_square);
+      const uint64_t ep_targets = PAWN_ATK_SAFE(color ^ 1, position.ep_square);
       uint64_t ep_captures = our_non_promos & ep_targets;
       while (ep_captures) {
-        int from = pop_lsb(ep_captures);
+        const int from = pop_lsb(ep_captures);
         if (key < ListSize) {
           move_list[key++] =
               pack_move(from, position.ep_square, MoveTypes::EnPassant);
@@ -85,49 +86,49 @@ inline void pawn_moves(const Position &position, uint64_t check_filter,
     }
   }
 
-  uint64_t move_promo =
+  const uint64_t move_promo =
       shift_pawns(our_promos, dir) & empty_squares & check_filter;
   uint64_t cap_left_promo = shift_pawns(our_promos & ~Files[0], left) &
                             position.colors_bb[color ^ 1] & check_filter;
   uint64_t cap_right_promo = shift_pawns(our_promos & ~Files[7], right) &
                              position.colors_bb[color ^ 1] & check_filter;
 
-  auto safe_push = [&](Move m) {
+  auto safe_push = [&](Move m) noexcept {
     if (move_list && key >= 0 && key < ListSize)
       move_list[key++] = m;
   };
 
-  while (move_promo && gen_type != Generate::GenQuiets) {
-    int to = pop_lsb(move_promo);
-
-    for (int i = 0; i < 4; i++) {
-      safe_push(pack_move_promo(to - (dir), to, i));
-    }
-  }
-
   if (gen_type != Generate::GenQuiets) {
-    while (cap_left_promo) {
-      int to = pop_lsb(cap_left_promo);
+    uint64_t promo_pushes = move_promo;
+    while (promo_pushes) {
+      const int to = pop_lsb(promo_pushes);
       for (int i = 0; i < 4; i++) {
-        safe_push(pack_move_promo(to - (left), to, i));
+        safe_push(pack_move_promo(to - dir, to, i));
+      }
+    }
+    while (cap_left_promo) {
+      const int to = pop_lsb(cap_left_promo);
+      for (int i = 0; i < 4; i++) {
+        safe_push(pack_move_promo(to - left, to, i));
       }
     }
     while (cap_right_promo) {
-      int to = pop_lsb(cap_right_promo);
+      const int to = pop_lsb(cap_right_promo);
       for (int i = 0; i < 4; i++) {
-        safe_push(pack_move_promo(to - (right), to, i));
+        safe_push(pack_move_promo(to - right, to, i));
       }
     }
   }
 }
 
 inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
-            int gen_type) {
+                   int gen_type) noexcept {
 
-  uint8_t color = position.color, king_pos = get_king_pos(position, color);
+  const uint8_t color = position.color;
+  const int king_pos = get_king_pos(position, color);
   int idx = 0;
-  uint64_t stm_pieces = position.colors_bb[color],
-           opp_pieces = position.colors_bb[color ^ 1];
+  const uint64_t stm_pieces = position.colors_bb[color];
+  const uint64_t opp_pieces = position.colors_bb[color ^ 1];
 
   uint64_t targets = 0;
   if (gen_type != Generate::GenCaptures) {
@@ -138,19 +139,17 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
   }
   targets &= ~stm_pieces;
 
-  uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
+  const uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
   uint64_t check_filter = ~0ULL;
 
-  int king_sq = static_cast<int>(king_pos);
-  if (!is_valid_square(king_sq)) {
+  if (!is_valid_square(king_pos)) {
     return idx;
   }
-  uint64_t king_attacks = KING_ATK_SAFE(king_sq) & targets;
+  uint64_t king_attacks = KING_ATK_SAFE(king_pos) & targets;
   while (king_attacks) {
     const int to = pop_lsb(king_attacks);
     if (move_list && idx < ListSize)
-      move_list[idx++] =
-          pack_move(king_pos, to, MoveTypes::Normal);
+      move_list[idx++] = pack_move(king_pos, to, MoveTypes::Normal);
   }
 
   if (checkers) {
@@ -158,18 +157,18 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
       return idx;
     }
 
-    int checker_sq = get_lsb(checkers);
+    const int checker_sq = get_lsb(checkers);
     if (!is_valid_square(checker_sq)) {
       return idx;
     }
-    check_filter = BetweenBBs[king_sq][checker_sq];
+    check_filter = BetweenBBs[king_pos][checker_sq];
   }
 
   pawn_moves(position, check_filter, move_list, idx, gen_type);
 
   uint64_t knights = position.pieces_bb[PieceTypes::Knight] & stm_pieces;
   while (knights) {
-    int from = pop_lsb(knights);
+    const int from = pop_lsb(knights);
     uint64_t to = KNIGHT_ATK_SAFE(from) & targets & check_filter;
     while (to) {
       if (move_list && idx < ListSize)
@@ -183,7 +182,7 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
                         position.pieces_bb[PieceTypes::Queen]) &
                        stm_pieces;
   while (diagonals) {
-    int from = pop_lsb(diagonals);
+    const int from = pop_lsb(diagonals);
     uint64_t to = get_bishop_attacks(from, occ) & targets & check_filter;
     while (to) {
       if (move_list && idx < ListSize)
@@ -197,7 +196,7 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
                           position.pieces_bb[PieceTypes::Queen]) &
                          stm_pieces;
   while (orthogonals) {
-    int from = pop_lsb(orthogonals);
+    const int from = pop_lsb(orthogonals);
     uint64_t to = get_rook_attacks(from, occ) & targets & check_filter;
     while (to) {
       if (move_list && idx < ListSize)
@@ -212,7 +211,7 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
   }
 
   for (int side : {Sides::Queenside, Sides::Kingside}) {
-    int castling_sq = position.castling_squares[color][side];
+    const int castling_sq = position.castling_squares[color][side];
     if (castling_sq == SquareNone || !is_valid_square(castling_sq)) {
       continue;
     }
@@ -225,10 +224,10 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
 }
 
 inline int legal_movegen(const Position &position, Move *move_list) {
-  uint64_t checkers = attacks_square(
+  const uint64_t checkers = attacks_square(
       position, get_king_pos(position, position.color), position.color ^ 1);
   std::array<Move, ListSize> pseudo_list;
-  int pseudo_nmoves =
+  const int pseudo_nmoves =
       movegen(position, pseudo_list.data(), checkers, Generate::GenAll);
 
   int legal_nmoves = 0;
@@ -240,9 +239,10 @@ inline int legal_movegen(const Position &position, Move *move_list) {
   return legal_nmoves;
 }
 
-inline bool SEE(const Position &position, Move move, int threshold) {
+inline bool SEE(const Position &position, Move move, int threshold) noexcept {
 
-  int stm = position.color, from = extract_from(move), to = extract_to(move);
+  int stm = position.color;
+  const int from = extract_from(move), to = extract_to(move);
 
   if (!is_valid_square(from) || !is_valid_square(to))
     return false;
@@ -250,8 +250,8 @@ inline bool SEE(const Position &position, Move move, int threshold) {
   if (position.board[from] == Pieces::Blank)
     return false;
 
-  int from_piece = position.board[from];
-  int from_color = get_color(from_piece);
+  const int from_piece = position.board[from];
+  const int from_color = get_color(from_piece);
   if (from_color != position.color)
     return false;
 
@@ -270,16 +270,16 @@ inline bool SEE(const Position &position, Move move, int threshold) {
     return true;
   }
 
-  uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
-                     position.pieces_bb[PieceTypes::Queen];
-  uint64_t rooks = position.pieces_bb[PieceTypes::Rook] |
-                   position.pieces_bb[PieceTypes::Queen];
+  const uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
+                           position.pieces_bb[PieceTypes::Queen];
+  const uint64_t rooks = position.pieces_bb[PieceTypes::Rook] |
+                         position.pieces_bb[PieceTypes::Queen];
 
   uint64_t occ =
-      (position.colors_bb[Colors::White] | position.colors_bb[Colors::Black]) -
-      (1ull << from);
+      (position.colors_bb[Colors::White] | position.colors_bb[Colors::Black]) ^
+      (1ULL << from);
 
-  if (en_passant) occ &= ~(1ULL << (to + (position.color ? 8 : -8)));
+  if (en_passant) occ &= ~(1ULL << (to + (position.color ? Directions::North : Directions::South)));
   uint64_t all_attackers = attacks_square(position, to, occ);
 
   while (true) {
@@ -287,7 +287,7 @@ inline bool SEE(const Position &position, Move move, int threshold) {
 
     all_attackers &= occ;
 
-    uint64_t stm_attackers = all_attackers & position.colors_bb[stm];
+    const uint64_t stm_attackers = all_attackers & position.colors_bb[stm];
 
     if (!stm_attackers) {
       return stm != position.color;
@@ -296,14 +296,13 @@ inline bool SEE(const Position &position, Move move, int threshold) {
     int attackerType = PieceTypes::PieceNone;
 
     for (int pt = PieceTypes::Pawn; pt <= PieceTypes::King; pt++) {
-      uint64_t match = stm_attackers & position.pieces_bb[pt];
+      const uint64_t match = stm_attackers & position.pieces_bb[pt];
       if (match) {
-
-        int attacker_sq = get_lsb(match);
+        const int attacker_sq = get_lsb(match);
         if (!is_valid_square(attacker_sq))
           return false;
 
-        occ -= get_lsb_bb(match);
+        occ ^= (1ULL << attacker_sq);
         attackerType = pt;
         break;
       }
@@ -332,13 +331,11 @@ inline bool SEE(const Position &position, Move move, int threshold) {
   }
 }
 
-void make_move(Position &position, Move move);
-
-inline int evaluate_promotion_tactics(const Position &position, Move move) {
-  int from = extract_from(move);
-  int to = extract_to(move);
-  int promo_type = extract_promo(move);
-  int color = position.color;
+inline int evaluate_promotion_tactics(const Position &position, Move move) noexcept {
+  const int from = extract_from(move);
+  const int to = extract_to(move);
+  const int promo_type = extract_promo(move);
+  const int color = position.color;
   int bonus = 0;
 
   if (!is_valid_square(from) || !is_valid_square(to)) {
@@ -349,7 +346,7 @@ inline int evaluate_promotion_tactics(const Position &position, Move move) {
   make_move(temp_pos, move);
 
   if (promo_type == Promos::Knight) {
-    uint64_t knight_attacks = KNIGHT_ATK_SAFE(to);
+    const uint64_t knight_attacks = KNIGHT_ATK_SAFE(to);
 
     int fork_targets = 0;
     uint64_t valuable_pieces = (temp_pos.pieces_bb[PieceTypes::Queen] |
@@ -358,7 +355,7 @@ inline int evaluate_promotion_tactics(const Position &position, Move move) {
                                temp_pos.colors_bb[color ^ 1];
 
     while (valuable_pieces) {
-      int piece_sq = pop_lsb(valuable_pieces);
+      const int piece_sq = pop_lsb(valuable_pieces);
       if (knight_attacks & (1ULL << piece_sq)) {
         fork_targets++;
       }
@@ -378,10 +375,10 @@ inline int evaluate_promotion_tactics(const Position &position, Move move) {
   }
 
   if (promo_type == Promos::Bishop) {
-    uint64_t bishop_attacks =
+    const uint64_t bishop_attacks =
         get_bishop_attacks(to, temp_pos.colors_bb[0] | temp_pos.colors_bb[1]);
 
-    uint64_t central_diagonals = 0x8040201008040201ULL | 0x0102040810204080ULL;
+    static constexpr uint64_t central_diagonals = 0x8040201008040201ULL | 0x0102040810204080ULL;
     if (bishop_attacks & central_diagonals) {
       bonus += 40;
     }
@@ -391,14 +388,14 @@ inline int evaluate_promotion_tactics(const Position &position, Move move) {
       bonus += 30;
     }
 
-    uint64_t targets = bishop_attacks & temp_pos.colors_bb[color ^ 1];
+    const uint64_t targets = bishop_attacks & temp_pos.colors_bb[color ^ 1];
     if (pop_count(targets) > 1) {
       bonus += 35;
     }
   }
 
   if (promo_type != Promos::Queen) {
-    int king_pos = get_king_pos(temp_pos, color ^ 1);
+    const int king_pos = get_king_pos(temp_pos, color ^ 1);
     if (attacks_square(temp_pos, king_pos, color)) {
       bonus += 40;
     }
@@ -407,8 +404,7 @@ inline int evaluate_promotion_tactics(const Position &position, Move move) {
   return bonus;
 }
 
-inline Move get_next_move(Move *moves, int *scores, int start_idx, int len) {
-
+inline Move get_next_move(Move *moves, int *scores, int start_idx, int len) noexcept {
   int best_idx = start_idx, best_score = scores[start_idx];
   for (int i = start_idx + 1; i < len; i++) {
     if (scores[i] > best_score) {

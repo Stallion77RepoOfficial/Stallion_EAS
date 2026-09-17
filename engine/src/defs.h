@@ -9,7 +9,7 @@
 namespace Colors {
 constexpr uint8_t White = 0;
 constexpr uint8_t Black = 1;
-}
+} // namespace Colors
 
 namespace Pieces {
 constexpr uint8_t Blank = 0;
@@ -25,7 +25,7 @@ constexpr uint8_t WQueen = 10;
 constexpr uint8_t BQueen = 11;
 constexpr uint8_t WKing = 12;
 constexpr uint8_t BKing = 13;
-}
+} // namespace Pieces
 
 namespace PieceTypes {
 constexpr uint8_t PieceNone = 0;
@@ -35,14 +35,14 @@ constexpr uint8_t Bishop = 3;
 constexpr uint8_t Rook = 4;
 constexpr uint8_t Queen = 5;
 constexpr uint8_t King = 6;
-}
+} // namespace PieceTypes
 
 namespace MoveTypes {
 constexpr uint8_t Normal = 0;
 constexpr uint8_t EnPassant = 1;
 constexpr uint8_t Castling = 2;
 constexpr uint8_t Promotion = 3;
-}
+} // namespace MoveTypes
 
 namespace Directions {
 constexpr int8_t North = 8;
@@ -53,41 +53,29 @@ constexpr int8_t Northeast = 9;
 constexpr int8_t Southeast = -7;
 constexpr int8_t Northwest = 7;
 constexpr int8_t Southwest = -9;
-}
+} // namespace Directions
 
 namespace Sides {
 constexpr uint8_t Kingside = 1;
 constexpr uint8_t Queenside = 0;
-}
+} // namespace Sides
 
 namespace EntryTypes {
 constexpr uint8_t None = 0;
 constexpr uint8_t UBound = 1;
 constexpr uint8_t LBound = 2;
 constexpr uint8_t Exact = 3;
-}
+} // namespace EntryTypes
 
 namespace Promos {
 constexpr uint8_t Knight = 0;
 constexpr uint8_t Bishop = 1;
 constexpr uint8_t Rook = 2;
 constexpr uint8_t Queen = 3;
-}
+} // namespace Promos
 
-namespace PhaseTypes {
-constexpr uint8_t Opening = 0;
-constexpr uint8_t MiddleGame = 1;
-constexpr uint8_t LateMiddleGame = 2;
-constexpr uint8_t Endgame = 3;
-constexpr uint8_t Sacrifice = 4;
-}
-
-namespace PhaseMaterial {
-constexpr int Opening = 6000;
-constexpr int Midgame = 4200;
-constexpr int LateMiddle = 3000;
-constexpr int Endgame = 1500;
-}
+constexpr std::array<uint8_t, 4> PromoPieceTypes = {
+    PieceTypes::Knight, PieceTypes::Bishop, PieceTypes::Rook, PieceTypes::Queen};
 
 constexpr inline int get_piece_type(int x) noexcept { return x / 2; }
 
@@ -138,7 +126,7 @@ struct Position {
 
 constexpr int MaxSearchDepth = 256;
 
-constexpr int MaxRootDepth = 245;
+constexpr int MaxRootDepth = 246;
 constexpr int MateThreshold = MateScore - MaxSearchDepth;
 constexpr int MaxEval = TB_WIN_SCORE - 1;
 
@@ -193,24 +181,34 @@ constexpr std::array<int, 7> MaterialValues = {0,   105, 320,  330,
 namespace Random {
 inline thread_local std::mt19937 rd(std::random_device{}());
 inline thread_local std::uniform_int_distribution<int> dist(0, INT32_MAX);
-}
+} // namespace Random
 
 constexpr inline uint8_t get_color(uint8_t piece) noexcept { return piece & 1; }
-constexpr inline bool is_valid_square(int sq) noexcept { return sq >= 0 && sq < 64; }
+constexpr inline bool is_valid_square(int sq) noexcept {
+  return sq >= 0 && sq < 64;
+}
 
 void safe_printf(const char *fmt, ...);
 void safe_print_cerr(const std::string &s);
 
-constexpr inline Move pack_move(uint8_t from, uint8_t to, uint8_t type = MoveTypes::Normal) noexcept {
+constexpr inline Move pack_move(uint8_t from, uint8_t to,
+                                uint8_t type = MoveTypes::Normal) noexcept {
   return static_cast<Move>(((from & 63) << 10) | ((to & 63) << 4) | (type & 3));
 }
-constexpr inline Move pack_move_promo(uint8_t from, uint8_t to, uint8_t promo) noexcept {
-  return static_cast<Move>(((from & 63) << 10) | ((to & 63) << 4) | ((promo & 3) << 2) |
-         MoveTypes::Promotion);
+constexpr inline Move pack_move_promo(uint8_t from, uint8_t to,
+                                      uint8_t promo) noexcept {
+  return static_cast<Move>(((from & 63) << 10) | ((to & 63) << 4) |
+                           ((promo & 3) << 2) | MoveTypes::Promotion);
 }
-constexpr inline uint8_t extract_from(Move move) noexcept { return (move >> 10) & 63; }
-constexpr inline uint8_t extract_to(Move move) noexcept { return (move >> 4) & 63; }
-constexpr inline uint8_t extract_promo(Move move) noexcept { return (move >> 2) & 3; }
+constexpr inline uint8_t extract_from(Move move) noexcept {
+  return (move >> 10) & 63;
+}
+constexpr inline uint8_t extract_to(Move move) noexcept {
+  return (move >> 4) & 63;
+}
+constexpr inline uint8_t extract_promo(Move move) noexcept {
+  return (move >> 2) & 3;
+}
 constexpr inline uint8_t extract_type(Move move) noexcept { return move & 3; }
 
 constexpr inline uint16_t get_zobrist_key(uint8_t piece, uint8_t sq) noexcept {

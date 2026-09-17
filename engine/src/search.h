@@ -201,43 +201,6 @@ inline bool has_non_pawn_material(const BoardState &position, int color) noexcep
           position.material_count[s_indx + 6]);
 }
 
-inline int non_pawn_piece_count(const BoardState &position) noexcept {
-  return pop_count(position.pieces_bb[PieceTypes::Knight] |
-                   position.pieces_bb[PieceTypes::Bishop] |
-                   position.pieces_bb[PieceTypes::Rook] |
-                   position.pieces_bb[PieceTypes::Queen]);
-}
-
-inline bool is_endgame_reduction_zone(const BoardState &position,
-                                [[maybe_unused]] const ThreadInfo &thread_info,
-                                int total_material = -1) noexcept {
-  if (total_material < 0) {
-    total_material = total_mat(position);
-  }
-  return total_material <= EndgameMaterial;
-}
-
-inline bool is_zugzwang_prone(const BoardState &position, [[maybe_unused]] const ThreadInfo &thread_info,
-                       int total_material = -1) noexcept {
-  if (total_material < 0) {
-    total_material = total_mat(position);
-  }
-  const int non_pawn = non_pawn_piece_count(position);
-  const int pawns = pop_count(position.pieces_bb[PieceTypes::Pawn]);
-  return non_pawn == 0 ||
-         (non_pawn <= 2 &&
-          total_material <= (EndgameMaterial + 500) && pawns <= 6);
-}
-
-inline int16_t total_mat_color(const BoardState &position, int color) noexcept {
-
-  int m = 0;
-  for (int i = 0; i < 5; i++) {
-    m += position.material_count[i * 2 + color] * SeeValues[i + 1];
-  }
-  return m;
-}
-
 inline int eval(BoardState &position, ThreadInfo &thread_info) {
   if (use_nnue && nnue_loaded) {
     return thread_info.nnue_state.evaluate(position.color);
@@ -317,18 +280,8 @@ inline bool is_draw(const BoardState &position, ThreadInfo &thread_info) noexcep
   return false;
 }
 
-inline int draw_score(const BoardState &position, ThreadInfo &thread_info) noexcept {
-  int score = 1 - (thread_info.nodes.load(std::memory_order_relaxed) & 3);
-  const int material = material_eval(position);
-
-  if (material < 0) {
-    score += DrawContemptMaterial;
-  } else if (material > 0) {
-    score -= DrawContemptMaterial;
-  }
-
-  score += Contempt;
-  return score;
+inline int draw_score([[maybe_unused]] const BoardState &position, ThreadInfo &thread_info) noexcept {
+  return 1 - (thread_info.nodes.load(std::memory_order_relaxed) & 3);
 }
 
 inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread_info,
@@ -385,7 +338,6 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
     thread_info.seldepth = ply;
 
   uint64_t hash = position.zobrist_key;
-  uint8_t saved_phase = thread_info.phase;
 
   bool tt_hit;
   TTEntry entry = probe_entry(hash, tt_hit, thread_info.searches, table);
@@ -461,10 +413,6 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
       tt_move = MoveNone;
   }
 
-  static constexpr int PromoPieceTypes[] = {
-      PieceTypes::Knight, PieceTypes::Bishop, PieceTypes::Rook,
-      PieceTypes::Queen};
-
   auto fallback_score = [&](int current_best) {
     if (current_best != ScoreNone)
       return current_best;
@@ -525,8 +473,6 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
       }
     }
 
-    thread_info.phase = saved_phase;
-
     if (thread_data.stop) {
       return fallback_score(best_score);
     }
@@ -543,8 +489,6 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
         break;
     }
   }
-
-  thread_info.phase = saved_phase;
 
   if (best_score == ScoreNone) {
     if (in_check) {
@@ -623,7 +567,6 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
   int score = ScoreNone;
 
   uint64_t hash = position.zobrist_key;
-  uint8_t phase = thread_info.phase;
 
   int mate_distance = MateScore - 1 - ply;
   if (mate_distance < beta)
@@ -659,11 +602,6 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
 
   uint64_t in_check =
       attacks_square(position, get_king_pos(position, color), color ^ 1);
-  int total_material_here = total_mat(position);
-  bool endgame_node =
-      is_endgame_reduction_zone(position, thread_info, total_material_here);
-  bool zugzwang_prone =
-      is_zugzwang_prone(position, thread_info, total_material_here);
 
   int32_t static_eval;
   int32_t raw_eval;
@@ -720,19 +658,19 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
       }
     }
 
-    if (!endgame_node && depth <= RFPMaxDepth &&
+    if (depth <= RFPMaxDepth &&
         static_eval - RFPMargin * (depth - improving) >= beta) {
       return (static_eval + beta) / 2;
     }
 
-    if (!endgame_node && !is_pv && depth <= 3 &&
+    if (!is_pv && depth <= 3 &&
         static_eval + RazorMargin * depth < alpha) {
       int razor_score = qsearch(alpha, beta, position, thread_info, table);
       if (razor_score <= alpha)
         return razor_score;
     }
 
-    if (!zugzwang_prone && static_eval >= beta && depth >= NMPMinDepth &&
+    if (static_eval >= beta && depth >= NMPMinDepth &&
         has_non_pawn_material(position, color) && thread_info.game_ply > 0 &&
         (ss - 1)->played_move != MoveNone) {
 
@@ -790,7 +728,6 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
       int mc_score = -search<false>(-beta, -beta + 1, depth - 4, false, mc_pos,
                                     thread_info, table);
       ss_pop(thread_info);
-      thread_info.phase = phase;
 
       if (mc_score >= beta) {
         mc_cuts++;
@@ -807,7 +744,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
   }
 
   int p_beta = beta + ProbCutMargin;
-  if (!root && !is_pv && !in_check && !singular_search && !endgame_node && depth >= 5 && abs(beta) < MateThreshold &&
+  if (!root && !is_pv && !in_check && !singular_search && depth >= 5 && abs(beta) < MateThreshold &&
       (!tt_hit || entry.depth + 4 <= depth || tt_score >= p_beta)) {
 
     int threshold = p_beta - static_eval;
@@ -844,11 +781,10 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
           -qsearch(-p_beta, -p_beta + 1, moved_position, thread_info, table);
       if (probcut_score >= p_beta) {
         probcut_score = -search<is_pv>(-p_beta, -p_beta + 1, depth - 4, false,
-                               moved_position, thread_info, table);
+                                moved_position, thread_info, table);
       }
 
       ss_pop(thread_info);
-      thread_info.phase = phase;
 
       if (probcut_score >= p_beta) {
         return probcut_score;
@@ -914,29 +850,26 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
     is_capture = is_cap(position, move);
     if (!is_capture && !is_pv && best_score > -MateScore) {
 
-      if (!is_advanced_pawn && !endgame_node && !in_check && depth < LMPDepth &&
+      if (!is_advanced_pawn && !in_check && depth < LMPDepth &&
           moves_played >= LMPBase + depth * depth / (2 - improving)) {
         skip = true;
       }
 
-      if (!is_advanced_pawn && !endgame_node && !in_check && depth < FPDepth &&
+      if (!is_advanced_pawn && !in_check && depth < FPDepth &&
           picker.stage > Stages::Captures) {
         int fp_margin = FPMargin1 + FPMargin2 * depth;
-        if (thread_info.attack_mode)
-          fp_margin += FPAttackModeBonus;
         if (static_eval + fp_margin < alpha) {
           skip = true;
         }
       }
 
-      if (!is_advanced_pawn && !endgame_node && !in_check && !is_pv && !is_capture && depth < HistPruneDepth &&
+      if (!is_advanced_pawn && !in_check && !is_pv && !is_capture && depth < HistPruneDepth &&
           hist_score < -HistPruneThreshold * depth) {
         skip = true;
       }
     }
 
-    if (!root && !in_check && !is_advanced_pawn && best_score > -MateThreshold && depth < SeePruningDepth &&
-        (!endgame_node || is_capture)) {
+    if (!root && !in_check && !is_advanced_pawn && best_score > -MateThreshold && depth < SeePruningDepth) {
 
       int margin =
           is_capture ? (depth * SeePruningNoisyMargin) : SeePruningQuietMargin;
@@ -1041,17 +974,6 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
         R = (rel_rank >= 6) ? 0 : std::max(0, R - 2);
       }
 
-      if (thread_info.attack_mode && R > 0) {
-        R = std::max(0, R - 2);
-      }
-
-      if (endgame_node && R > 0) {
-        R = std::max(0, R - 1);
-        if (zugzwang_prone && R > 0) {
-          R = std::max(0, R - 1);
-        }
-      }
-
       R = std::clamp(R, 0, newdepth - 1);
 
       score = -search<false>(-alpha - 1, -alpha, newdepth - R, true,
@@ -1077,7 +999,6 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
     }
 
     ss_pop(thread_info);
-    thread_info.phase = phase;
 
     if (thread_data.stop) {
 
@@ -1279,38 +1200,9 @@ inline std::string format_pv(const BoardState &position, const ThreadInfo &threa
   return result;
 }
 
-inline uint8_t root_phase(const BoardState &position) noexcept {
-  const int material = total_mat(position);
-  if (material <= EndgameMaterial) return PhaseTypes::Endgame;
-  if (material <= LatePhaseMaterial) return PhaseTypes::LateMiddleGame;
-  const uint64_t played_plies = 2ULL * (position.fullmove - 1) + position.color;
-  return played_plies < static_cast<uint64_t>(OpeningMinPly)
-             ? PhaseTypes::Opening : PhaseTypes::MiddleGame;
-}
-
-inline void prepare_search_evaluator(const BoardState &position, ThreadInfo &info,
+inline void prepare_search_evaluator([[maybe_unused]] const BoardState &position,
+                                     ThreadInfo &info,
                                      std::vector<TTBucket> &table) noexcept {
-  uint8_t desired = root_phase(position);
-  const int material = total_mat(position);
-  if (info.cached_eval_phase != SquareNone && desired != PhaseTypes::Endgame) {
-    if (info.attack_mode) desired = PhaseTypes::Sacrifice;
-    else if (info.phase == PhaseTypes::Endgame && material <= EndRecoverMaterial)
-      desired = PhaseTypes::Endgame;
-    else if (info.phase == PhaseTypes::LateMiddleGame && material <= MidRecoverMaterial)
-      desired = PhaseTypes::LateMiddleGame;
-  }
-  if (info.cached_eval_phase == SquareNone || desired == PhaseTypes::Endgame || desired == PhaseTypes::Sacrifice) {
-    info.phase = desired;
-    info.phase_hit_counts.fill(0);
-  } else if (desired != info.phase) {
-    const auto hits = static_cast<uint8_t>(info.phase_hit_counts[desired] + 1);
-    info.phase_hit_counts.fill(0);
-    info.phase_hit_counts[desired] = hits;
-    if (hits >= PhaseConfirmHits) info.phase = desired;
-  } else {
-    info.phase_hit_counts.fill(0);
-  }
-  select_active_nnue(info.phase);
   const NNUE_Params *network = use_nnue ? g_nnue : nullptr;
   if (info.cached_eval_network != network) {
     std::fill(table.begin(), table.end(), TTBucket{});
@@ -1318,7 +1210,6 @@ inline void prepare_search_evaluator(const BoardState &position, ThreadInfo &inf
     info.NonPawnCorrHist.fill({});
     info.cached_eval_network = network;
   }
-  info.cached_eval_phase = info.phase;
 }
 
 inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
@@ -1331,7 +1222,6 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
   thread_info.time_checks = 0;
   thread_info.search_ply = 0;
   if (use_nnue && nnue_loaded) {
-    select_active_nnue(thread_info.phase);
     thread_info.nnue_state.reset_nnue(position);
   }
   thread_info.excluded_move = MoveNone;
@@ -1385,35 +1275,6 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
   completed_scores.fill(ScoreNone);
   std::array<Action, MaxSearchPly> completed_pv{};
 
-  auto update_attack_mode = [&](ThreadInfo &ti, BoardState &pos) {
-    if (ti.thread_id != 0 || last_completed_depth == 0)
-      return;
-
-    int total_material = total_mat(pos);
-    int root_eval = ti.best_scores[0];
-    ti.prev_root_eval = ti.last_root_eval;
-    ti.last_root_eval = root_eval;
-    ti.root_completed_depth = last_completed_depth;
-
-    if (!ti.attack_mode) {
-      if (last_completed_depth >= AttackModeEnterDepth &&
-          root_eval >= SacrificeEnterCp &&
-          total_material >= AttackModeMaterial) {
-
-        if (ti.prev_root_eval >= SacrificeEnterCp - AttackModeEnterRelax) {
-          ti.attack_mode = true;
-        }
-      }
-    } else {
-      bool drop = (ti.prev_root_eval - root_eval) >=
-                  SacrificeDropThreshold + AttackModeDropExtra;
-      if (root_eval <= SacrificeExitCp - AttackModeExitRelax ||
-          total_material < EndgameMaterial - AttackModeMatExit || drop) {
-        ti.attack_mode = false;
-      }
-    }
-
-  };
   int real_multi_pv =
       std::min<int>(thread_info.multipv, (int)thread_info.root_moves.size());
 
@@ -1626,7 +1487,6 @@ finish:
     thread_info.best_scores = completed_scores;
     std::copy(completed_pv.begin(), completed_pv.end(), thread_info.pv.begin());
   }
-  update_attack_mode(thread_info, position);
 
   if (thread_info.thread_id == 0) {
     if (!thread_data.stop && (thread_info.infinite_search || thread_data.pondering)) {
@@ -1691,127 +1551,6 @@ finish:
     }
   }
 
-  if (thread_info.thread_id == 0 && thread_info.variety > 0) {
-
-    Action selected_move = thread_info.best_moves[0];
-    int best_score = thread_info.best_scores[0];
-
-    int variety_lines =
-        real_multi_pv > 1
-            ? std::min<int>(real_multi_pv,
-                            1 + (static_cast<int>(thread_info.variety) / 50))
-            : 1;
-
-    int base_threshold =
-        (VARIETY_BASE_THRESHOLD - static_cast<int>(thread_info.variety)) *
-        VARIETY_MULTIPLIER;
-    if (base_threshold < 0)
-      base_threshold = 0;
-
-    if (variety_lines > 1) {
-
-      int threshold = base_threshold;
-
-      std::array<int, 32> promo_adjust{};
-      for (int i = 0;
-           i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
-        Action move = thread_info.best_moves[i];
-        if (extract_type(move) == MoveTypes::Promotion &&
-            extract_promo(move) != Promos::Queen) {
-          BoardState temp_pos = position;
-          make_move(temp_pos, move);
-          int to = extract_to(move);
-          int promo_type = extract_promo(move);
-          int promo_bonus = 0;
-          if (!is_valid_square(to))
-            continue;
-          if (promo_type == Promos::Knight) {
-            uint64_t knight_attacks = KNIGHT_ATK_SAFE(to);
-            uint64_t valuable_targets = (temp_pos.pieces_bb[PieceTypes::Queen] |
-                                         temp_pos.pieces_bb[PieceTypes::Rook] |
-                                         temp_pos.pieces_bb[PieceTypes::King]) &
-                                        temp_pos.colors_bb[position.color ^ 1];
-            int fork_count = 0;
-            while (valuable_targets) {
-              int target_sq = pop_lsb(valuable_targets);
-              if (knight_attacks & (1ULL << target_sq))
-                fork_count++;
-            }
-            if (fork_count >= 2)
-              promo_bonus = PROMO_BONUS_DOUBLE_FORK;
-            else if (fork_count == 1)
-              promo_bonus = PROMO_BONUS_SINGLE_FORK;
-          } else if (promo_type == Promos::Bishop) {
-            uint64_t bishop_attacks = get_bishop_attacks(
-                to, temp_pos.colors_bb[0] | temp_pos.colors_bb[1]);
-            uint64_t central_diagonals =
-                0x8040201008040201ULL | 0x0102040810204080ULL;
-            if (bishop_attacks & central_diagonals) {
-              promo_bonus = 50;
-              if (pop_count(temp_pos.pieces_bb[PieceTypes::Bishop] &
-                            temp_pos.colors_bb[position.color]) > 1)
-                promo_bonus += 50;
-            }
-          }
-          promo_bonus =
-              (promo_bonus * static_cast<int>(thread_info.variety)) / 100;
-          if (promo_bonus > 0) {
-            int score_diff = best_score - thread_info.best_scores[i];
-            if (score_diff <= threshold + promo_bonus) {
-              promo_adjust[i] = promo_bonus;
-            }
-          }
-        }
-      }
-
-      for (int i = 0;
-           i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
-        if (promo_adjust[i])
-          thread_info.best_scores[i] += promo_adjust[i];
-      }
-
-    }
-
-    if (real_multi_pv > 1) {
-
-      std::vector<int> candidates;
-      int threshold = base_threshold;
-      for (int i = 0;
-           i < variety_lines && thread_info.best_moves[i] != MoveNone; i++) {
-        int score_diff = best_score - thread_info.best_scores[i];
-        if (score_diff <= threshold)
-          candidates.push_back(i);
-      }
-      if (!candidates.empty()) {
-        int variety_bias = static_cast<int>(thread_info.variety);
-        int selection = 0;
-        if (candidates.size() > 1 && variety_bias > 0) {
-          int r = Random::dist(Random::rd) % 150;
-          if (r < variety_bias)
-            selection =
-                candidates[Random::dist(Random::rd) % candidates.size()];
-        }
-        selected_move = thread_info.best_moves[selection];
-      }
-    }
-
-    if (selected_move != thread_info.best_moves[0]) {
-
-      int selected_idx = 0;
-      for (int i = 0; i < real_multi_pv; i++) {
-        if (thread_info.best_moves[i] == selected_move) {
-          selected_idx = i;
-          break;
-        }
-      }
-
-      std::swap(thread_info.best_moves[0],
-                thread_info.best_moves[selected_idx]);
-      std::swap(thread_info.best_scores[0],
-                thread_info.best_scores[selected_idx]);
-    }
-  }
-
   if (thread_info.thread_id == 0 && thread_info.is_human) {
 
     bool can_weaken = !(thread_info.pondering && !thread_info.ponder_hit);
@@ -1823,13 +1562,7 @@ finish:
           true_top = thread_info.best_scores[i];
 
       int base_margin = std::max(0, thread_info.human_value_margin);
-
-      int v = std::clamp<int>(thread_info.variety, 0, 150);
-      double v_norm = v / 150.0;
-      double attenuation = 1.0 - 0.55 * v_norm;
-      if (attenuation < 0.35)
-        attenuation = 0.35;
-      int margin = (int)std::lround(base_margin * attenuation);
+      int margin = (int)std::lround(base_margin * 0.45);
 
       if (thread_info.human_elo <= 1600) {
         double elo_scale = (thread_info.human_elo - HUMAN_ELO_MIN) /

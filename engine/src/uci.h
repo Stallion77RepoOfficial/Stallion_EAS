@@ -186,9 +186,8 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
   set_board(position, thread_info,
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
   const bool base_loaded = load_nnue_base(resolve_file_path("nets/base.nnue"));
-  const bool aggressive_loaded = load_nnue_aggressive(resolve_file_path("nets/aggressive.nnue"));
-  if (!base_loaded && !aggressive_loaded)
-    safe_printf("info string NNUE files unavailable; using HCE\n");
+  if (!base_loaded)
+    safe_printf("info string NNUE file unavailable; using material fallback\n");
 
   std::string input;
 
@@ -247,14 +246,10 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
           "option name Use NNUE type check default true\n"
           "option name EvalFile type string default nets/base.nnue\n"
-          "option name EvalFileAggressive type string default nets/aggressive.nnue\n"
           "option name Hash type spin default 256 min 1 max 131072\n"
           "option name Threads type spin default 1 min 1 max 1024\n"
           "option name MultiPV type spin default 1 min 1 max 256\n"
-
-          "option name Variety type spin default 150 min 0 max 150\n"
           "option name UCI_LimitStrength type check default false\n"
-
           "option name UCI_Elo type spin default 3401 min 500 max 3401\n"
           "option name UCI_Chess960 type check default false\n"
           "option name MaxMoveTime type spin default 0 min 0 max 10000\n"
@@ -273,69 +268,17 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           "option name BookMinWeight type spin default 0 min 0 max 1000\n"
           "option name PonderTimeFactor type spin default 200 min 0 max 200\n"
 
-          "option name Contempt type spin default -15 min -100 max 100\n"
-          "option name DrawContemptMaterial type spin default 60 min 0 max "
-          "200\n"
           "option name RazorMargin type spin default 140 min 100 max 500\n"
           "option name HistPruneDepth type spin default 4 min 2 max 8\n"
-          "option name HistPruneThreshold type spin default 6196 min 1000 max "
-          "8000\n"
+          "option name HistPruneThreshold type spin default 6196 min 1000 max 8000\n"
           "option name ProbCutMargin type spin default 191 min 100 max 500\n"
           "option name MultiCutDepth type spin default 4 min 3 max 10\n"
           "option name MultiCutMoves type spin default 6 min 2 max 8\n"
           "option name MultiCutCuts type spin default 3 min 1 max 5\n"
-          "option name HistExtThreshold type spin default 7000 min 3000 max "
-          "15000\n"
-          "option name FPAttackModeBonus type spin default 80 min 0 max 200\n"
-
-          "option name AttackModeEnterDepth type spin default 6 min 3 max 12\n"
-          "option name AttackModeMaterial type spin default 2800 min 1500 max "
-          "5000\n"
-          "option name AttackModeEnterRelax type spin default 20 min 0 max "
-          "100\n"
-          "option name AttackModeExitRelax type spin default 20 min 0 max 100\n"
-          "option name AttackModeDropExtra type spin default 30 min 0 max 100\n"
-          "option name AttackModeMatExit type spin default 200 min 0 max 500\n"
-
-          "option name PhaseConfirmHits type spin default 2 min 1 max 8\n"
-          "option name SacrificeEnterCp type spin default 250 min 100 max 500\n"
-          "option name SacrificeExitCp type spin default 170 min 50 max 400\n"
-          "option name SacrificeDropThreshold type spin default 120 min 50 max "
-          "300\n"
-          "option name LatePhaseMaterial type spin default 4200 min 2000 max "
-          "6000\n"
-          "option name EndgameMaterial type spin default 3000 min 1000 max "
-          "5000\n"
-          "option name MidRecoverMaterial type spin default 4500 min 2000 max "
-          "6000\n"
-          "option name EndRecoverMaterial type spin default 3300 min 1500 max "
-          "5500\n"
-          "option name OpeningMinPly type spin default 20 min 0 max 60\n"
-
+          "option name HistExtThreshold type spin default 7000 min 3000 max 15000\n"
           "option name DeltaMarginBase type spin default 180 min 50 max 400\n"
-
-          "option name MaterialBasisPawn type spin default 210 min 100 max "
-          "400\n"
-          "option name MaterialBasisKnight type spin default 800 min 500 max "
-          "1200\n"
-          "option name MaterialBasisBishop type spin default 840 min 500 max "
-          "1200\n"
-          "option name MaterialBasisRook type spin default 1300 min 800 max "
-          "2000\n"
-          "option name MaterialBasisQueen type spin default 2600 min 1500 max "
-          "4000\n"
-
-
-          "option name NormalizationFactor type spin default 195 min 50 max "
-          "500\n"
-          "option name HalfmoveScaleMax type spin default 200 min 50 max 500\n"
-          "option name PromoBonusDoubleFork type spin default 250 min 0 max "
-          "500\n"
-          "option name PromoBonusSingleFork type spin default 100 min 0 max "
-          "300\n"
-          "option name VarietyBaseThreshold type spin default 150 min 50 max "
-          "300\n"
-          "option name VarietyMultiplier type spin default 2 min 1 max 5\n");
+          "option name NormalizationFactor type spin default 195 min 50 max 500\n"
+          "option name HalfmoveScaleMax type spin default 200 min 50 max 500\n");
 
       safe_printf("option name MaxDepth type spin default 0 min 0 max %d\n", MaxRootDepth);
       for (const auto &param : params) {
@@ -450,9 +393,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       } else if (optName == "evalfile") {
         const bool loaded = load_nnue_base(resolve_file_path(valueStr));
         safe_printf("info string EvalFile %s\n", loaded ? "loaded" : "load failed; previous network retained");
-      } else if (optName == "evalfileaggressive") {
-        const bool loaded = load_nnue_aggressive(resolve_file_path(valueStr));
-        safe_printf("info string EvalFileAggressive %s\n", loaded ? "loaded" : "load failed; previous network retained");
       } else if (optName == "hash") {
         bool ok = false;
         int mb = parse_int(valueStr, ok);
@@ -477,10 +417,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         int mv;
         if (!set_spin_req(1, 256, mv)) continue;
         thread_info.multipv = static_cast<uint16_t>(mv);
-      } else if (optName == "variety") {
-        int v;
-        if (!set_spin_req(0, 150, v)) continue;
-        thread_info.variety = static_cast<uint16_t>(v);
       } else if (optName == "uci_limitstrength") {
         bool b = to_bool(valueStr);
         thread_info.is_human = b;
@@ -545,68 +481,14 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         if (!set_spin_req(0, 1000, thread_info.book_min_weight)) continue;
       } else if (optName == "pondertimefactor") {
         if (!set_spin_req(0, 200, thread_info.ponder_time_factor)) continue;
-      } else if (optName == "contempt")
-        set_spin(-100, 100, Contempt);
-      else if (optName == "drawcontemptmaterial")
-        set_spin(0, 200, DrawContemptMaterial);
-      else if (optName == "histextthreshold")
+      } else if (optName == "histextthreshold")
         set_spin(3000, 15000, HistExtThreshold);
-      else if (optName == "fpattackmodebonus")
-        set_spin(0, 200, FPAttackModeBonus);
-      else if (optName == "attackmodeenterdepth")
-        set_spin(3, 12, AttackModeEnterDepth);
-      else if (optName == "attackmodematerial")
-        set_spin(1500, 5000, AttackModeMaterial);
-      else if (optName == "attackmodeenterrelax")
-        set_spin(0, 100, AttackModeEnterRelax);
-      else if (optName == "attackmodeexitrelax")
-        set_spin(0, 100, AttackModeExitRelax);
-      else if (optName == "attackmodedropextra")
-        set_spin(0, 100, AttackModeDropExtra);
-      else if (optName == "attackmodematexit")
-        set_spin(0, 500, AttackModeMatExit);
-      else if (optName == "phaseconfirmhits")
-        set_spin(1, 8, PhaseConfirmHits);
-      else if (optName == "sacrificeentercp")
-        set_spin(100, 500, SacrificeEnterCp);
-      else if (optName == "sacrificeexitcp")
-        set_spin(50, 400, SacrificeExitCp);
-      else if (optName == "sacrificedropthreshold")
-        set_spin(50, 300, SacrificeDropThreshold);
-      else if (optName == "latephasematerial")
-        set_spin(2000, 6000, LatePhaseMaterial);
-      else if (optName == "endgamematerial")
-        set_spin(1000, 5000, EndgameMaterial);
-      else if (optName == "midrecovermaterial")
-        set_spin(2000, 6000, MidRecoverMaterial);
-      else if (optName == "endrecovermaterial")
-        set_spin(1500, 5500, EndRecoverMaterial);
-      else if (optName == "openingminply")
-        set_spin(0, 60, OpeningMinPly);
       else if (optName == "deltamarginbase")
         set_spin(50, 400, DELTA_MARGIN_BASE);
-      else if (optName == "materialbasispawn")
-        set_spin(100, 400, MaterialBasis[1]);
-      else if (optName == "materialbasisknight")
-        set_spin(500, 1200, MaterialBasis[2]);
-      else if (optName == "materialbasisbishop")
-        set_spin(500, 1200, MaterialBasis[3]);
-      else if (optName == "materialbasisrook")
-        set_spin(800, 2000, MaterialBasis[4]);
-      else if (optName == "materialbasisqueen")
-        set_spin(1500, 4000, MaterialBasis[5]);
       else if (optName == "normalizationfactor")
         set_spin(50, 500, NormalizationFactor);
       else if (optName == "halfmovescalemax")
         set_spin(50, 500, HALFMOVE_SCALE_MAX);
-      else if (optName == "promobonusdoublefork")
-        set_spin(0, 500, PROMO_BONUS_DOUBLE_FORK);
-      else if (optName == "promobonussinglefork")
-        set_spin(0, 300, PROMO_BONUS_SINGLE_FORK);
-      else if (optName == "varietybasethreshold")
-        set_spin(50, 300, VARIETY_BASE_THRESHOLD);
-      else if (optName == "varietymultiplier")
-        set_spin(1, 5, VARIETY_MULTIPLIER);
       else {
         for (auto &param : params) {
           if (optName == lowercase(param.name)) {
@@ -915,18 +797,13 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         Action book_move = thread_info.opening_book.probe_book(
             position, thread_info.book_min_weight);
 
-        if (book_move != MoveNone && thread_info.variety > 0) {
+        if (book_move != MoveNone) {
           const bool seen = std::find(thread_info.recent_book_keys.begin(),
                                       thread_info.recent_book_keys.end(),
                                       book_key) != thread_info.recent_book_keys.end();
           if (seen) {
-            const int v = static_cast<int>(thread_info.variety);
-            int skip_chance = (v * v) / 225;
-            if (skip_chance > 100)
-              skip_chance = 100;
             static thread_local std::mt19937 rng(Random::rd());
-            if ((std::uniform_int_distribution<int>(0, 99)(rng)) <
-                skip_chance) {
+            if ((std::uniform_int_distribution<int>(0, 99)(rng)) < 50) {
               book_move = MoveNone;
             }
           }
@@ -1012,21 +889,15 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     }
 
     else if (command == "eval") {
-      const uint8_t saved_phase = thread_info.phase;
-      thread_info.phase = root_phase(position);
       if (use_nnue && nnue_loaded) {
-        select_active_nnue(thread_info.phase);
         thread_info.nnue_state.reset_nnue(position);
-        safe_printf("info string NNUE raw: %d (net: %s, phase: %d)\n",
-                    thread_info.nnue_state.evaluate(position.color),
-                    (g_nnue == g_nnue_aggressive.get()) ? "aggressive/sacrifice" : "base",
-                    thread_info.phase);
+        const int raw = thread_info.nnue_state.evaluate(position.color);
+        safe_printf("info string NNUE raw: %d (eval: %d cp)\n",
+                    raw, raw * 100 / NormalizationFactor);
+      } else {
+        safe_printf("info string Material eval: %d cp\n",
+                    material_eval(position));
       }
-      int eval_score = eval(position, thread_info);
-      safe_printf("info string evaluation: %d cp (%s)\n",
-                  eval_score * 100 / NormalizationFactor,
-                  (use_nnue && nnue_loaded) ? "NNUE" : "HCE");
-      thread_info.phase = saved_phase;
     }
 
     else if (command == "flip") {

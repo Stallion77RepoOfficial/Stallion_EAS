@@ -43,9 +43,8 @@ struct alignas(64) NNUE_Params {
 };
 
 inline std::unique_ptr<NNUE_Params> g_nnue_base = nullptr;
-inline std::unique_ptr<NNUE_Params> g_nnue_aggressive = nullptr;
 
-inline thread_local const NNUE_Params *g_nnue = nullptr;
+inline const NNUE_Params *g_nnue = nullptr;
 inline bool nnue_loaded = false;
 inline bool use_nnue = true;
 
@@ -84,26 +83,6 @@ inline bool load_nnue_base(const std::string &path = "nets/base.nnue") {
     return true;
   }
   return false;
-}
-
-inline bool load_nnue_aggressive(const std::string &path = "nets/aggressive.nnue") {
-  auto net = read_nnue_binary(path);
-  if (net) {
-    g_nnue_aggressive = std::move(net);
-    if (!g_nnue || !g_nnue_base) g_nnue = g_nnue_aggressive.get();
-    nnue_loaded = true;
-    return true;
-  }
-  return false;
-}
-
-inline void select_active_nnue([[maybe_unused]] int phase) noexcept {
-  if (!nnue_loaded) {
-    g_nnue = nullptr;
-    return;
-  }
-
-  g_nnue = g_nnue_base ? g_nnue_base.get() : g_nnue_aggressive.get();
 }
 
 constexpr inline std::pair<size_t, size_t> feature_indices(int piece, int sq) noexcept {

@@ -7,21 +7,6 @@
 
 struct ThreadInfo;
 
-constexpr inline int16_t total_mat(const BoardState &position) noexcept {
-  const int m = (position.material_count[0] + position.material_count[1]) *
-                    MaterialValues[PieceTypes::Pawn] +
-                (position.material_count[2] + position.material_count[3]) *
-                    MaterialValues[PieceTypes::Knight] +
-                (position.material_count[4] + position.material_count[5]) *
-                    MaterialValues[PieceTypes::Bishop] +
-                (position.material_count[6] + position.material_count[7]) *
-                    MaterialValues[PieceTypes::Rook] +
-                (position.material_count[8] + position.material_count[9]) *
-                    MaterialValues[PieceTypes::Queen];
-
-  return static_cast<int16_t>(m);
-}
-
 inline std::string internal_to_uci(const BoardState &, Action move) {
   if (move == MoveNone) return "0000";
   const int from = extract_from(move);

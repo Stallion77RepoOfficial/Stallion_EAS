@@ -62,7 +62,7 @@ inline Action next_move(MovePicker &picker, const Position &position,
           picker.captures.scores[i] = QueenPromoScore;
         } else {
           picker.captures.scores[i] =
-              GoodCaptureBaseScore + evaluate_promotion_tactics(position, move);
+              GoodCaptureBaseScore + SeeValues[PromoPieceTypes[extract_promo(move)]];
           if (from_piece >= Pieces::WPawn && from_piece <= Pieces::BKing) {
             picker.captures.scores[i] +=
                 thread_info.CapHistScores[from_piece][to];

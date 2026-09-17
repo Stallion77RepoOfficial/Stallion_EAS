@@ -115,7 +115,6 @@ struct ThreadInfoBase {
 
   uint16_t multipv = 1;
   uint16_t multipv_index = 0;
-  uint16_t variety = 150;
 
   Action excluded_move = MoveNone;
   std::array<Action, MaxActions> best_moves{};
@@ -138,16 +137,8 @@ struct ThreadInfoBase {
   BoardState position;
 
   uint8_t searches = 0;
-  uint8_t phase = PhaseTypes::Opening;
-  uint8_t cached_eval_phase = SquareNone;
   const NNUE_Params *cached_eval_network = nullptr;
   bool infinite_search = false;
-
-  bool attack_mode = false;
-  int last_root_eval = 0;
-  int prev_root_eval = 0;
-  std::array<uint8_t, 5> phase_hit_counts{};
-  int root_completed_depth = 0;
   bool root_moves_limited = false;
 
   uint64_t max_move_time = 0;
@@ -274,13 +265,7 @@ inline void new_game(ThreadInfo &thread_info, std::vector<TTBucket> &table) {
   TT_resizing.store(false);
   thread_info.searches = 0;
   thread_info.search_ply = 0;
-  thread_info.phase = PhaseTypes::Opening;
-  thread_info.cached_eval_phase = SquareNone;
   thread_info.cached_eval_network = nullptr;
-  thread_info.attack_mode = false;
-  thread_info.last_root_eval = thread_info.prev_root_eval = 0;
-  thread_info.root_completed_depth = 0;
-  thread_info.phase_hit_counts.fill(0);
   thread_info.KillerMoves.fill({});
   thread_info.CounterMoves.fill({});
   thread_info.recent_book_keys.fill(0);

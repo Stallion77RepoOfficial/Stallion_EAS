@@ -1,5 +1,7 @@
 *.DS_Store
+.DS_Store
 engine/stallion_eas_mac
+stockfish19/
 /training/.venv
 /training/__pycache__
 /training/data

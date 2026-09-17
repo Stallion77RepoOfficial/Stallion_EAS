@@ -62,7 +62,7 @@ TUNE_PARAM(MultiCutCuts, 3, 1, 5);
 TUNE_PARAM(HistPruneDepth, 4, 2, 8);
 TUNE_PARAM(HistPruneThreshold, 6196, 1000, 8000);
 
-inline int MaterialBasis[6] = {0, 210, 800, 840, 1300, 2600};
+constexpr inline int MaterialBasis[6] = {0, 210, 800, 840, 1300, 2600};
 
 constexpr inline int QuadraticImbalance[6][6] = {
     {0, 0, 0, 0, 0, 0},
@@ -76,32 +76,7 @@ constexpr inline int QuadraticImbalance[6][6] = {
 inline int NormalizationFactor = 195;
 inline int HALFMOVE_SCALE_MAX = 200;
 inline int DELTA_MARGIN_BASE = 180;
-inline int VARIETY_BASE_THRESHOLD = 150;
-inline int VARIETY_MULTIPLIER = 2;
-inline int PROMO_BONUS_DOUBLE_FORK = 250;
-inline int PROMO_BONUS_SINGLE_FORK = 100;
-
-inline int Contempt = -15;
-inline int DrawContemptMaterial = 60;
 inline int HistExtThreshold = 7000;
-inline int FPAttackModeBonus = 80;
-
-inline int AttackModeEnterDepth = 6;
-inline int AttackModeMaterial = 2800;
-inline int AttackModeEnterRelax = 20;
-inline int AttackModeExitRelax = 20;
-inline int AttackModeDropExtra = 30;
-inline int AttackModeMatExit = 200;
-
-inline int PhaseConfirmHits = 2;
-inline int SacrificeEnterCp = 250;
-inline int SacrificeExitCp = 170;
-inline int SacrificeDropThreshold = 120;
-inline int LatePhaseMaterial = 4200;
-inline int EndgameMaterial = 3000;
-inline int MidRecoverMaterial = 4500;
-inline int EndRecoverMaterial = 3300;
-inline int OpeningMinPly = 20;
 
 constexpr inline double WDL_A = -0.003;
 

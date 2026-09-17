@@ -170,7 +170,8 @@ inline bool has_non_pawn_material(const BoardState &position, int color) noexcep
 }
 
 inline int eval(BoardState &position, ThreadInfo &thread_info) {
-  return thread_info.nnue_state.evaluate(position.color);
+  const int piece_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
+  return thread_info.nnue_state.evaluate(position.color, piece_count);
 }
 
 inline int correct_eval(const BoardState &position, const ThreadInfo &thread_info,

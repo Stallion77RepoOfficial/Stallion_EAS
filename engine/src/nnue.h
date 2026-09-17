@@ -47,11 +47,13 @@ constexpr int QA = 255;
 constexpr int QB = 64;
 constexpr int QAB = QA * QB;
 
+constexpr size_t OUTPUT_BUCKETS = 8;
+
 struct alignas(64) NNUE_Params {
   std::array<int16_t, INPUT_SIZE * LAYER1_SIZE> feature_v;
   std::array<int16_t, LAYER1_SIZE> feature_bias;
-  std::array<int16_t, LAYER1_SIZE * 2> output_v;
-  int16_t output_bias;
+  std::array<std::array<int16_t, LAYER1_SIZE * 2>, OUTPUT_BUCKETS> output_v;
+  std::array<int16_t, OUTPUT_BUCKETS> output_bias;
 };
 
 inline std::unique_ptr<NNUE_Params> g_nnue_data = nullptr;
@@ -60,16 +62,27 @@ inline const NNUE_Params *g_nnue = nullptr;
 inline bool nnue_loaded = false;
 
 inline std::unique_ptr<NNUE_Params> read_nnue_binary(const std::string &path) {
-  constexpr size_t words = INPUT_SIZE * LAYER1_SIZE + LAYER1_SIZE * 3 + 1;
-  constexpr size_t payload = words * 2;
-  constexpr size_t padded = (payload + 63) / 64 * 64;
+  constexpr size_t words_8out = INPUT_SIZE * LAYER1_SIZE + LAYER1_SIZE + OUTPUT_BUCKETS * LAYER1_SIZE * 2 + OUTPUT_BUCKETS;
+  constexpr size_t payload_8out = words_8out * 2;
+  constexpr size_t padded_8out = (payload_8out + 63) / 64 * 64;
+
+  constexpr size_t words_1out = INPUT_SIZE * LAYER1_SIZE + LAYER1_SIZE * 3 + 1;
+  constexpr size_t payload_1out = words_1out * 2;
+  constexpr size_t padded_1out = (payload_1out + 63) / 64 * 64;
+
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file) return nullptr;
   const auto length = file.tellg();
-  if (length != std::streamoff(payload) && length != std::streamoff(padded)) return nullptr;
-  std::vector<uint8_t> data(payload);
+
+  const bool is_8out = (length == std::streamoff(payload_8out) || length == std::streamoff(padded_8out));
+  const bool is_1out = (length == std::streamoff(payload_1out) || length == std::streamoff(padded_1out));
+  if (!is_8out && !is_1out) return nullptr;
+
+  const size_t payload_to_read = is_8out ? payload_8out : payload_1out;
+  std::vector<uint8_t> data(payload_to_read);
   file.seekg(0);
-  if (!file.read(reinterpret_cast<char *>(data.data()), payload)) return nullptr;
+  if (!file.read(reinterpret_cast<char *>(data.data()), payload_to_read)) return nullptr;
+
   auto loaded_params = std::make_unique<NNUE_Params>();
   size_t offset = 0;
   auto read_value = [&]() noexcept -> int16_t {
@@ -78,10 +91,26 @@ inline std::unique_ptr<NNUE_Params> read_nnue_binary(const std::string &path) {
     offset += 2;
     return static_cast<int16_t>(u);
   };
+
   for (auto &v : loaded_params->feature_v) v = read_value();
   for (auto &v : loaded_params->feature_bias) v = read_value();
-  for (auto &v : loaded_params->output_v) v = read_value();
-  loaded_params->output_bias = read_value();
+
+  if (is_8out) {
+    for (size_t b = 0; b < OUTPUT_BUCKETS; ++b) {
+      for (auto &v : loaded_params->output_v[b]) v = read_value();
+    }
+    for (size_t b = 0; b < OUTPUT_BUCKETS; ++b) {
+      loaded_params->output_bias[b] = read_value();
+    }
+  } else {
+    std::array<int16_t, LAYER1_SIZE * 2> single_out;
+    for (auto &v : single_out) v = read_value();
+    const int16_t single_bias = read_value();
+    for (size_t b = 0; b < OUTPUT_BUCKETS; ++b) {
+      loaded_params->output_v[b] = single_out;
+      loaded_params->output_bias[b] = single_bias;
+    }
+  }
   return loaded_params;
 }
 
@@ -275,13 +304,14 @@ public:
     m_curr = &m_accumulator_stack[m_idx];
   }
 
-  inline int evaluate(int color) const noexcept {
+  inline int evaluate(int color, int piece_count = 32) const noexcept {
     if (!g_nnue || !nnue_loaded) return 0;
     const auto &us = (color == Colors::White) ? m_curr->white : m_curr->black;
     const auto &them = (color == Colors::White) ? m_curr->black : m_curr->white;
-    const int64_t output = screlu_flatten(us, them, g_nnue->output_v);
+    const size_t b = static_cast<size_t>(std::clamp((piece_count - 1) / 4, 0, 7));
+    const int64_t output = screlu_flatten(us, them, g_nnue->output_v[b]);
     return static_cast<int>(std::clamp<int64_t>(
-        (output + g_nnue->output_bias) * SCALE / QAB, -MaxEval, MaxEval));
+        (output + g_nnue->output_bias[b]) * SCALE / QAB, -MaxEval, MaxEval));
   }
 
   inline void reset_nnue(const BoardState &position) noexcept {

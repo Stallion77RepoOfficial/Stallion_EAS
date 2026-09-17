@@ -46,10 +46,14 @@ DEFAULT_EVAL = ROOT / "data" / "evals.sbin"
 DEFAULT_PUZZLES = ROOT / "data" / "puzzle_sacrifices.sbin"
 DEFAULT_BOOK = ROOT / "openings.epd"
 KING_BUCKETS = 16
+NNUE_OUTPUT_BUCKETS = 8
 NNUE_FEATURES = 768 * KING_BUCKETS  # 12288
 NNUE_ACCUMULATOR = 1024
-NNUE_PAYLOAD_SIZE = 2 * (NNUE_FEATURES * NNUE_ACCUMULATOR + 3 * NNUE_ACCUMULATOR + 1)
+NNUE_PAYLOAD_SIZE = 2 * (NNUE_FEATURES * NNUE_ACCUMULATOR + NNUE_ACCUMULATOR + NNUE_OUTPUT_BUCKETS * (2 * NNUE_ACCUMULATOR) + NNUE_OUTPUT_BUCKETS)
 NNUE_FILE_SIZE = (NNUE_PAYLOAD_SIZE + 63) // 64 * 64
+
+NNUE_1OUT_PAYLOAD = 2 * (NNUE_FEATURES * NNUE_ACCUMULATOR + 3 * NNUE_ACCUMULATOR + 1)
+NNUE_1OUT_FILE_SIZE = (NNUE_1OUT_PAYLOAD + 63) // 64 * 64
 CACHE_VERSION = 8
 SCALE = 400
 QA = 255
@@ -156,8 +160,8 @@ def file_sha256(path: Path) -> str:
 
 def require_network(path: Any, label: str = "NNUE") -> Path:
     network = require_file(path, label)
-    if network.stat().st_size not in (NNUE_PAYLOAD_SIZE, NNUE_FILE_SIZE):
-        raise ValueError(f"{label} motorun 768x1024 NNUE biçiminde değil: {network}")
+    if network.stat().st_size not in (NNUE_PAYLOAD_SIZE, NNUE_FILE_SIZE, NNUE_1OUT_PAYLOAD, NNUE_1OUT_FILE_SIZE):
+        raise ValueError(f"{label} geçerli Stallion NNUE biçiminde değil: {network} ({network.stat().st_size} byte)")
     return network
 
 
@@ -1364,18 +1368,26 @@ def _make_nnue_model() -> Any:
             super().__init__()
             self.embedding = nn.Embedding(NNUE_FEATURES, NNUE_ACCUMULATOR)
             self.feature_bias = nn.Parameter(torch.zeros(NNUE_ACCUMULATOR))
-            self.output = nn.Linear(NNUE_ACCUMULATOR * 2, 1)
+            self.output_weights = nn.Parameter(torch.zeros(NNUE_OUTPUT_BUCKETS, NNUE_ACCUMULATOR * 2))
+            self.output_biases = nn.Parameter(torch.zeros(NNUE_OUTPUT_BUCKETS))
             nn.init.normal_(self.embedding.weight, mean=0.0, std=0.02)
-            nn.init.normal_(self.output.weight, mean=0.0, std=0.02)
-            nn.init.zeros_(self.output.bias)
+            nn.init.normal_(self.output_weights, mean=0.0, std=0.02)
+            nn.init.zeros_(self.output_biases)
 
         def forward(self, us_idx: Any, them_idx: Any,
-                    us_mask: Any, them_mask: Any) -> Any:
+                    us_mask: Any, them_mask: Any,
+                    out_buckets: Any | None = None) -> Any:
             us_acc = (self.embedding(us_idx) * us_mask.unsqueeze(-1)).sum(dim=1) + self.feature_bias
             them_acc = (self.embedding(them_idx) * them_mask.unsqueeze(-1)).sum(dim=1) + self.feature_bias
             us = torch.clamp(us_acc, 0.0, 1.0).square()
             them = torch.clamp(them_acc, 0.0, 1.0).square()
-            return self.output(torch.cat((us, them), dim=1)).squeeze(-1)
+            us_them = torch.cat((us, them), dim=1)
+            if out_buckets is None:
+                piece_count = us_mask.sum(dim=1).long()
+                out_buckets = torch.clamp((piece_count - 1) // 4, 0, NNUE_OUTPUT_BUCKETS - 1)
+            w = self.output_weights[out_buckets]
+            b = self.output_biases[out_buckets]
+            return (us_them * w).sum(dim=1) + b
 
     return Model()
 
@@ -1408,20 +1420,21 @@ def export_nnue(model: Any, output: Path) -> Path:
         feature_i16 = quantize_i16(feature, QA, "embedding.weight")
         bias = model.feature_bias.detach().cpu().numpy()
         bias_i16 = quantize_i16(bias, QA, "feature_bias")
-        output_weight = model.output.weight.detach().cpu().numpy().reshape(-1)
-        output_scaled = output_weight * (400.0 / math.log(10.0)) / SCALE
-        output_i16 = quantize_i16(output_scaled, QB, "output.weight")
-        output_bias = float(model.output.bias.detach().cpu().numpy().reshape(-1)[0])
-        output_bias_scaled = output_bias * (400.0 / math.log(10.0)) / SCALE
-        output_bias_i16 = quantize_i16(
-            np.asarray([output_bias_scaled]), QAB, "output.bias"
-        )
+
+        out_w = model.output_weights.detach().cpu().numpy()
+        out_w_scaled = out_w * (400.0 / math.log(10.0)) / SCALE
+        out_w_i16 = quantize_i16(out_w_scaled, QB, "output_weights")
+
+        out_b = model.output_biases.detach().cpu().numpy()
+        out_b_scaled = out_b * (400.0 / math.log(10.0)) / SCALE
+        out_b_i16 = quantize_i16(out_b_scaled, QAB, "output_biases")
+
     payload = b"".join(
         (feature_i16.tobytes(), bias_i16.tobytes(),
-         output_i16.tobytes(), output_bias_i16.tobytes())
+         out_w_i16.tobytes(), out_b_i16.tobytes())
     )
     if len(payload) != NNUE_PAYLOAD_SIZE:
-        raise RuntimeError(f"NNUE payload boyutu beklenmiyor: {len(payload)}")
+        raise RuntimeError(f"NNUE payload boyutu beklenmiyor: {len(payload)} != {NNUE_PAYLOAD_SIZE}")
     data = payload + bytes(NNUE_FILE_SIZE - len(payload))
     atomic_bytes(output, data)
     print(f"[BAŞARILI] NNUE yazıldı: {output} ({len(data):,} byte)")
@@ -1449,12 +1462,14 @@ def load_nnue(model: Any, network: Path) -> None:
         bias = np.frombuffer(data[offset:offset + bias_bytes], dtype="<i2").astype(np.float32) / QA
         offset += bias_bytes
         output_bytes = NNUE_ACCUMULATOR * 2 * 2
-        output = np.frombuffer(data[offset:offset + output_bytes], dtype="<i2")
-        output = output.astype(np.float32) / QB * SCALE / (400.0 / math.log(10.0))
+        single_output = np.frombuffer(data[offset:offset + output_bytes], dtype="<i2")
+        single_output = single_output.astype(np.float32) / QB * SCALE / (400.0 / math.log(10.0))
+        output = np.tile(single_output, (NNUE_OUTPUT_BUCKETS, 1))
         offset += output_bytes
-        output_bias = np.frombuffer(data[offset:offset + 2], dtype="<i2").astype(np.float32)
-        output_bias = output_bias / QAB * SCALE / (400.0 / math.log(10.0))
-    elif len(data) in (NNUE_PAYLOAD_SIZE, NNUE_FILE_SIZE):
+        single_bias = np.frombuffer(data[offset:offset + 2], dtype="<i2").astype(np.float32)
+        single_bias = single_bias / QAB * SCALE / (400.0 / math.log(10.0))
+        output_bias = np.full(NNUE_OUTPUT_BUCKETS, float(single_bias[0]), dtype=np.float32)
+    elif len(data) in (NNUE_1OUT_PAYLOAD, NNUE_1OUT_FILE_SIZE):
         offset = 0
         feature_bytes = NNUE_FEATURES * NNUE_ACCUMULATOR * 2
         feature = np.frombuffer(data[offset:offset + feature_bytes], dtype="<i2")
@@ -1464,19 +1479,37 @@ def load_nnue(model: Any, network: Path) -> None:
         bias = np.frombuffer(data[offset:offset + bias_bytes], dtype="<i2").astype(np.float32) / QA
         offset += bias_bytes
         output_bytes = NNUE_ACCUMULATOR * 2 * 2
-        output = np.frombuffer(data[offset:offset + output_bytes], dtype="<i2")
-        output = output.astype(np.float32) / QB * SCALE / (400.0 / math.log(10.0))
+        single_output = np.frombuffer(data[offset:offset + output_bytes], dtype="<i2")
+        single_output = single_output.astype(np.float32) / QB * SCALE / (400.0 / math.log(10.0))
+        output = np.tile(single_output, (NNUE_OUTPUT_BUCKETS, 1))
         offset += output_bytes
-        output_bias = np.frombuffer(data[offset:offset + 2], dtype="<i2").astype(np.float32)
+        single_bias = np.frombuffer(data[offset:offset + 2], dtype="<i2").astype(np.float32)
+        single_bias = single_bias / QAB * SCALE / (400.0 / math.log(10.0))
+        output_bias = np.full(NNUE_OUTPUT_BUCKETS, float(single_bias[0]), dtype=np.float32)
+    elif len(data) in (NNUE_PAYLOAD_SIZE, NNUE_FILE_SIZE):
+        offset = 0
+        feature_bytes = NNUE_FEATURES * NNUE_ACCUMULATOR * 2
+        feature = np.frombuffer(data[offset:offset + feature_bytes], dtype="<i2")
+        feature = feature.reshape(NNUE_FEATURES, NNUE_ACCUMULATOR).astype(np.float32) / QA
+        offset += feature_bytes
+        bias_bytes = NNUE_ACCUMULATOR * 2
+        bias = np.frombuffer(data[offset:offset + bias_bytes], dtype="<i2").astype(np.float32) / QA
+        offset += bias_bytes
+        output_bytes = NNUE_OUTPUT_BUCKETS * (NNUE_ACCUMULATOR * 2) * 2
+        output = np.frombuffer(data[offset:offset + output_bytes], dtype="<i2")
+        output = output.reshape(NNUE_OUTPUT_BUCKETS, NNUE_ACCUMULATOR * 2).astype(np.float32) / QB * SCALE / (400.0 / math.log(10.0))
+        offset += output_bytes
+        bias_bytes = NNUE_OUTPUT_BUCKETS * 2
+        output_bias = np.frombuffer(data[offset:offset + bias_bytes], dtype="<i2").astype(np.float32)
         output_bias = output_bias / QAB * SCALE / (400.0 / math.log(10.0))
     else:
-        raise ValueError(f"NNUE boyutu geçersiz: {len(data)} (Beklenen: 16-kova {NNUE_FILE_SIZE} veya 1-kova {old_768_file_size})")
+        raise ValueError(f"NNUE boyutu geçersiz: {len(data)} (Beklenen: 8-out {NNUE_FILE_SIZE}, 1-out {NNUE_1OUT_FILE_SIZE} veya 768 {old_768_file_size})")
 
     with torch.no_grad():
         model.embedding.weight.copy_(torch.from_numpy(feature))
         model.feature_bias.copy_(torch.from_numpy(bias))
-        model.output.weight.copy_(torch.from_numpy(output.reshape(1, -1)))
-        model.output.bias.copy_(torch.from_numpy(output_bias))
+        model.output_weights.copy_(torch.from_numpy(output))
+        model.output_biases.copy_(torch.from_numpy(output_bias))
 
 
 def _torch_device(torch: Any, requested: str) -> Any:

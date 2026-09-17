@@ -842,7 +842,8 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     else if (command == "eval") {
       if (nnue_loaded) {
         thread_info.nnue_state.reset_nnue(position);
-        const int raw = thread_info.nnue_state.evaluate(position.color);
+        const int piece_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
+        const int raw = thread_info.nnue_state.evaluate(position.color, piece_count);
         safe_printf("info string NNUE raw: %d (eval: %d cp)\n",
                     raw, raw * 100 / NormalizationFactor);
       }

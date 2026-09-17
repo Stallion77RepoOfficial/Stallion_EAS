@@ -20,27 +20,6 @@
 
 inline bool tb_initialized = false;
 
-inline void compute_human_params(ThreadInfo &thread_info) noexcept {
-  const int elo = thread_info.human_elo;
-  const int delta = std::clamp(3401 - elo, 0, 3000);
-  thread_info.human_value_margin = std::min(15 + delta / 30, 120);
-  thread_info.human_noise_sigma = std::min(delta / 25, 120);
-  int depth_cap = 0;
-  if (elo < 3300) {
-    if (elo <= 1300)
-      depth_cap = 12;
-    else if (elo <= 1500)
-      depth_cap = 14;
-    else if (elo <= 1800)
-      depth_cap = 16;
-    else if (elo <= 2000)
-      depth_cap = 14;
-    else
-      depth_cap = 8 + (elo - 1200) * 8 / 2100;
-  }
-  thread_info.human_depth_limit = depth_cap;
-}
-
 inline void run_thread(BoardState &position, ThreadInfo &thread_info, std::thread &s) {
   thread_data.stop = false;
   s = std::thread(search_position, std::ref(position), std::ref(thread_info),
@@ -247,8 +226,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           "option name Hash type spin default 256 min 1 max 131072\n"
           "option name Threads type spin default 1 min 1 max 1024\n"
           "option name MultiPV type spin default 1 min 1 max 256\n"
-          "option name UCI_LimitStrength type check default false\n"
-          "option name UCI_Elo type spin default 3401 min 500 max 3401\n"
           "option name UCI_Chess960 type check default false\n"
           "option name MaxMoveTime type spin default 0 min 0 max 10000\n"
           "option name MoveOverhead type spin default 30 min 0 max 1000\n"
@@ -415,22 +392,9 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         int mv;
         if (!set_spin_req(1, 256, mv)) continue;
         thread_info.multipv = static_cast<uint16_t>(mv);
-      } else if (optName == "uci_limitstrength") {
-        bool b = to_bool(valueStr);
-        thread_info.is_human = b;
-        if (!b) {
-          thread_info.human_value_margin = 0;
-          thread_info.human_noise_sigma = 0;
-          thread_info.human_depth_limit = 0;
-        } else {
-          compute_human_params(thread_info);
-        }
       } else if (optName == "uci_chess960") {
         bool b = to_bool(valueStr);
         thread_data.is_frc = b;
-      } else if (optName == "uci_elo") {
-        if (!set_spin_req(500, 3401, thread_info.human_elo)) continue;
-        if (thread_info.is_human) compute_human_params(thread_info);
       } else if (optName == "maxmovetime") {
         int v;
         if (!set_spin_req(0, 10000, v)) continue;
@@ -830,11 +794,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         thread_info.max_iter_depth =
             std::min(thread_info.max_iter_depth,
                      static_cast<int>(thread_info.max_depth));
-      }
-
-      if (thread_info.is_human && thread_info.human_depth_limit > 0) {
-        thread_info.max_iter_depth =
-            std::min(thread_info.max_iter_depth, thread_info.human_depth_limit);
       }
 
       if (thread_info.max_nodes > 0) {

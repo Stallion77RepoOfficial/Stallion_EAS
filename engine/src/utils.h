@@ -125,13 +125,6 @@ struct ThreadInfoBase {
   uint64_t max_nodes_searched = UINT64_MAX / 2;
   uint64_t opt_nodes_searched = UINT64_MAX / 2;
 
-  bool is_human = false;
-
-  int human_value_margin = 0;
-  int human_noise_sigma = 0;
-  int human_depth_limit = 0;
-  int human_elo = 3401;
-
   std::array<Action, MaxSearchPly * MaxSearchPly> pv;
 
   BoardState position;
@@ -745,7 +738,8 @@ inline void adjust_soft_limit(ThreadInfo &thread_info, uint64_t best_move_nodes,
     factor *= 1.5;
   }
 
-  const double win_rate = 1.0 / (1.0 + std::exp(WDL_A * best_score));
+  constexpr double WdlK = -0.003;
+  const double win_rate = 1.0 / (1.0 + std::exp(WdlK * best_score));
   const double closeness = 1.0 - std::abs(win_rate - 0.5) * 2.0;
   const double wdl_factor = 1.0 + closeness * 0.5;
 

@@ -163,33 +163,11 @@ inline bool out_of_time(ThreadInfo &thread_info) noexcept {
 
 inline int16_t material_eval(const BoardState &position) noexcept {
   int m = 0;
-
   for (int pt = 1; pt <= 5; pt++) {
-    const int count = position.material_count[(pt - 1) * 2];
-    if (count > 0) {
-      m += count * MaterialBasis[pt];
-
-      for (int pt2 = 1; pt2 <= 5; pt2++) {
-        const int total_count_pt2 = position.material_count[(pt2 - 1) * 2] +
-                                    position.material_count[(pt2 - 1) * 2 + 1];
-        m += count * total_count_pt2 * QuadraticImbalance[pt][pt2];
-      }
-    }
+    const int white_count = position.material_count[(pt - 1) * 2];
+    const int black_count = position.material_count[(pt - 1) * 2 + 1];
+    m += (white_count - black_count) * MaterialValues[pt];
   }
-
-  for (int pt = 1; pt <= 5; pt++) {
-    const int count = position.material_count[(pt - 1) * 2 + 1];
-    if (count > 0) {
-      m -= count * MaterialBasis[pt];
-
-      for (int pt2 = 1; pt2 <= 5; pt2++) {
-        const int total_count_pt2 = position.material_count[(pt2 - 1) * 2] +
-                                    position.material_count[(pt2 - 1) * 2 + 1];
-        m -= count * total_count_pt2 * QuadraticImbalance[pt][pt2];
-      }
-    }
-  }
-
   return position.color ? -m : m;
 }
 
@@ -1306,8 +1284,7 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
           goto finish;
         }
 
-        if (thread_info.thread_id == 0 &&
-            !(thread_info.is_human && thread_info.multipv_index)) {
+        if (thread_info.thread_id == 0) {
           std::string bound_string;
           if (score >= beta) {
             bound_string = "lowerbound";
@@ -1547,88 +1524,6 @@ finish:
         thread_info.ponder_move = tt_entry.best_move;
       } else {
         thread_info.ponder_move = MoveNone;
-      }
-    }
-  }
-
-  if (thread_info.thread_id == 0 && thread_info.is_human) {
-
-    bool can_weaken = !(thread_info.pondering && !thread_info.ponder_hit);
-    if (can_weaken && thread_info.best_moves[0] != MoveNone) {
-
-      int true_top = thread_info.best_scores[0];
-      for (int i = 1; i < 16 && thread_info.best_moves[i] != MoveNone; i++)
-        if (thread_info.best_scores[i] > true_top)
-          true_top = thread_info.best_scores[i];
-
-      int base_margin = std::max(0, thread_info.human_value_margin);
-      int margin = (int)std::lround(base_margin * 0.45);
-
-      if (thread_info.human_elo <= 1600) {
-        double elo_scale = (thread_info.human_elo - HUMAN_ELO_MIN) /
-                           static_cast<double>(HUMAN_ELO_RANGE);
-        if (elo_scale < 0)
-          elo_scale = 0;
-        if (elo_scale > 1)
-          elo_scale = 1;
-        margin = (int)std::lround(margin * (0.75 + 0.25 * elo_scale));
-      }
-
-      if (margin <= 0)
-        margin = 1;
-
-      std::vector<int> cand;
-      cand.reserve(16);
-      for (int i = 0; i < 16 && thread_info.best_moves[i] != MoveNone; i++) {
-        int diff = true_top - thread_info.best_scores[i];
-        if (diff >= 0 && diff <= margin)
-          cand.push_back(i);
-      }
-      if (cand.size() > 1) {
-
-        if (thread_info.human_noise_sigma > 0) {
-          int extra =
-              Random::dist(Random::rd) % (thread_info.human_noise_sigma + 1);
-          int widened = margin + extra;
-          for (int i = 0; i < 16 && thread_info.best_moves[i] != MoveNone;
-               i++) {
-            if (std::find(cand.begin(), cand.end(), i) != cand.end())
-              continue;
-            int diff = true_top - thread_info.best_scores[i];
-            if (diff > margin && diff <= widened)
-              cand.push_back(i);
-          }
-        }
-
-        int total_w = 0;
-        for (int idx : cand) {
-          int diff = true_top - thread_info.best_scores[idx];
-          int w = (margin - diff) + 5;
-          if (w < 1)
-            w = 1;
-          total_w += w;
-        }
-        if (total_w <= 0)
-          total_w = (int)cand.size();
-        int r = Random::dist(Random::rd) % total_w;
-        int chosen_idx = cand[0];
-        for (int idx : cand) {
-          int diff = true_top - thread_info.best_scores[idx];
-          int w = (margin - diff) + 5;
-          if (w < 1)
-            w = 1;
-          if (r < w) {
-            chosen_idx = idx;
-            break;
-          }
-          r -= w;
-        }
-        if (chosen_idx != 0) {
-          std::swap(thread_info.best_moves[0],
-                    thread_info.best_moves[chosen_idx]);
-          std::swap(thread_info.best_scores[0],
-                    thread_info.best_scores[chosen_idx]);
-        }
       }
     }
   }

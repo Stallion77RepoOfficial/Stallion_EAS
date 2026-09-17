@@ -61,27 +61,10 @@ TUNE_PARAM(MultiCutMoves, 6, 2, 8);
 TUNE_PARAM(MultiCutCuts, 3, 1, 5);
 TUNE_PARAM(HistPruneDepth, 4, 2, 8);
 TUNE_PARAM(HistPruneThreshold, 6196, 1000, 8000);
-
-constexpr inline int MaterialBasis[6] = {0, 210, 800, 840, 1300, 2600};
-
-constexpr inline int QuadraticImbalance[6][6] = {
-    {0, 0, 0, 0, 0, 0},
-    {0, -3, -1, 2, 7, 0},
-    {0, -1, 5, 4, 5, 8},
-    {0, 0, 3, 5, 4, 9},
-    {0, -4, 2, 3, 4, 3},
-    {0, 1, -3, -3, 0, 0}
-};
-
 inline int NormalizationFactor = 195;
 inline int HALFMOVE_SCALE_MAX = 200;
 inline int DELTA_MARGIN_BASE = 180;
 inline int HistExtThreshold = 7000;
-
-constexpr inline double WDL_A = -0.003;
-
-constexpr inline int HUMAN_ELO_MIN = 500;
-constexpr inline int HUMAN_ELO_RANGE = 1100;
 
 inline void print_params_for_ob() {
   for (const auto &param : params) {

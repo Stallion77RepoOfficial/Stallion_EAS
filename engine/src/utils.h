@@ -725,7 +725,7 @@ inline bool TimeManager::should_stop(uint64_t elapsed, bool best_move_stable,
 }
 
 inline void adjust_soft_limit(ThreadInfo &thread_info, uint64_t best_move_nodes,
-                              int bm_stability, int best_score) noexcept {
+                              int bm_stability, [[maybe_unused]] int best_score) noexcept {
   const uint64_t node_count = thread_info.nodes.load(std::memory_order_relaxed);
   if (node_count == 0)
     return;
@@ -738,11 +738,6 @@ inline void adjust_soft_limit(ThreadInfo &thread_info, uint64_t best_move_nodes,
     factor *= 1.5;
   }
 
-  constexpr double WdlK = -0.003;
-  const double win_rate = 1.0 / (1.0 + std::exp(WdlK * best_score));
-  const double closeness = 1.0 - std::abs(win_rate - 0.5) * 2.0;
-  const double wdl_factor = 1.0 + closeness * 0.5;
-
   double node_factor = 1.0;
   if (node_count > 100000) {
     node_factor = std::min(2.0, node_count / 50000.0);
@@ -750,7 +745,7 @@ inline void adjust_soft_limit(ThreadInfo &thread_info, uint64_t best_move_nodes,
 
   const uint64_t new_time =
       static_cast<uint64_t>(std::clamp<long double>(
-          static_cast<long double>(thread_info.original_opt) * factor * bm_factor * node_factor * wdl_factor,
+          static_cast<long double>(thread_info.original_opt) * factor * bm_factor * node_factor,
           1.0L, static_cast<long double>(thread_info.max_time)));
   thread_info.opt_time = std::min<uint64_t>(new_time, thread_info.max_time);
 }

@@ -221,7 +221,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           "id name Stallion EAS NNUE\n"
           "id author LegendOfCompiling\n"
 
-          "option name Use NNUE type check default true\n"
           "option name EvalFile type string default nets/stallion.nnue\n"
           "option name Hash type spin default 256 min 1 max 131072\n"
           "option name Threads type spin default 1 min 1 max 1024\n"
@@ -349,8 +348,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         continue;
       }
 
-      if (optName == "use nnue" || optName == "usennue" || optName == "use_nnue" ||
-          optName == "uci_limitstrength" || optName == "uci_chess960" || optName == "ponder" ||
+      if (optName == "uci_chess960" || optName == "ponder" ||
           optName == "usesyzygy" || optName == "syzygy50moverule" || optName == "useopeningbook") {
         const auto value = lowercase(valueStr);
         if (value != "true" && value != "false" && value != "1" && value != "0" &&
@@ -363,9 +361,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       std::fill(TT.begin(), TT.end(), TTBucket{});
       thread_info.PawnCorrHist.fill({});
       thread_info.NonPawnCorrHist.fill({});
-      if (optName == "use nnue" || optName == "usennue" || optName == "use_nnue") {
-        use_nnue = to_bool(valueStr);
-      } else if (optName == "evalfile") {
+      if (optName == "evalfile") {
         const bool loaded = load_nnue(resolve_file_path(valueStr));
         safe_printf("info string EvalFile %s\n", loaded ? "loaded" : "load failed; previous network retained");
       } else if (optName == "hash") {
@@ -552,8 +548,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
               position.board[extract_from(move)];
           thread_info.game_hist[thread_info.game_ply].is_cap =
               is_cap(position, move);
-          thread_info.game_hist[thread_info.game_ply].m_diff =
-              material_eval(position);
           if (thread_info.game_ply + 1 < MaxGameLen)
             thread_info.game_ply++;
 
@@ -846,14 +840,11 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     }
 
     else if (command == "eval") {
-      if (use_nnue && nnue_loaded) {
+      if (nnue_loaded) {
         thread_info.nnue_state.reset_nnue(position);
         const int raw = thread_info.nnue_state.evaluate(position.color);
         safe_printf("info string NNUE raw: %d (eval: %d cp)\n",
                     raw, raw * 100 / NormalizationFactor);
-      } else {
-        safe_printf("info string Material eval: %d cp\n",
-                    material_eval(position));
       }
     }
 

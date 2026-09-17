@@ -161,16 +161,6 @@ inline bool out_of_time(ThreadInfo &thread_info) noexcept {
   return false;
 }
 
-inline int16_t material_eval(const BoardState &position) noexcept {
-  int m = 0;
-  for (int pt = 1; pt <= 5; pt++) {
-    const int white_count = position.material_count[(pt - 1) * 2];
-    const int black_count = position.material_count[(pt - 1) * 2 + 1];
-    m += (white_count - black_count) * MaterialValues[pt];
-  }
-  return position.color ? -m : m;
-}
-
 inline bool has_non_pawn_material(const BoardState &position, int color) noexcept {
   const int s_indx = 2 + color;
   return (position.material_count[s_indx] ||
@@ -180,10 +170,7 @@ inline bool has_non_pawn_material(const BoardState &position, int color) noexcep
 }
 
 inline int eval(BoardState &position, ThreadInfo &thread_info) {
-  if (use_nnue && nnue_loaded) {
-    return thread_info.nnue_state.evaluate(position.color);
-  }
-  return material_eval(position);
+  return thread_info.nnue_state.evaluate(position.color);
 }
 
 inline int correct_eval(const BoardState &position, const ThreadInfo &thread_info,
@@ -215,7 +202,6 @@ inline void ss_push(const BoardState &position, ThreadInfo &thread_info, Action 
   record.played_move = move;
   record.piece_moved = move == MoveNone ? Pieces::Blank : position.board[extract_from(move)];
   record.is_cap = is_cap(position, move);
-  record.m_diff = material_eval(position);
   ++thread_info.search_ply;
   ++thread_info.game_ply;
 }
@@ -224,7 +210,7 @@ inline void ss_pop(ThreadInfo &thread_info) noexcept {
   assert(thread_info.search_ply > 0 && thread_info.game_ply > 0);
   --thread_info.search_ply;
   --thread_info.game_ply;
-  if (use_nnue && nnue_loaded) thread_info.nnue_state.pop();
+  if (nnue_loaded) thread_info.nnue_state.pop();
 }
 
 inline bool material_draw(const BoardState &position) noexcept {
@@ -1181,7 +1167,7 @@ inline std::string format_pv(const BoardState &position, const ThreadInfo &threa
 inline void prepare_search_evaluator([[maybe_unused]] const BoardState &position,
                                      ThreadInfo &info,
                                      std::vector<TTBucket> &table) noexcept {
-  const NNUE_Params *network = use_nnue ? g_nnue : nullptr;
+  const NNUE_Params *network = g_nnue;
   if (info.cached_eval_network != network) {
     std::fill(table.begin(), table.end(), TTBucket{});
     info.PawnCorrHist.fill({});
@@ -1199,7 +1185,7 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
   thread_info.nodes.store(0);
   thread_info.time_checks = 0;
   thread_info.search_ply = 0;
-  if (use_nnue && nnue_loaded) {
+  if (nnue_loaded) {
     thread_info.nnue_state.reset_nnue(position);
   }
   thread_info.excluded_move = MoveNone;

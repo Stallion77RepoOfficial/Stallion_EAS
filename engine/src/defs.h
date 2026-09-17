@@ -136,7 +136,6 @@ struct GameHistory {
   uint8_t piece_moved = Pieces::Blank;
 
   bool is_cap = false;
-  int16_t m_diff = 0;
   int32_t static_eval = 0;
 };
 

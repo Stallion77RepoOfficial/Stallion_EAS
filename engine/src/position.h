@@ -252,7 +252,7 @@ constexpr inline bool is_cap(const BoardState &position, Action move) noexcept {
 
 inline void update_nnue_state(ThreadInfo &thread_info, Action move,
                               const BoardState &position, const BoardState & /*new_position*/) noexcept {
-  if (!use_nnue || !nnue_loaded) return;
+  if (!nnue_loaded) return;
 
   if (move == MoveNone) {
     thread_info.nnue_state.push_null();

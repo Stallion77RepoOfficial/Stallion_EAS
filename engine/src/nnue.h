@@ -46,7 +46,6 @@ inline std::unique_ptr<NNUE_Params> g_nnue_data = nullptr;
 
 inline const NNUE_Params *g_nnue = nullptr;
 inline bool nnue_loaded = false;
-inline bool use_nnue = true;
 
 inline std::unique_ptr<NNUE_Params> read_nnue_binary(const std::string &path) {
   constexpr size_t words = INPUT_SIZE * LAYER1_SIZE + LAYER1_SIZE * 3 + 1;

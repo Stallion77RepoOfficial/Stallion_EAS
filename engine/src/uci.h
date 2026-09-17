@@ -185,9 +185,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
   new_game(thread_info, TT);
   set_board(position, thread_info,
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-  if (!load_nnue(resolve_file_path("nets/stallion.nnue"))) {
-    load_nnue(resolve_file_path("nets/base.nnue"));
-  }
+  load_nnue(resolve_file_path("nets/stallion.nnue"));
 
   std::string input;
 

@@ -577,7 +577,7 @@ def mine_hard_dataset(args: argparse.Namespace) -> Path:
 
     source = resolve_path(getattr(args, "source", None) or getattr(args, "zst", None), DEFAULT_EVAL)
     source = require_file(source, "Eval SBIN kaynağı")
-    model_path = resolve_path(getattr(args, "model", None), NETS / "base.nnue")
+    model_path = resolve_path(getattr(args, "model", None), NETS / "stallion.nnue")
     model_path = require_network(model_path, "Madencilik Modeli")
     output = resolve_path(args.output, ROOT / "data" / "base_hard.sbin")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -2622,8 +2622,8 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.resume = resolve_path(args.resume)
     args.candidate = resolve_path(args.candidate)
     args.baseline = resolve_path(args.baseline)
-    args.fixed_base = resolve_path(args.fixed_base, NETS / "base.nnue")
-    args.fixed_aggressive = resolve_path(args.fixed_aggressive, NETS / "aggressive.nnue")
+    args.fixed_base = resolve_path(args.fixed_base, NETS / "stallion.nnue")
+    args.fixed_aggressive = resolve_path(args.fixed_aggressive, NETS / "stallion.nnue")
     if args.engine is None:
         filename = {"darwin": "stallion_eas_mac", "win32": "stallion_eas_windows.exe"}.get(sys.platform, "stallion_eas_linux")
         preferred = ENGINE_ROOT / filename

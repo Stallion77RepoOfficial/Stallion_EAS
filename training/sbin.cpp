@@ -266,6 +266,17 @@ int sbin_unpack_fen(const PackedPosition* in, char* fen_buf, size_t buf_len, flo
     return 0;
 }
 
+constexpr int KingBucketTable[64] = {
+    0,  1,  2,  3,  3,  2,  1,  0,
+    0,  1,  2,  3,  3,  2,  1,  0,
+    4,  5,  6,  7,  7,  6,  5,  4,
+    4,  5,  6,  7,  7,  6,  5,  4,
+    8,  9, 10, 11, 11, 10,  9,  8,
+    8,  9, 10, 11, 11, 10,  9,  8,
+   12, 13, 14, 15, 15, 14, 13, 12,
+   12, 13, 14, 15, 15, 14, 13, 12
+};
+
 int sbin_extract_nnue(const PackedPosition* in, int16_t* us, int16_t* them, int* out_white_turn) {
     if (!in || !us || !them) return -1;
     uint8_t board[64];
@@ -279,6 +290,20 @@ int sbin_extract_nnue(const PackedPosition* in, int16_t* us, int16_t* them, int*
     std::fill_n(us, 32, -1);
     std::fill_n(them, 32, -1);
 
+    int wking_sq = -1, bking_sq = -1;
+    uint64_t occ_scan = occ;
+    while (occ_scan) {
+        int sq = __builtin_ctzll(occ_scan);
+        occ_scan &= occ_scan - 1;
+        uint8_t code = board[sq];
+        if (code == 12) wking_sq = sq;
+        else if (code == 13) bking_sq = sq;
+    }
+    if (wking_sq < 0 || bking_sq < 0) return -1;
+
+    size_t w_bucket = static_cast<size_t>(KingBucketTable[wking_sq]);
+    size_t b_bucket = static_cast<size_t>(KingBucketTable[bking_sq ^ 56]);
+
     while (occ) {
         int sq = __builtin_ctzll(occ);
         occ &= occ - 1;
@@ -286,8 +311,8 @@ int sbin_extract_nnue(const PackedPosition* in, int16_t* us, int16_t* them, int*
 
         uint8_t color = code & 1;
         uint8_t base = (code >> 1) - 1;
-        int16_t white_idx = static_cast<int16_t>(color * 384 + base * 64 + sq);
-        int16_t black_idx = static_cast<int16_t>((color ^ 1) * 384 + base * 64 + (sq ^ 56));
+        int16_t white_idx = static_cast<int16_t>(w_bucket * 768 + color * 384 + base * 64 + sq);
+        int16_t black_idx = static_cast<int16_t>(b_bucket * 768 + (color ^ 1) * 384 + base * 64 + (sq ^ 56));
 
         if (white_turn) {
             us[count] = white_idx;

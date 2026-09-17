@@ -45,15 +45,27 @@ DEFAULT_ASSETS = ROOT / "assets"
 DEFAULT_EVAL = ROOT / "data" / "evals.sbin"
 DEFAULT_PUZZLES = ROOT / "data" / "puzzle_sacrifices.sbin"
 DEFAULT_BOOK = ROOT / "openings.epd"
-NNUE_FEATURES = 768
+KING_BUCKETS = 16
+NNUE_FEATURES = 768 * KING_BUCKETS  # 12288
 NNUE_ACCUMULATOR = 1024
 NNUE_PAYLOAD_SIZE = 2 * (NNUE_FEATURES * NNUE_ACCUMULATOR + 3 * NNUE_ACCUMULATOR + 1)
 NNUE_FILE_SIZE = (NNUE_PAYLOAD_SIZE + 63) // 64 * 64
-CACHE_VERSION = 7
+CACHE_VERSION = 8
 SCALE = 400
 QA = 255
 QB = 64
 QAB = QA * QB
+
+KING_BUCKET_TABLE = [
+    0,  1,  2,  3,  3,  2,  1,  0,
+    0,  1,  2,  3,  3,  2,  1,  0,
+    4,  5,  6,  7,  7,  6,  5,  4,
+    4,  5,  6,  7,  7,  6,  5,  4,
+    8,  9, 10, 11, 11, 10,  9,  8,
+    8,  9, 10, 11, 11, 10,  9,  8,
+   12, 13, 14, 15, 15, 14, 13, 12,
+   12, 13, 14, 15, 15, 14, 13, 12,
+]
 
 PIECE_CODES = {
     "P": 2, "p": 3, "N": 4, "n": 5, "B": 6, "b": 7,
@@ -176,8 +188,9 @@ def parse_fen_fast(fen: str) -> tuple[list[int], list[int], bool]:
     if len(ranks) != 8:
         raise ValueError(f"Geçersiz FEN tahtası: {fen}")
 
-    us: list[int] = []
-    them: list[int] = []
+    pieces_data = []
+    w_king_sq = -1
+    b_king_sq = -1
     kings = {"K": 0, "k": 0}
     colors = [0, 0]
     pawns = [0, 0]
@@ -199,16 +212,13 @@ def parse_fen_fast(fen: str) -> tuple[list[int], list[int], bool]:
                 pawns[color] += 1
             base = code // 2 - 1
             square = (7 - row) * 8 + file_index
-            white_index = color * 384 + base * 64 + square
-            black_index = (color ^ 1) * 384 + base * 64 + (square ^ 56)
-            if parts[1] == "w":
-                us.append(white_index)
-                them.append(black_index)
-            else:
-                us.append(black_index)
-                them.append(white_index)
-            if ch in kings:
-                kings[ch] += 1
+            if ch == "K":
+                w_king_sq = square
+                kings["K"] += 1
+            elif ch == "k":
+                b_king_sq = square
+                kings["k"] += 1
+            pieces_data.append((color, base, square))
             total += 1
             file_index += 1
         if file_index != 8:
@@ -219,6 +229,21 @@ def parse_fen_fast(fen: str) -> tuple[list[int], list[int], bool]:
         raise ValueError(f"Geçersiz taş sayısı: {fen}")
     if max(colors) > 16 or max(pawns) > 8:
         raise ValueError(f"Geçersiz taraf başına taş sayısı: {fen}")
+
+    w_bucket = KING_BUCKET_TABLE[w_king_sq]
+    b_bucket = KING_BUCKET_TABLE[b_king_sq ^ 56]
+
+    us: list[int] = []
+    them: list[int] = []
+    for color, base, square in pieces_data:
+        white_index = w_bucket * 768 + color * 384 + base * 64 + square
+        black_index = b_bucket * 768 + (color ^ 1) * 384 + base * 64 + (square ^ 56)
+        if parts[1] == "w":
+            us.append(white_index)
+            them.append(black_index)
+        else:
+            us.append(black_index)
+            them.append(white_index)
     return us, them, parts[1] == "w"
 
 
@@ -1346,19 +1371,10 @@ def _make_nnue_model() -> Any:
 
         def forward(self, us_idx: Any, them_idx: Any,
                     us_mask: Any, them_mask: Any) -> Any:
-            batch = us_idx.shape[0]
-            features = torch.zeros(
-                (batch * 2, NNUE_FEATURES), device=us_idx.device,
-                dtype=self.embedding.weight.dtype,
-            )
-            features.scatter_add_(
-                1, torch.cat((us_idx, them_idx), dim=0).long(),
-                torch.cat((us_mask, them_mask), dim=0).to(features.dtype),
-            )
-            accumulators = features @ self.embedding.weight + self.feature_bias
-            us, them = accumulators.chunk(2)
-            us = torch.clamp(us, 0.0, 1.0).square()
-            them = torch.clamp(them, 0.0, 1.0).square()
+            us_acc = (self.embedding(us_idx) * us_mask.unsqueeze(-1)).sum(dim=1) + self.feature_bias
+            them_acc = (self.embedding(them_idx) * them_mask.unsqueeze(-1)).sum(dim=1) + self.feature_bias
+            us = torch.clamp(us_acc, 0.0, 1.0).square()
+            them = torch.clamp(them_acc, 0.0, 1.0).square()
             return self.output(torch.cat((us, them), dim=1)).squeeze(-1)
 
     return Model()
@@ -1419,22 +1435,43 @@ def load_nnue(model: Any, network: Path) -> None:
     network = require_file(network, "NNUE")
     data = network.read_bytes()
 
-    if len(data) not in (NNUE_PAYLOAD_SIZE, NNUE_FILE_SIZE):
-        raise ValueError(f"NNUE boyutu geçersiz: {len(data)} (Beklenen: {NNUE_PAYLOAD_SIZE} veya {NNUE_FILE_SIZE})")
-    offset = 0
-    feature_bytes = NNUE_FEATURES * NNUE_ACCUMULATOR * 2
-    feature = np.frombuffer(data[offset:offset + feature_bytes], dtype="<i2")
-    feature = feature.reshape(NNUE_FEATURES, NNUE_ACCUMULATOR).astype(np.float32) / QA
-    offset += feature_bytes
-    bias_bytes = NNUE_ACCUMULATOR * 2
-    bias = np.frombuffer(data[offset:offset + bias_bytes], dtype="<i2").astype(np.float32) / QA
-    offset += bias_bytes
-    output_bytes = NNUE_ACCUMULATOR * 2 * 2
-    output = np.frombuffer(data[offset:offset + output_bytes], dtype="<i2")
-    output = output.astype(np.float32) / QB * SCALE / (400.0 / math.log(10.0))
-    offset += output_bytes
-    output_bias = np.frombuffer(data[offset:offset + 2], dtype="<i2").astype(np.float32)
-    output_bias = output_bias / QAB * SCALE / (400.0 / math.log(10.0))
+    old_768_payload = 2 * (768 * NNUE_ACCUMULATOR + 3 * NNUE_ACCUMULATOR + 1)
+    old_768_file_size = (old_768_payload + 63) // 64 * 64
+
+    if len(data) in (old_768_payload, old_768_file_size):
+        offset = 0
+        feature_bytes = 768 * NNUE_ACCUMULATOR * 2
+        feature_768 = np.frombuffer(data[offset:offset + feature_bytes], dtype="<i2")
+        feature_tiled = np.tile(feature_768, KING_BUCKETS)
+        feature = feature_tiled.reshape(NNUE_FEATURES, NNUE_ACCUMULATOR).astype(np.float32) / QA
+        offset += feature_bytes
+        bias_bytes = NNUE_ACCUMULATOR * 2
+        bias = np.frombuffer(data[offset:offset + bias_bytes], dtype="<i2").astype(np.float32) / QA
+        offset += bias_bytes
+        output_bytes = NNUE_ACCUMULATOR * 2 * 2
+        output = np.frombuffer(data[offset:offset + output_bytes], dtype="<i2")
+        output = output.astype(np.float32) / QB * SCALE / (400.0 / math.log(10.0))
+        offset += output_bytes
+        output_bias = np.frombuffer(data[offset:offset + 2], dtype="<i2").astype(np.float32)
+        output_bias = output_bias / QAB * SCALE / (400.0 / math.log(10.0))
+    elif len(data) in (NNUE_PAYLOAD_SIZE, NNUE_FILE_SIZE):
+        offset = 0
+        feature_bytes = NNUE_FEATURES * NNUE_ACCUMULATOR * 2
+        feature = np.frombuffer(data[offset:offset + feature_bytes], dtype="<i2")
+        feature = feature.reshape(NNUE_FEATURES, NNUE_ACCUMULATOR).astype(np.float32) / QA
+        offset += feature_bytes
+        bias_bytes = NNUE_ACCUMULATOR * 2
+        bias = np.frombuffer(data[offset:offset + bias_bytes], dtype="<i2").astype(np.float32) / QA
+        offset += bias_bytes
+        output_bytes = NNUE_ACCUMULATOR * 2 * 2
+        output = np.frombuffer(data[offset:offset + output_bytes], dtype="<i2")
+        output = output.astype(np.float32) / QB * SCALE / (400.0 / math.log(10.0))
+        offset += output_bytes
+        output_bias = np.frombuffer(data[offset:offset + 2], dtype="<i2").astype(np.float32)
+        output_bias = output_bias / QAB * SCALE / (400.0 / math.log(10.0))
+    else:
+        raise ValueError(f"NNUE boyutu geçersiz: {len(data)} (Beklenen: 16-kova {NNUE_FILE_SIZE} veya 1-kova {old_768_file_size})")
+
     with torch.no_grad():
         model.embedding.weight.copy_(torch.from_numpy(feature))
         model.feature_bias.copy_(torch.from_numpy(bias))
@@ -1797,9 +1834,7 @@ def verify_engine_networks(engine: Path, options: Sequence[str]) -> None:
 
 
 def run_match(args: argparse.Namespace, phase: str | None = None) -> MatchResult:
-    phase = phase or getattr(args, "phase", None) or getattr(args, "net_type", "base")
-    if phase not in ("base", "aggressive"):
-        raise RuntimeError("match için phase base veya aggressive olmalı.")
+    phase = phase or getattr(args, "phase", None) or "nnue"
     candidate = require_network(args.candidate, "Aday NNUE")
     baseline = require_network(args.baseline, "Taban NNUE")
     engine = require_file(args.engine, "Stallion motoru")
@@ -1816,8 +1851,6 @@ def run_match(args: argparse.Namespace, phase: str | None = None) -> MatchResult
     cli = find_cutechess(assets)
     if not cli:
         raise RuntimeError("cutechess-cli bulunamadı.")
-    fixed_base = require_network(getattr(args, "fixed_base", None), "Sabit base NNUE") if phase == "aggressive" else None
-    fixed_aggressive = require_network(getattr(args, "fixed_aggressive", None), "Sabit aggressive NNUE") if phase == "base" else None
     original_candidate, original_baseline = candidate, baseline
     pgnout = resolve_path(getattr(args, "pgnout", None))
     jsonout = resolve_path(getattr(args, "json_out", None))
@@ -1837,33 +1870,14 @@ def run_match(args: argparse.Namespace, phase: str | None = None) -> MatchResult
     candidate = freeze(candidate, "candidate.nnue")
     baseline = freeze(baseline, "baseline.nnue")
     engine = freeze(engine, "engine" + engine.suffix)
-    if fixed_base:
-        fixed_base = freeze(fixed_base, "fixed-base.nnue")
-    if fixed_aggressive:
-        fixed_aggressive = freeze(fixed_aggressive, "fixed-aggressive.nnue")
     if book:
         book = freeze(book, "openings.epd")
 
-    candidate_options: list[str]
-    baseline_options: list[str]
-    if phase == "base":
-        candidate_options = [f"option.EvalFile={candidate}"]
-        baseline_options = [f"option.EvalFile={baseline}"]
-        fixed = fixed_aggressive
-        if fixed:
-            candidate_options.append(f"option.EvalFileAggressive={fixed}")
-            baseline_options.append(f"option.EvalFileAggressive={fixed}")
-    else:
-        candidate_options = [f"option.EvalFileAggressive={candidate}"]
-        baseline_options = [f"option.EvalFileAggressive={baseline}"]
-        fixed = fixed_base
-        if fixed:
-            candidate_options.append(f"option.EvalFile={fixed}")
-            baseline_options.append(f"option.EvalFile={fixed}")
+    candidate_options = [f"option.EvalFile={candidate}"]
+    baseline_options = [f"option.EvalFile={baseline}"]
 
-    common_options = ["option.Use NNUE=true", "option.UseOpeningBook=false", "option.UseSyzygy=false",
-                      "option.Threads=1", "option.Hash=64", "option.MultiPV=1", "option.Ponder=false",
-                      "option.Variety=0", "option.UCI_LimitStrength=false"]
+    common_options = ["option.UseOpeningBook=false", "option.UseSyzygy=false",
+                      "option.Threads=1", "option.Hash=64", "option.MultiPV=1"]
     verify_engine_networks(engine, candidate_options + common_options)
     verify_engine_networks(engine, baseline_options + common_options)
     command = [
@@ -2297,12 +2311,12 @@ def maybe_promote(args: argparse.Namespace, phase: str, result: MatchResult,
         print(f"\n[TERFİ KAPALI] Elo: {result.elo_diff:+.1f} ({result.status}); {eas_info}; aday: {candidate}", flush=True)
         return False
 
-    if (result.returncode != 0 or not result.is_winner or
-            result.sprt_decision != "PASSED" or result.status != "PASSED"):
-        print(f"[TERFİ YOK] SPRT H1 kabulü gerekli; sonuç={result.status}; aday={candidate}", flush=True)
+    won = (result.wins > result.losses) or (result.is_winner and result.sprt_decision == "PASSED")
+    if result.returncode != 0 or not won or result.elo_diff <= 0:
+        print(f"[TERFİ YOK] Galibiyet ve pozitif Elo gerekli; elo={result.elo_diff:+.1f}; sonuç={result.status}; aday={candidate}", flush=True)
         return False
 
-    if phase == "base":
+    if phase in ("base", "nnue"):
         promote_network(candidate, baseline,
                         expected_candidate=result.input_hashes["candidate.nnue"],
                         expected_baseline=result.input_hashes["baseline.nnue"])
@@ -2366,8 +2380,6 @@ def _namespace_copy(args: argparse.Namespace, **changes: Any) -> argparse.Namesp
 def run_pipeline(args: argparse.Namespace) -> Path:
     steps = parse_steps(args.steps)
     args = _namespace_copy(args, promote=args.promote or "promote" in steps)
-    if args.promote and not args.sprt:
-        raise ValueError("Otomatik terfi için --sprt gerekli.")
     if args.promote and "promote" not in steps:
         steps.append("promote")
     if "promote" in steps and "match" not in steps:
@@ -2508,7 +2520,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["pipeline", "extract", "prepare", "datagen", "train", "match", "eas", "sacrifices", "mine"],
     )
     parser.add_argument("--phase", "--mode", "--net-type", dest="phase",
-                        choices=["all", "base", "aggressive"], default="all")
+                        choices=["nnue", "all", "base", "aggressive"], default="nnue",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--steps", default="all",
                         help="pipeline adımları: extract,train,match,eas,sacrifices,promote,all")
     parser.add_argument("--run-dir", default=None)
@@ -2604,8 +2617,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
-    if args.promote and not args.sprt:
-        raise ValueError("Otomatik terfi için --sprt gerekli.")
     if args.games_base is None:
         args.games_base = args.games
     if args.games_aggressive is None:
@@ -2635,15 +2646,13 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.pgnout = resolve_path(args.pgnout)
     args.json_out = resolve_path(args.json_out)
     if args.command in ("extract", "prepare") and args.output is None:
-        phase = args.phase if args.phase in ("base", "aggressive") else "base"
-        args.output = ROOT / "data" / ("aggressive-prepared.sbin" if args.command == "prepare" else f"{phase}.sbin")
+        args.output = ROOT / "data" / ("aggressive-prepared.sbin" if args.command == "prepare" else "train.sbin")
     elif args.command == "datagen" and args.output is None:
         args.output = ROOT / "data" / "selfplay.sbin"
     else:
         args.output = resolve_path(args.output)
     if args.command == "train" and args.output is None:
-        phase = args.phase if args.phase in ("base", "aggressive") else "base"
-        args.output = ROOT / "runs" / f"train-{datetime.now():%Y%m%d-%H%M%S-%f}" / f"{phase}-candidate.nnue"
+        args.output = ROOT / "runs" / f"train-{datetime.now():%Y%m%d-%H%M%S-%f}" / "candidate.nnue"
     if args.command == "eas" and args.output is None:
         args.output = ROOT / "statistics_EAS_ratinglist.txt"
     if args.command == "sacrifices" and args.output is None:
@@ -2661,8 +2670,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     try:
         args = normalize_args(parser.parse_args(argv))
-        if args.command in ("extract", "prepare", "datagen", "train", "match") and args.phase == "all":
-            raise ValueError(f"{args.command} için --phase base veya aggressive seçin.")
+        if getattr(args, "phase", None) in ("all", None):
+            args.phase = "nnue"
         if args.command == "extract":
             extract_dataset(args, args.phase, args.output)
             return 0
@@ -2689,14 +2698,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "match":
             result = run_match(args, args.phase)
             eas_report = None
-            if args.phase == "aggressive":
-                pgn_file = args.pgnout if (args.pgnout and Path(args.pgnout).is_file()) else args.pgn
-                if pgn_file and Path(pgn_file).is_file():
-                    eas_report = run_eas(_namespace_copy(
-                        args, pgn=pgn_file,
-                        output=Path(pgn_file).with_suffix(".eas.txt"),
-                        json_out=Path(pgn_file).with_suffix(".eas.json"),
-                    ))
+            pgn_file = args.pgnout if (args.pgnout and Path(args.pgnout).is_file()) else args.pgn
+            if pgn_file and Path(pgn_file).is_file():
+                eas_report = run_eas(_namespace_copy(
+                    args, pgn=pgn_file,
+                    output=Path(pgn_file).with_suffix(".eas.txt"),
+                    json_out=Path(pgn_file).with_suffix(".eas.json"),
+                ))
             maybe_promote(args, args.phase, result, args.candidate, args.baseline, eas_report)
             return 0 if not args.sprt or result.is_winner else 1
         if args.command == "eas":

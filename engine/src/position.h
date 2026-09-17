@@ -251,7 +251,7 @@ constexpr inline bool is_cap(const BoardState &position, Action move) noexcept {
 }
 
 inline void update_nnue_state(ThreadInfo &thread_info, Action move,
-                              const BoardState &position, const BoardState & /*new_position*/) noexcept {
+                              const BoardState &position, const BoardState &new_position) noexcept {
   if (!nnue_loaded) return;
 
   if (move == MoveNone) {
@@ -285,21 +285,62 @@ inline void update_nnue_state(ThreadInfo &thread_info, Action move,
   if (extract_type(move) == MoveTypes::Castling) {
     const int indx = color ? 56 : 0;
     const int side = to > from ? Sides::Kingside : Sides::Queenside;
-    if (side == Sides::Kingside) {
-      to = indx + 6;
-      thread_info.nnue_state.add_add_sub_sub(
-          from_piece, from, to, Pieces::WRook + color,
-          position.castling_squares[color][side], indx + 5);
+    const int king_to = (side == Sides::Kingside) ? (indx + 6) : (indx + 2);
+    const int rook_to = (side == Sides::Kingside) ? (indx + 5) : (indx + 3);
+
+    thread_info.nnue_state.add_add_sub_sub(
+        from_piece, from, king_to, Pieces::WRook + color,
+        position.castling_squares[color][side], rook_to);
+
+    if (color == Colors::White) {
+      const size_t old_b = KingBucketTable[from];
+      const size_t new_b = KingBucketTable[king_to];
+      if (old_b != new_b) {
+        thread_info.nnue_state.m_w_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
+        thread_info.nnue_state.refresh_white(new_position, new_b);
+      }
     } else {
-      to = indx + 2;
-      thread_info.nnue_state.add_add_sub_sub(
-          from_piece, from, to, Pieces::WRook + color,
-          position.castling_squares[color][side], indx + 3);
+      const size_t old_b = KingBucketTable[from ^ 56];
+      const size_t new_b = KingBucketTable[king_to ^ 56];
+      if (old_b != new_b) {
+        thread_info.nnue_state.m_b_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
+        thread_info.nnue_state.refresh_black(new_position, new_b);
+      }
     }
   } else if (captured_piece != Pieces::Blank && is_valid_square(captured_square)) {
     thread_info.nnue_state.add_sub_sub(from_piece, from, to_piece, to, captured_piece, captured_square);
+    if (from_piece == Pieces::WKing) {
+      const size_t old_b = KingBucketTable[from];
+      const size_t new_b = KingBucketTable[to];
+      if (old_b != new_b) {
+        thread_info.nnue_state.m_w_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
+        thread_info.nnue_state.refresh_white(new_position, new_b);
+      }
+    } else if (from_piece == Pieces::BKing) {
+      const size_t old_b = KingBucketTable[from ^ 56];
+      const size_t new_b = KingBucketTable[to ^ 56];
+      if (old_b != new_b) {
+        thread_info.nnue_state.m_b_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
+        thread_info.nnue_state.refresh_black(new_position, new_b);
+      }
+    }
   } else {
     thread_info.nnue_state.add_sub(from_piece, from, to_piece, to);
+    if (from_piece == Pieces::WKing) {
+      const size_t old_b = KingBucketTable[from];
+      const size_t new_b = KingBucketTable[to];
+      if (old_b != new_b) {
+        thread_info.nnue_state.m_w_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
+        thread_info.nnue_state.refresh_white(new_position, new_b);
+      }
+    } else if (from_piece == Pieces::BKing) {
+      const size_t old_b = KingBucketTable[from ^ 56];
+      const size_t new_b = KingBucketTable[to ^ 56];
+      if (old_b != new_b) {
+        thread_info.nnue_state.m_b_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
+        thread_info.nnue_state.refresh_black(new_position, new_b);
+      }
+    }
   }
 }
 

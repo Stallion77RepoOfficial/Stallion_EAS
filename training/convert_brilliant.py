@@ -80,11 +80,9 @@ def worker_convert(worker_id: int, pgn_path: str, start_offset: int, end_offset:
 
             target_plies = set()
             for p in plies:
-                if p > 1:
-                    target_plies.add(p - 1)
-                target_plies.add(p)
-                target_plies.add(p + 1)
-                target_plies.add(p + 2)
+                target_plies.add(p)      # Fedadan hemen önce (Karar anı)
+                target_plies.add(p + 1)  # Feda anı (Fedanın tahtadaki hali)
+                target_plies.add(p + 2)  # Fedadan hemen sonrası (Taktik devam hamlesi)
             max_target = max(target_plies)
 
             board = game.board()

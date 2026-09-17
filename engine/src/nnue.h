@@ -23,8 +23,20 @@
 #define STALLION_SIMD_SSE2 1
 #endif
 
-constexpr size_t INPUT_SIZE = 768;
+constexpr size_t KING_BUCKETS = 16;
+constexpr size_t INPUT_SIZE = 768 * KING_BUCKETS; // 12288
 constexpr size_t LAYER1_SIZE = 1024;
+
+constexpr int KingBucketTable[64] = {
+    0,  1,  2,  3,  3,  2,  1,  0,
+    0,  1,  2,  3,  3,  2,  1,  0,
+    4,  5,  6,  7,  7,  6,  5,  4,
+    4,  5,  6,  7,  7,  6,  5,  4,
+    8,  9, 10, 11, 11, 10,  9,  8,
+    8,  9, 10, 11, 11, 10,  9,  8,
+   12, 13, 14, 15, 15, 14, 13, 12,
+   12, 13, 14, 15, 15, 14, 13, 12
+};
 
 constexpr int SCRELU_MIN = 0;
 constexpr int SCRELU_MAX = 255;
@@ -84,7 +96,7 @@ inline bool load_nnue(const std::string &path) {
   return false;
 }
 
-constexpr inline std::pair<size_t, size_t> feature_indices(int piece, int sq) noexcept {
+constexpr inline std::pair<size_t, size_t> feature_indices(int piece, int sq, size_t w_bucket = 0, size_t b_bucket = 0) noexcept {
   if (piece < Pieces::WPawn || piece > Pieces::BKing || !is_valid_square(sq)) {
     return {0, 0};
   }
@@ -94,8 +106,8 @@ constexpr inline std::pair<size_t, size_t> feature_indices(int piece, int sq) no
   const size_t base = static_cast<size_t>((piece >> 1) - 1);
   const size_t color = static_cast<size_t>(piece & 1);
 
-  const size_t whiteIdx = color * color_stride + base * piece_stride + static_cast<size_t>(sq);
-  const size_t blackIdx = (color ^ 1) * color_stride + base * piece_stride + static_cast<size_t>(sq ^ 56);
+  const size_t whiteIdx = w_bucket * 768 + color * color_stride + base * piece_stride + static_cast<size_t>(sq);
+  const size_t blackIdx = b_bucket * 768 + (color ^ 1) * color_stride + base * piece_stride + static_cast<size_t>(sq ^ 56);
 
   return {whiteIdx, blackIdx};
 }
@@ -230,6 +242,8 @@ class alignas(64) NNUE_State {
 public:
   alignas(64) Accumulator<LAYER1_SIZE> m_accumulator_stack[MaxSearchDepth];
   Accumulator<LAYER1_SIZE> *m_curr = &m_accumulator_stack[0];
+  uint8_t m_w_bucket[MaxSearchDepth]{};
+  uint8_t m_b_bucket[MaxSearchDepth]{};
   int m_idx = 0;
 
   NNUE_State() = default;
@@ -238,6 +252,8 @@ public:
     if (this != &other) {
       m_idx = other.m_idx;
       std::copy_n(other.m_accumulator_stack, m_idx + 1, m_accumulator_stack);
+      std::copy_n(other.m_w_bucket, m_idx + 1, m_w_bucket);
+      std::copy_n(other.m_b_bucket, m_idx + 1, m_b_bucket);
       m_curr = &m_accumulator_stack[m_idx];
     }
     return *this;
@@ -253,6 +269,8 @@ public:
   inline void push_null() noexcept {
     if (m_idx >= MaxSearchDepth - 1 || !g_nnue || !nnue_loaded) return;
     m_accumulator_stack[m_idx + 1] = m_accumulator_stack[m_idx];
+    m_w_bucket[m_idx + 1] = m_w_bucket[m_idx];
+    m_b_bucket[m_idx + 1] = m_b_bucket[m_idx];
     ++m_idx;
     m_curr = &m_accumulator_stack[m_idx];
   }
@@ -271,6 +289,16 @@ public:
     m_curr = &m_accumulator_stack[0];
     if (!g_nnue || !nnue_loaded) return;
 
+    const uint64_t w_kbb = position.colors_bb[Colors::White] & position.pieces_bb[PieceTypes::King];
+    const uint64_t b_kbb = position.colors_bb[Colors::Black] & position.pieces_bb[PieceTypes::King];
+    const int wking = w_kbb ? __builtin_ctzll(w_kbb) : 4;
+    const int bking = b_kbb ? __builtin_ctzll(b_kbb) : 60;
+
+    const size_t w_b = static_cast<size_t>(KingBucketTable[wking]);
+    const size_t b_b = static_cast<size_t>(KingBucketTable[bking ^ 56]);
+    m_w_bucket[0] = static_cast<uint8_t>(w_b);
+    m_b_bucket[0] = static_cast<uint8_t>(b_b);
+
     m_curr->init(g_nnue->feature_bias.data());
 
     uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
@@ -278,7 +306,7 @@ public:
       const int sq = pop_lsb(occ);
       const int piece = position.board[sq];
       if (piece >= Pieces::WPawn && piece <= Pieces::BKing) {
-        const auto [white_idx, black_idx] = feature_indices(piece, sq);
+        const auto [white_idx, black_idx] = feature_indices(piece, sq, w_b, b_b);
         const size_t white_off = white_idx * LAYER1_SIZE;
         const size_t black_off = black_idx * LAYER1_SIZE;
         #pragma unroll 4
@@ -290,10 +318,59 @@ public:
     }
   }
 
+  inline void refresh_white(const BoardState &position, size_t new_w_bucket) noexcept {
+    if (!g_nnue || !nnue_loaded) return;
+    std::copy_n(g_nnue->feature_bias.data(), LAYER1_SIZE, m_curr->white.begin());
+    uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
+    constexpr size_t color_stride = 384;
+    constexpr size_t piece_stride = 64;
+    while (occ) {
+      const int sq = pop_lsb(occ);
+      const int piece = position.board[sq];
+      if (piece >= Pieces::WPawn && piece <= Pieces::BKing) {
+        const size_t base = static_cast<size_t>((piece >> 1) - 1);
+        const size_t color = static_cast<size_t>(piece & 1);
+        const size_t white_idx = new_w_bucket * 768 + color * color_stride + base * piece_stride + static_cast<size_t>(sq);
+        const size_t off = white_idx * LAYER1_SIZE;
+        #pragma unroll 4
+        for (size_t i = 0; i < LAYER1_SIZE; ++i) {
+          m_curr->white[i] += g_nnue->feature_v[off + i];
+        }
+      }
+    }
+  }
+
+  inline void refresh_black(const BoardState &position, size_t new_b_bucket) noexcept {
+    if (!g_nnue || !nnue_loaded) return;
+    std::copy_n(g_nnue->feature_bias.data(), LAYER1_SIZE, m_curr->black.begin());
+    uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
+    constexpr size_t color_stride = 384;
+    constexpr size_t piece_stride = 64;
+    while (occ) {
+      const int sq = pop_lsb(occ);
+      const int piece = position.board[sq];
+      if (piece >= Pieces::WPawn && piece <= Pieces::BKing) {
+        const size_t base = static_cast<size_t>((piece >> 1) - 1);
+        const size_t color = static_cast<size_t>(piece & 1);
+        const size_t black_idx = new_b_bucket * 768 + (color ^ 1) * color_stride + base * piece_stride + static_cast<size_t>(sq ^ 56);
+        const size_t off = black_idx * LAYER1_SIZE;
+        #pragma unroll 4
+        for (size_t i = 0; i < LAYER1_SIZE; ++i) {
+          m_curr->black[i] += g_nnue->feature_v[off + i];
+        }
+      }
+    }
+  }
+
   inline void add_sub(int from_piece, int from, int to_piece, int to) noexcept {
     if (m_idx >= MaxSearchDepth - 1 || !g_nnue || !nnue_loaded) return;
-    const auto [wf, bf] = feature_indices(from_piece, from);
-    const auto [wt, bt] = feature_indices(to_piece, to);
+    const size_t wb = m_w_bucket[m_idx];
+    const size_t bb = m_b_bucket[m_idx];
+    m_w_bucket[m_idx + 1] = static_cast<uint8_t>(wb);
+    m_b_bucket[m_idx + 1] = static_cast<uint8_t>(bb);
+
+    const auto [wf, bf] = feature_indices(from_piece, from, wb, bb);
+    const auto [wt, bt] = feature_indices(to_piece, to, wb, bb);
 
     const auto &curr = m_accumulator_stack[m_idx];
     auto &next = m_accumulator_stack[m_idx + 1];
@@ -312,9 +389,14 @@ public:
 
   inline void add_sub_sub(int from_piece, int from, int to_piece, int to, int captured, int captured_sq) noexcept {
     if (m_idx >= MaxSearchDepth - 1 || !g_nnue || !nnue_loaded) return;
-    const auto [wf, bf] = feature_indices(from_piece, from);
-    const auto [wt, bt] = feature_indices(to_piece, to);
-    const auto [wc, bc] = feature_indices(captured, captured_sq);
+    const size_t wb = m_w_bucket[m_idx];
+    const size_t bb = m_b_bucket[m_idx];
+    m_w_bucket[m_idx + 1] = static_cast<uint8_t>(wb);
+    m_b_bucket[m_idx + 1] = static_cast<uint8_t>(bb);
+
+    const auto [wf, bf] = feature_indices(from_piece, from, wb, bb);
+    const auto [wt, bt] = feature_indices(to_piece, to, wb, bb);
+    const auto [wc, bc] = feature_indices(captured, captured_sq, wb, bb);
 
     const auto &curr = m_accumulator_stack[m_idx];
     auto &next = m_accumulator_stack[m_idx + 1];
@@ -333,10 +415,15 @@ public:
 
   inline void add_add_sub_sub(int p1, int from1, int to1, int p2, int from2, int to2) noexcept {
     if (m_idx >= MaxSearchDepth - 1 || !g_nnue || !nnue_loaded) return;
-    const auto [w1f, b1f] = feature_indices(p1, from1);
-    const auto [w1t, b1t] = feature_indices(p1, to1);
-    const auto [w2f, b2f] = feature_indices(p2, from2);
-    const auto [w2t, b2t] = feature_indices(p2, to2);
+    const size_t wb = m_w_bucket[m_idx];
+    const size_t bb = m_b_bucket[m_idx];
+    m_w_bucket[m_idx + 1] = static_cast<uint8_t>(wb);
+    m_b_bucket[m_idx + 1] = static_cast<uint8_t>(bb);
+
+    const auto [w1f, b1f] = feature_indices(p1, from1, wb, bb);
+    const auto [w1t, b1t] = feature_indices(p1, to1, wb, bb);
+    const auto [w2f, b2f] = feature_indices(p2, from2, wb, bb);
+    const auto [w2t, b2t] = feature_indices(p2, to2, wb, bb);
 
     const auto &curr = m_accumulator_stack[m_idx];
     auto &next = m_accumulator_stack[m_idx + 1];

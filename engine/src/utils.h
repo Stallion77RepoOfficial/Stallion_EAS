@@ -725,7 +725,7 @@ inline bool TimeManager::should_stop(uint64_t elapsed, bool best_move_stable,
 }
 
 inline void adjust_soft_limit(ThreadInfo &thread_info, uint64_t best_move_nodes,
-                              int bm_stability, [[maybe_unused]] int best_score) noexcept {
+                              int bm_stability) noexcept {
   const uint64_t node_count = thread_info.nodes.load(std::memory_order_relaxed);
   if (node_count == 0)
     return;

@@ -1405,7 +1405,7 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
           adjust_soft_limit(
               thread_info,
               ra ? ra->nodes : 0,
-              bm_stability, thread_info.best_scores[0]);
+              bm_stability);
         }
       }
 

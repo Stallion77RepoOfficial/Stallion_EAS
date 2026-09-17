@@ -42,7 +42,7 @@ struct alignas(64) NNUE_Params {
   int16_t output_bias;
 };
 
-inline std::unique_ptr<NNUE_Params> g_nnue_base = nullptr;
+inline std::unique_ptr<NNUE_Params> g_nnue_data = nullptr;
 
 inline const NNUE_Params *g_nnue = nullptr;
 inline bool nnue_loaded = false;
@@ -74,11 +74,11 @@ inline std::unique_ptr<NNUE_Params> read_nnue_binary(const std::string &path) {
   return loaded_params;
 }
 
-inline bool load_nnue_base(const std::string &path = "nets/base.nnue") {
+inline bool load_nnue(const std::string &path) {
   auto net = read_nnue_binary(path);
   if (net) {
-    g_nnue_base = std::move(net);
-    g_nnue = g_nnue_base.get();
+    g_nnue_data = std::move(net);
+    g_nnue = g_nnue_data.get();
     nnue_loaded = true;
     return true;
   }

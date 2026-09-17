@@ -185,9 +185,9 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
   new_game(thread_info, TT);
   set_board(position, thread_info,
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-  const bool base_loaded = load_nnue_base(resolve_file_path("nets/base.nnue"));
-  if (!base_loaded)
-    safe_printf("info string NNUE file unavailable; using material fallback\n");
+  if (!load_nnue(resolve_file_path("nets/stallion.nnue"))) {
+    load_nnue(resolve_file_path("nets/base.nnue"));
+  }
 
   std::string input;
 
@@ -245,7 +245,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           "id author LegendOfCompiling\n"
 
           "option name Use NNUE type check default true\n"
-          "option name EvalFile type string default nets/base.nnue\n"
+          "option name EvalFile type string default nets/stallion.nnue\n"
           "option name Hash type spin default 256 min 1 max 131072\n"
           "option name Threads type spin default 1 min 1 max 1024\n"
           "option name MultiPV type spin default 1 min 1 max 256\n"
@@ -391,7 +391,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       if (optName == "use nnue" || optName == "usennue" || optName == "use_nnue") {
         use_nnue = to_bool(valueStr);
       } else if (optName == "evalfile") {
-        const bool loaded = load_nnue_base(resolve_file_path(valueStr));
+        const bool loaded = load_nnue(resolve_file_path(valueStr));
         safe_printf("info string EvalFile %s\n", loaded ? "loaded" : "load failed; previous network retained");
       } else if (optName == "hash") {
         bool ok = false;

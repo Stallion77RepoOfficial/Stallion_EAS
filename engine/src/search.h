@@ -835,7 +835,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
 
       if (!is_advanced_pawn && !in_check && !is_pv && !is_capture && depth < HistPruneDepth &&
           hist_score < -HistPruneThreshold * depth) {
-        skip = true;
+        continue;
       }
     }
 
@@ -917,7 +917,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
       if (is_capture) {
         R /= 2;
       } else {
-        R -= hist_score / 8192;
+        R -= hist_score / 1024;
       }
 
       R -= is_pv;

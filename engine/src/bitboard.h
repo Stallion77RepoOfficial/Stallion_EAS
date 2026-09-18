@@ -494,13 +494,17 @@ inline int collect_extra_features(const uint8_t board[64],
 
   int mat_count[2][5] = {};
   int complex_count[2][2] = {};
-  for (int sq = 0; sq < 64; ++sq) {
-    const int piece = board[sq];
-    if (piece < 2 || piece > 13) continue;
-    const int color = piece & 1;
-    const int base = (piece >> 1) - 1;
-    if (base <= 4) mat_count[color][base]++;
-    if (base == 0) complex_count[color][(get_file(sq) + get_rank(sq)) & 1]++;
+  constexpr uint64_t DarkSquareMask = 0xAA55AA55AA55AA55ULL;
+  for (int c = 0; c < 2; ++c) {
+    const uint64_t cbb = colors_bb[c];
+    const uint64_t pawns = cbb & pieces_bb[PieceTypes::Pawn];
+    mat_count[c][0] = pop_count(pawns);
+    mat_count[c][1] = pop_count(cbb & pieces_bb[PieceTypes::Knight]);
+    mat_count[c][2] = pop_count(cbb & pieces_bb[PieceTypes::Bishop]);
+    mat_count[c][3] = pop_count(cbb & pieces_bb[PieceTypes::Rook]);
+    mat_count[c][4] = pop_count(cbb & pieces_bb[PieceTypes::Queen]);
+    complex_count[c][0] = pop_count(pawns & DarkSquareMask);
+    complex_count[c][1] = pop_count(pawns & ~DarkSquareMask);
   }
   for (int slot_side = 0; slot_side < 2; ++slot_side)
     for (int type = 0; type < 5; ++type) {
@@ -522,10 +526,6 @@ inline int collect_extra_features(const uint8_t board[64],
     }
   }
 
-  Position tmp{};
-  tmp.colors_bb[0] = colors_bb[0];
-  tmp.colors_bb[1] = colors_bb[1];
-  for (int i = 0; i < 7; ++i) tmp.pieces_bb[i] = pieces_bb[i];
   const uint64_t occupied = colors_bb[0] | colors_bb[1];
   for (int slot_king = 0; slot_king < 2; ++slot_king) {
     const int real_king = flip ? (slot_king ^ 1) : slot_king;
@@ -536,7 +536,15 @@ inline int collect_extra_features(const uint8_t board[64],
       const int tf = kf + (off % 3) - 1, tr = kr + (off / 3) - 1;
       if (tf < 0 || tf > 7 || tr < 0 || tr > 7) continue;
       const int target_real = flip ? ((tr * 8 + tf) ^ 56) : (tr * 8 + tf);
-      if (attackers_to(tmp, target_real, enemy_real, occupied))
+      const uint64_t atks = colors_bb[enemy_real] &
+          ((PAWN_ATK_SAFE(enemy_real ^ 1, target_real) & pieces_bb[PieceTypes::Pawn]) |
+           (KNIGHT_ATK_SAFE(target_real) & pieces_bb[PieceTypes::Knight]) |
+           (get_bishop_attacks(target_real, occupied) &
+            (pieces_bb[PieceTypes::Bishop] | pieces_bb[PieceTypes::Queen])) |
+           (get_rook_attacks(target_real, occupied) &
+            (pieces_bb[PieceTypes::Rook] | pieces_bb[PieceTypes::Queen])) |
+           (KING_ATK_SAFE(target_real) & pieces_bb[PieceTypes::King]));
+      if (atks)
         if (!push(nnue_zone_atk_index(slot_king, off))) return -1;
     }
   }

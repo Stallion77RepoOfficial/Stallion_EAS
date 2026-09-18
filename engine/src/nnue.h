@@ -322,6 +322,68 @@ public:
     const int16_t *F = g_nnue->feature_v.data();
     auto *W = m_curr->white.data();
     auto *B = m_curr->black.data();
+
+#if defined(STALLION_SIMD_NEON)
+    auto vec_sub = [](int32_t *acc, const int16_t *f) noexcept {
+      for (size_t i = 0; i < LAYER1_SIZE; i += 8) {
+        int16x8_t f_raw = vld1q_s16(f + i);
+        int32x4_t f_lo = vmovl_s16(vget_low_s16(f_raw));
+        int32x4_t f_hi = vmovl_s16(vget_high_s16(f_raw));
+        int32x4_t a_lo = vld1q_s32(acc + i);
+        int32x4_t a_hi = vld1q_s32(acc + i + 4);
+        vst1q_s32(acc + i, vsubq_s32(a_lo, f_lo));
+        vst1q_s32(acc + i + 4, vsubq_s32(a_hi, f_hi));
+      }
+    };
+    auto vec_add = [](int32_t *acc, const int16_t *f) noexcept {
+      for (size_t i = 0; i < LAYER1_SIZE; i += 8) {
+        int16x8_t f_raw = vld1q_s16(f + i);
+        int32x4_t f_lo = vmovl_s16(vget_low_s16(f_raw));
+        int32x4_t f_hi = vmovl_s16(vget_high_s16(f_raw));
+        int32x4_t a_lo = vld1q_s32(acc + i);
+        int32x4_t a_hi = vld1q_s32(acc + i + 4);
+        vst1q_s32(acc + i, vaddq_s32(a_lo, f_lo));
+        vst1q_s32(acc + i + 4, vaddq_s32(a_hi, f_hi));
+      }
+    };
+
+    for (int k = 0; k < nrw; ++k) vec_sub(W, F + static_cast<size_t>(rem_w[k]) * LAYER1_SIZE);
+    for (int k = 0; k < naw; ++k) vec_add(W, F + static_cast<size_t>(add_w[k]) * LAYER1_SIZE);
+    for (int k = 0; k < nrb; ++k) vec_sub(B, F + static_cast<size_t>(rem_b[k]) * LAYER1_SIZE);
+    for (int k = 0; k < nab; ++k) vec_add(B, F + static_cast<size_t>(add_b[k]) * LAYER1_SIZE);
+
+#elif defined(STALLION_SIMD_AVX2)
+    auto vec_sub = [](int32_t *acc, const int16_t *f) noexcept {
+      for (size_t i = 0; i < LAYER1_SIZE; i += 16) {
+        __m128i f_lo16 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(f + i));
+        __m128i f_hi16 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(f + i + 8));
+        __m256i f_lo32 = _mm256_cvtepi16_epi32(f_lo16);
+        __m256i f_hi32 = _mm256_cvtepi16_epi32(f_hi16);
+        __m256i a_lo = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(acc + i));
+        __m256i a_hi = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(acc + i + 8));
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(acc + i), _mm256_sub_epi32(a_lo, f_lo32));
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(acc + i + 8), _mm256_sub_epi32(a_hi, f_hi32));
+      }
+    };
+    auto vec_add = [](int32_t *acc, const int16_t *f) noexcept {
+      for (size_t i = 0; i < LAYER1_SIZE; i += 16) {
+        __m128i f_lo16 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(f + i));
+        __m128i f_hi16 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(f + i + 8));
+        __m256i f_lo32 = _mm256_cvtepi16_epi32(f_lo16);
+        __m256i f_hi32 = _mm256_cvtepi16_epi32(f_hi16);
+        __m256i a_lo = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(acc + i));
+        __m256i a_hi = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(acc + i + 8));
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(acc + i), _mm256_add_epi32(a_lo, f_lo32));
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(acc + i + 8), _mm256_add_epi32(a_hi, f_hi32));
+      }
+    };
+
+    for (int k = 0; k < nrw; ++k) vec_sub(W, F + static_cast<size_t>(rem_w[k]) * LAYER1_SIZE);
+    for (int k = 0; k < naw; ++k) vec_add(W, F + static_cast<size_t>(add_w[k]) * LAYER1_SIZE);
+    for (int k = 0; k < nrb; ++k) vec_sub(B, F + static_cast<size_t>(rem_b[k]) * LAYER1_SIZE);
+    for (int k = 0; k < nab; ++k) vec_add(B, F + static_cast<size_t>(add_b[k]) * LAYER1_SIZE);
+
+#else
     for (int k = 0; k < nrw; ++k) {
       const int16_t *f = F + static_cast<size_t>(rem_w[k]) * LAYER1_SIZE;
       for (size_t i = 0; i < LAYER1_SIZE; ++i) W[i] -= f[i];
@@ -338,6 +400,7 @@ public:
       const int16_t *f = F + static_cast<size_t>(add_b[k]) * LAYER1_SIZE;
       for (size_t i = 0; i < LAYER1_SIZE; ++i) B[i] += f[i];
     }
+#endif
   }
 
   inline void push_null() noexcept {

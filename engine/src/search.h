@@ -636,46 +636,48 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
       }
     }
 
-    if (depth <= RFPMaxDepth &&
-        static_eval - RFPMargin * (depth - improving) >= beta) {
-      return (static_eval + beta) / 2;
-    }
+    if (thread_info.mate_search == 0) {
+      if (depth <= RFPMaxDepth &&
+          static_eval - RFPMargin * (depth - improving) >= beta) {
+        return (static_eval + beta) / 2;
+      }
 
-    if (!is_pv && depth <= 3 &&
-        static_eval + RazorMargin * depth < alpha) {
-      int razor_score = qsearch(alpha, beta, position, thread_info, table);
-      if (razor_score <= alpha)
-        return razor_score;
-    }
+      if (!is_pv && depth <= 3 &&
+          static_eval + RazorMargin * depth < alpha) {
+        int razor_score = qsearch(alpha, beta, position, thread_info, table);
+        if (razor_score <= alpha)
+          return razor_score;
+      }
 
-    if (static_eval >= beta && depth >= NMPMinDepth &&
-        has_non_pawn_material(position, color) && thread_info.game_ply > 0 &&
-        (ss - 1)->played_move != MoveNone) {
+      if (static_eval >= beta && depth >= NMPMinDepth &&
+          has_non_pawn_material(position, color) && thread_info.game_ply > 0 &&
+          (ss - 1)->played_move != MoveNone) {
 
-      BoardState temp_pos = position;
+        BoardState temp_pos = position;
 
-      make_move(temp_pos, MoveNone);
+        make_move(temp_pos, MoveNone);
 
-      update_nnue_state(thread_info, MoveNone, position, temp_pos);
-      ss_push(position, thread_info, MoveNone);
+        update_nnue_state(thread_info, MoveNone, position, temp_pos);
+        ss_push(position, thread_info, MoveNone);
 
-      int R = NMPBase + depth / NMPDepthDiv +
-              std::min(3, (static_eval - beta) / NMPEvalDiv);
-      score = -search<false>(-beta, -beta + 1, depth - R, !cutnode, temp_pos,
-                             thread_info, table);
+        int R = NMPBase + depth / NMPDepthDiv +
+                std::min(3, (static_eval - beta) / NMPEvalDiv);
+        score = -search<false>(-beta, -beta + 1, depth - R, !cutnode, temp_pos,
+                               thread_info, table);
 
-      ss_pop(thread_info);
+        ss_pop(thread_info);
 
-      if (score >= beta) {
-        if (score > MateScore) {
-          score = beta;
+        if (score >= beta) {
+          if (score > MateScore) {
+            score = beta;
+          }
+          return score;
         }
-        return score;
       }
     }
   }
 
-  if (!is_pv && !in_check && !singular_search && cutnode &&
+  if (!is_pv && !in_check && !singular_search && cutnode && thread_info.mate_search == 0 &&
       depth >= MultiCutDepth && tt_move != MoveNone) {
     int mc_cuts = 0;
     int mc_moves = 0;
@@ -718,7 +720,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
   }
 
   int p_beta = beta + ProbCutMargin;
-  if (!root && !is_pv && !in_check && !singular_search && depth >= 5 && abs(beta) < MateThreshold &&
+  if (!root && !is_pv && !in_check && !singular_search && thread_info.mate_search == 0 && depth >= 5 && abs(beta) < MateThreshold &&
       (!tt_hit || entry.depth + 4 <= depth || tt_score >= p_beta)) {
 
     int threshold = p_beta - static_eval;
@@ -818,7 +820,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
                                  [to_sq];
 
     is_capture = is_cap(position, move);
-    if (!is_capture && !is_pv && best_score > -MateScore) {
+    if (!is_capture && !is_pv && best_score > -MateScore && thread_info.mate_search == 0) {
 
       if (!is_advanced_pawn && !in_check && depth < LMPDepth &&
           moves_played >= LMPBase + depth * depth / (2 - improving)) {
@@ -912,7 +914,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
     };
     int newdepth = clamp_child_depth(std::min(depth - 1 + extension, 126));
 
-    if (newdepth > 0 && depth >= LMRMinDepth && moves_played > is_pv) {
+    if (newdepth > 0 && depth >= LMRMinDepth && moves_played > is_pv && thread_info.mate_search == 0) {
       int R = LMRTable[depth][moves_played];
       if (is_capture) {
         R /= 2;

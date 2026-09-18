@@ -1509,47 +1509,55 @@ finish:
     }
   }
 
-  if (thread_info.thread_id == 0 && thread_info.best_moves[0] == MoveNone) {
-    if (thread_info.root_moves_limited) {
-      if (!thread_info.root_moves.empty()) {
-        thread_info.best_moves[0] = thread_info.root_moves[0].move;
-        thread_info.best_scores[0] = 0;
-      }
-    } else {
-      std::array<Action, MaxActions> legal_moves;
-      int num_legal = legal_movegen(position, legal_moves.data());
-      if (num_legal > 0) {
-        thread_info.best_moves[0] = legal_moves[0];
-        thread_info.best_scores[0] = 0;
-      }
-    }
-  }
-
-  if (thread_info.thread_id == 0 &&
+  if (thread_info.thread_id == 0 && thread_data.emit_bestmove.load() &&
       (!thread_info.infinite_search || thread_data.stop)) {
-    if (thread_info.best_moves[0] == MoveNone) {
-      safe_printf("bestmove 0000\n");
-    } else {
-    bool can_output = true;
 
-    if (thread_info.pondering && !thread_info.ponder_hit && !thread_data.stop) {
-      can_output = false;
-    }
-    if (can_output) {
-      Action validated_ponder = validate_ponder_move(
-          position, thread_info.best_moves[0], thread_info.ponder_move);
-      thread_info.ponder_move = validated_ponder;
-
-      std::string bm = internal_to_uci(position, thread_info.best_moves[0]);
-      if (thread_info.use_ponder && validated_ponder != MoveNone) {
-        BoardState ponder_pos = position;
-        make_move(ponder_pos, thread_info.best_moves[0]);
-        std::string pd = internal_to_uci(ponder_pos, validated_ponder);
-        safe_printf("bestmove %s ponder %s\n", bm.c_str(), pd.c_str());
-      } else {
-        safe_printf("bestmove %s\n", bm.c_str());
+    std::array<Action, MaxActions> legal_moves;
+    const int num_legal = legal_movegen(position, legal_moves.data());
+    bool is_legal = false;
+    if (thread_info.best_moves[0] != MoveNone) {
+      for (int i = 0; i < num_legal; ++i) {
+        if (legal_moves[i] == thread_info.best_moves[0]) {
+          is_legal = true;
+          break;
+        }
       }
     }
+
+    if (!is_legal) {
+      if (thread_info.root_moves_limited && !thread_info.root_moves.empty()) {
+        thread_info.best_moves[0] = thread_info.root_moves[0].move;
+      } else if (num_legal > 0) {
+        thread_info.best_moves[0] = legal_moves[0];
+      } else {
+        thread_info.best_moves[0] = MoveNone;
+      }
+      thread_info.best_scores[0] = 0;
+    }
+
+    if (thread_info.best_moves[0] == MoveNone) {
+      safe_printf("bestmove (none)\n");
+    } else {
+      bool can_output = true;
+
+      if (thread_info.pondering && !thread_info.ponder_hit && !thread_data.stop) {
+        can_output = false;
+      }
+      if (can_output) {
+        Action validated_ponder = validate_ponder_move(
+            position, thread_info.best_moves[0], thread_info.ponder_move);
+        thread_info.ponder_move = validated_ponder;
+
+        std::string bm = internal_to_uci(position, thread_info.best_moves[0]);
+        if (thread_info.use_ponder && validated_ponder != MoveNone) {
+          BoardState ponder_pos = position;
+          make_move(ponder_pos, thread_info.best_moves[0]);
+          std::string pd = internal_to_uci(ponder_pos, validated_ponder);
+          safe_printf("bestmove %s ponder %s\n", bm.c_str(), pd.c_str());
+        } else {
+          safe_printf("bestmove %s\n", bm.c_str());
+        }
+      }
     }
   }
 }

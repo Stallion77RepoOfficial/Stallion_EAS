@@ -23,7 +23,12 @@
 inline bool tb_initialized = false;
 
 inline void run_thread(BoardState &position, ThreadInfo &thread_info, std::thread &s) {
-  thread_data.stop = false;
+  if (s.joinable()) s.join();
+  {
+    std::lock_guard lock(thread_data.control_mutex);
+    thread_data.emit_bestmove = true;
+    thread_data.stop = false;
+  }
   s = std::thread(search_position, std::ref(position), std::ref(thread_info),
                   std::ref(TT));
 }
@@ -174,8 +179,12 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
   std::thread s;
 
   auto safe_join = [](std::thread &t) { if (t.joinable()) t.join(); };
-  auto stop_search = [&] {
-    { std::lock_guard lock(thread_data.control_mutex); thread_data.stop = true; }
+  auto stop_search = [&](bool emit_bm = false) {
+    {
+      std::lock_guard lock(thread_data.control_mutex);
+      thread_data.emit_bestmove = emit_bm;
+      thread_data.stop = true;
+    }
     thread_data.control_cv.notify_all();
     safe_join(s);
   };
@@ -209,7 +218,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
     if (command == "setoption" || command == "ucinewgame" || command == "position" ||
         command == "go" || command == "bench" || command == "perft" || command == "eval" ||
-        command == "flip" || command == "hashfull" || command == "d" || command == "printparams") stop_search();
+        command == "flip" || command == "hashfull" || command == "d" || command == "printparams") stop_search(false);
 
     if (command == "d") {
       print_board(position);
@@ -217,7 +226,10 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       continue;
     }
 
-    if (command == "quit") break;
+    if (command == "quit") {
+      stop_search(false);
+      break;
+    }
 
     else if (command == "uci") {
       safe_printf(
@@ -460,7 +472,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     }
 
     else if (command == "stop") {
-      stop_search();
+      stop_search(true);
     }
 
     else if (command == "ucinewgame") {
@@ -862,7 +874,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     }
   }
 
-  if (interactive) stop_search();
+  if (interactive) stop_search(false);
   else safe_join(s);
   thread_data.stop = true;
   if (tb_initialized) { tb_free(); tb_initialized = false; }

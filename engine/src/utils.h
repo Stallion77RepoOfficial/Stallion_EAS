@@ -199,6 +199,7 @@ struct ThreadData {
   std::vector<ThreadInfo> thread_infos;
   std::vector<std::thread> threads;
   std::atomic<bool> stop{true};
+  std::atomic<bool> emit_bestmove{true};
 
   std::atomic<bool> is_frc{false};
   std::mutex data_mutex;

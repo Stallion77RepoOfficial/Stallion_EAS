@@ -136,7 +136,10 @@ inline bool out_of_time(ThreadInfo &thread_info) noexcept {
   if (thread_info.thread_id != 0)
     return false;
 
-  const int64_t hit_time = thread_data.ponder_hit_time.exchange(-1);
+  const int64_t hit_time =
+      thread_data.ponder_hit_time.load(std::memory_order_relaxed) >= 0
+          ? thread_data.ponder_hit_time.exchange(-1, std::memory_order_relaxed)
+          : -1;
   if (hit_time >= 0) {
     const auto hit = std::chrono::steady_clock::time_point(std::chrono::milliseconds(hit_time));
     const auto ponder_ms = std::max<int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(hit - thread_info.start_time).count());
@@ -148,23 +151,23 @@ inline bool out_of_time(ThreadInfo &thread_info) noexcept {
     thread_info.ponder_hit = true;
   }
 
-  uint64_t total_nodes = thread_info.nodes.load(std::memory_order_relaxed);
-  for (auto &ti : thread_data.thread_infos)
-    total_nodes += ti.nodes.load(std::memory_order_relaxed);
-  if (!thread_data.pondering && total_nodes >= thread_info.max_nodes_searched) {
-    thread_data.stop = true;
-    return true;
-  }
-
   thread_info.time_checks++;
   constexpr uint16_t check_interval = 256;
   if (thread_info.time_checks >= check_interval) {
     thread_info.time_checks = 0;
+    // Summing every helper thread's nodes is O(#threads); doing it once per
+    // interval instead of once per node keeps high thread counts scalable.
+    uint64_t total_nodes = thread_info.nodes.load(std::memory_order_relaxed);
+    for (auto &ti : thread_data.thread_infos)
+      total_nodes += ti.nodes.load(std::memory_order_relaxed);
+    if (!thread_data.pondering && total_nodes >= thread_info.max_nodes_searched) {
+      thread_data.stop = true;
+      return true;
+    }
     if (!thread_info.infinite_search && !thread_data.pondering) {
       const uint64_t elapsed = time_elapsed(thread_info.start_time);
-      bool in_trouble = false;
       if (thread_info.time_manager.should_stop(
-              elapsed, thread_info.best_move_stable, in_trouble,
+              elapsed, thread_info.best_move_stable,
               thread_info.is_movetime) ||
           elapsed > thread_info.max_time) {
         thread_data.stop = true;
@@ -367,7 +370,7 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
     }
 
     if (stand_pat >= beta) {
-      insert_entry(entry, hash, 0, MoveNone, raw_eval,
+      insert_entry(hash, 0, MoveNone, raw_eval,
                    score_to_tt(stand_pat, ply), EntryTypes::LBound,
                    thread_info.searches);
       return stand_pat;
@@ -478,7 +481,7 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
   else if (raised_alpha)
     store_type = EntryTypes::Exact;
 
-  insert_entry(entry, hash, 0, best_move, raw_eval,
+  insert_entry(hash, 0, best_move, raw_eval,
                score_to_tt(best_score, ply), store_type, thread_info.searches);
   return best_score;
 }
@@ -590,7 +593,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
     static_eval = correct_eval(position, thread_info, raw_eval);
 
     if (!tt_hit) {
-      insert_entry(entry, hash, 0, MoveNone, raw_eval, ScoreNone,
+      insert_entry(hash, 0, MoveNone, raw_eval, ScoreNone,
                    EntryTypes::None, thread_info.searches);
     }
   }
@@ -1022,7 +1025,8 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
     int bonus = std::min(
         (int)HistBonus * (depth - 1 + (best_score > beta + 125)), (int)HistMax);
 
-    if (is_capture) {
+    const bool best_is_capture = is_cap(position, best_move);
+    if (best_is_capture) {
       int capture_bonus = bonus / 2;
       update_history(thread_info.CapHistScores[piece][sq], capture_bonus);
 
@@ -1116,7 +1120,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
   }
 
   if (!singular_search && !(root && (thread_info.root_moves_limited || thread_info.multipv_index))) {
-    insert_entry(entry, hash, depth, best_move, raw_eval,
+    insert_entry(hash, depth, best_move, raw_eval,
                  score_to_tt(best_score, ply), entry_type,
                  thread_info.searches);
   }
@@ -1161,18 +1165,6 @@ inline std::string format_pv(const BoardState &position, const ThreadInfo &threa
   }
 
   return result;
-}
-
-inline void prepare_search_evaluator([[maybe_unused]] const BoardState &position,
-                                     ThreadInfo &info,
-                                     std::vector<TTBucket> &table) noexcept {
-  const NNUE_Params *network = g_nnue;
-  if (info.cached_eval_network != network) {
-    std::fill(table.begin(), table.end(), TTBucket{});
-    info.PawnCorrHist.fill({});
-    info.NonPawnCorrHist.fill({});
-    info.cached_eval_network = network;
-  }
 }
 
 inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
@@ -1232,7 +1224,6 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
   int bm_stability = 0;
 
   int target_depth = std::clamp(thread_info.max_iter_depth, 1, MaxRootDepth);
-  int last_completed_depth = 0;
   std::array<Action, MaxActions> completed_moves{};
   std::array<int, MaxActions> completed_scores{};
   completed_scores.fill(ScoreNone);
@@ -1241,7 +1232,13 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
   int real_multi_pv =
       std::min<int>(thread_info.multipv, (int)thread_info.root_moves.size());
 
-  for (int depth = 1; !thread_info.root_moves.empty(); ++depth) {
+  // Helpers skip the cheap early iterations so each thread explores different
+  // depths instead of duplicating the main thread's work. Results from helpers
+  // are discarded; they only contribute transposition table entries.
+  const int start_depth = thread_info.thread_id == 0
+                              ? 1
+                              : 1 + std::min<int>(thread_info.thread_id, 4);
+  for (int depth = start_depth; !thread_info.root_moves.empty(); ++depth) {
     if (thread_data.stop) {
       break;
     }
@@ -1361,7 +1358,6 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
       completed_scores[thread_info.multipv_index] = score;
       if (thread_info.multipv_index == 0) {
         std::copy_n(thread_info.pv.begin(), MaxSearchPly, completed_pv.begin());
-        last_completed_depth = depth;
       }
 
       if (thread_info.thread_id == 0) {
@@ -1397,7 +1393,6 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
             bm_stability = 0;
             thread_info.stability_counter = 0;
             thread_info.best_move_stable = false;
-            thread_info.previous_best_move = prev_best;
           }
 
           RootAction *ra = find_root_move(thread_info, thread_info.best_moves[0]);
@@ -1415,18 +1410,19 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
       prev_best = thread_info.best_moves[0];
 
       if (depth > 6 && thread_info.multipv_index == 0) {
-        alpha = score - 20, beta = score + 20;
+        // Helpers use varied aspiration windows so they don't duplicate the
+        // main thread's search; the main thread keeps the standard window.
+        const int asp = 20 + (thread_info.thread_id % 4) * 8;
+        alpha = score - asp, beta = score + asp;
       } else {
         alpha = ScoreNone, beta = -ScoreNone;
       }
     }
 
-    last_completed_depth = depth;
-
     if (thread_info.mate_search > 0 && completed_scores[0] >= MateScore - MaxSearchPly) {
       int dist = (MateScore - completed_scores[0] + 1) / 2;
       if (dist <= thread_info.mate_search) {
-        thread_data.stop = true;
+        if (thread_info.thread_id == 0) thread_data.stop = true;
         break;
       }
     }
@@ -1434,7 +1430,7 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
     if (abs(completed_scores[0]) >= MateScore - MaxSearchPly) {
       int mate_plies = MateScore - abs(completed_scores[0]);
       if (depth >= mate_plies + 2) {
-        if (!thread_info.infinite_search && !thread_data.pondering) {
+        if (thread_info.thread_id == 0 && !thread_info.infinite_search && !thread_data.pondering) {
           thread_data.stop = true;
         }
         break;
@@ -1612,7 +1608,6 @@ inline void filter_root_tablebase(const BoardState &position, ThreadInfo &thread
 
 inline void search_position(BoardState &position, ThreadInfo &thread_info,
                             std::vector<TTBucket> &table) {
-  prepare_search_evaluator(position, thread_info, table);
   thread_info.position = position;
   thread_info.thread_id = 0;
   thread_info.nodes.store(0);
@@ -1628,8 +1623,11 @@ inline void search_position(BoardState &position, ThreadInfo &thread_info,
   for (size_t i = 0; i < thread_data.thread_infos.size(); ++i) {
     thread_data.thread_infos[i] = thread_info;
     thread_data.thread_infos[i].thread_id = static_cast<uint16_t>(i + 1);
+    // Helper results are discarded, so helpers only ever search the first line.
+    thread_data.thread_infos[i].multipv = 1;
   }
   std::atomic<bool> start_workers{false};
+  bool spawn_failed = false;
   for (size_t i = 0; i < thread_data.thread_infos.size(); ++i) {
     try {
       thread_data.threads.emplace_back([i, &table, &start_workers] {
@@ -1638,9 +1636,18 @@ inline void search_position(BoardState &position, ThreadInfo &thread_info,
         iterative_deepen(worker.position, worker, table);
       });
     } catch (const std::system_error &) {
-      safe_printf("info string Could not start all requested threads\n");
+      spawn_failed = true;
       break;
     }
+  }
+  if (spawn_failed) {
+    thread_data.stop = true;
+    start_workers.store(true);
+    start_workers.notify_all();
+    for (auto &worker : thread_data.threads) worker.join();
+    thread_data.threads.clear();
+    std::cerr << "Failed to create search thread" << std::endl;
+    std::exit(EXIT_FAILURE);
   }
   start_workers.store(true);
   start_workers.notify_all();

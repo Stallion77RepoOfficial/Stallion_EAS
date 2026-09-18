@@ -68,8 +68,8 @@ inline int HistExtThreshold = 7000;
 
 inline void print_params_for_ob() {
   for (const auto &param : params) {
-    printf("%s, int, %d, %d, %d, %f, 0.002\n", param.name.c_str(), param.value,
-           param.min, param.max, std::max(0.5, (param.max - param.min) / 20.0));
+    safe_printf("%s, int, %d, %d, %d, %f, 0.002\n", param.name.c_str(), param.value,
+                param.min, param.max, std::max(0.5, (param.max - param.min) / 20.0));
   }
 }
 

@@ -1,13 +1,14 @@
 # Shared dependencies and recipes for the platform entry points.
 .DEFAULT_GOAL := all
 .PHONY: all asan debug
-SOURCES := src/stallion.cpp fathom/src/tbprobe.cpp
+SOURCES := src/stallion.cpp fathom/src/tbprobe.cpp net_embed.S
 HEADERS := $(wildcard src/*.h fathom/src/*.h)
 INCLUDED_SOURCES := fathom/src/tbchess.cpp
+NET := nets/stallion.nnue
 
 all: $(EXE)
 
-$(EXE): $(SOURCES) $(HEADERS) $(INCLUDED_SOURCES) $(MAKEFILE_LIST)
+$(EXE): $(SOURCES) $(HEADERS) $(INCLUDED_SOURCES) $(NET) $(MAKEFILE_LIST)
 	@set -eu; engine_build="$@.tmp.$$$$"; trap 'rm -f "$$engine_build"' EXIT; \
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(ARCH_FLAGS) $(SOURCES) -o "$$engine_build" $(LDFLAGS) $(LDLIBS); \
 	if command -v $(STRIP) >/dev/null 2>&1; then $(STRIP) "$$engine_build"; fi; \

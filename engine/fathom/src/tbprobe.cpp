@@ -326,13 +326,13 @@ static void *map_file(FD fd, map_t *mapping)
   HANDLE map = CreateFileMapping(fd, NULL, PAGE_READONLY, size_high, size_low,
 				  NULL);
   if (map == NULL) {
-    fprintf(stderr,"CreateFileMapping() failed, error = %lu.\n", GetLastError());
+    perror("mmap");
     return NULL;
   }
   *mapping = (map_t)map;
   void *data = (void *)MapViewOfFile(map, FILE_MAP_READ, 0, 0, 0);
   if (data == NULL) {
-    fprintf(stderr,"MapViewOfFile() failed, error = %lu.\n", GetLastError());
+    perror("mmap");
   }
 #endif
   return data;
@@ -351,10 +351,10 @@ static void unmap_file(void *data, map_t mapping)
 {
   if (!data) return;
   if (!UnmapViewOfFile(data)) {
-	  fprintf(stderr, "unmap failed, error code %lu\n", GetLastError());
+	  perror("munmap");
   }
   if (!CloseHandle((HANDLE)mapping)) {
-	  fprintf(stderr, "CloseHandle failed, error code %lu\n", GetLastError());
+	  perror("munmap");
   }
 }
 #endif

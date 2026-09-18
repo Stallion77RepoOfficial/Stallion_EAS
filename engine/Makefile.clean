@@ -1,21 +1,7 @@
-.PHONY: all mac linux windows android debug objs distclean list
+.PHONY: all
 BINARIES := stallion_eas_mac stallion_eas_linux stallion_eas_windows.exe stallion_eas_android
-DEBUG_BINARIES := $(addsuffix _asan,$(BINARIES)) $(addsuffix _tsan,$(BINARIES)) stallion_eas_windows_asan.exe stallion_eas_android_debug
+DEBUG_BINARIES := stallion_eas_mac_asan stallion_eas_linux_asan stallion_eas_windows_asan.exe stallion_eas_android_asan
 
-mac linux windows android:
-	rm -f $(filter stallion_eas_$@%,$(BINARIES) $(DEBUG_BINARIES))
-
-debug:
-	rm -f $(DEBUG_BINARIES)
-
-objs:
-	rm -f src/*.o fathom/src/*.o
-
-all: objs
+all:
 	rm -f $(BINARIES) $(DEBUG_BINARIES)
 	rm -rf $(addsuffix .dSYM,$(BINARIES) $(DEBUG_BINARIES))
-
-distclean: all
-
-list:
-	@echo $(BINARIES) $(DEBUG_BINARIES)

@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -70,16 +71,14 @@ private:
 struct TimeManager {
   uint64_t allocated_time = 0;
   uint64_t max_time = 0;
-  uint64_t panic_time = 0;
   uint64_t soft_limit = 0;
   uint64_t hard_limit = 0;
-  bool use_panic_mode = false;
 
   TimeManager() = default;
 
   void initialize(uint64_t time_left, uint64_t increment, int moves_to_go,
                   uint32_t game_move) noexcept;
-  bool should_stop(uint64_t elapsed, bool best_move_stable, bool in_trouble,
+  bool should_stop(uint64_t elapsed, bool best_move_stable,
                    bool is_movetime = false) noexcept;
 };
 
@@ -130,7 +129,6 @@ struct ThreadInfoBase {
   BoardState position;
 
   uint8_t searches = 0;
-  const NNUE_Params *cached_eval_network = nullptr;
   bool infinite_search = false;
   bool root_moves_limited = false;
 
@@ -145,8 +143,6 @@ struct ThreadInfoBase {
 
   Action ponder_move = MoveNone;
 
-  std::chrono::steady_clock::time_point ponder_start_time;
-
   bool use_syzygy = false;
   std::string syzygy_path;
 
@@ -154,7 +150,6 @@ struct ThreadInfoBase {
   bool is_movetime = false;
   bool best_move_stable = false;
   int stability_counter = 0;
-  Action previous_best_move = MoveNone;
 
   OpeningBook opening_book;
   bool use_opening_book = false;
@@ -203,7 +198,6 @@ inline RootAction *find_root_move(ThreadInfo &thread_info, Action move) noexcept
 struct ThreadData {
   std::vector<ThreadInfo> thread_infos;
   std::vector<std::thread> threads;
-  int num_threads = 1;
   std::atomic<bool> stop{true};
 
   std::atomic<bool> is_frc{false};
@@ -232,11 +226,6 @@ inline void safe_printf(const char *fmt, ...) {
   fflush(stdout);
 }
 
-inline void safe_print_cerr(const std::string &s) {
-  std::lock_guard<std::mutex> lg(get_print_mutex());
-  std::cerr << s << std::endl;
-}
-
 inline uint64_t TT_size = (1 << 20);
 inline std::vector<TTBucket> TT(TT_size);
 
@@ -258,7 +247,6 @@ inline void new_game(ThreadInfo &thread_info, std::vector<TTBucket> &table) {
   TT_resizing.store(false);
   thread_info.searches = 0;
   thread_info.search_ply = 0;
-  thread_info.cached_eval_network = nullptr;
   thread_info.KillerMoves.fill({});
   thread_info.CounterMoves.fill({});
   thread_info.recent_book_keys.fill(0);
@@ -292,14 +280,16 @@ constexpr inline int32_t score_from_tt(int32_t score, int32_t ply) noexcept {
 inline void resize_TT(int size) {
   std::lock_guard<std::mutex> lock(thread_data.data_mutex);
 
+  const int mb = std::clamp(size, 1, 131072);
   TT_resizing.store(true, std::memory_order_release);
-  const uint64_t requested = static_cast<uint64_t>(std::clamp(size, 1, 131072)) * 1024 * 1024 / sizeof(TTBucket);
+  const uint64_t requested = static_cast<uint64_t>(mb) * 1024 * 1024 / sizeof(TTBucket);
   try {
     std::vector<TTBucket> replacement(requested);
     TT.swap(replacement);
     TT_size = TT.size();
   } catch (const std::bad_alloc &) {
-    safe_printf("info string Hash allocation failed; keeping current table\n");
+    std::cerr << "Failed to allocate " << mb << "MB for transposition table." << std::endl;
+    std::exit(EXIT_FAILURE);
   }
   TT_resizing.store(false, std::memory_order_release);
 }
@@ -381,7 +371,7 @@ inline TTEntry probe_entry(uint64_t hash, bool &hit, uint8_t searches,
   return *worst;
 }
 
-inline void insert_entry(TTEntry & /*entry*/, uint64_t hash, int depth, Action best_move,
+inline void insert_entry(uint64_t hash, int depth, Action best_move,
                          int32_t static_eval, int32_t score, uint8_t bound_type,
                          uint8_t searches) {
   const uint32_t zobrist_key = get_hash_low_bits(hash);
@@ -667,7 +657,6 @@ inline void TimeManager::initialize(uint64_t time_left, uint64_t increment,
 
   max_time = std::min<uint64_t>(allocated_time * 3, usable_time * 8 / 10);
   max_time = std::max<uint64_t>(allocated_time, max_time);
-  panic_time = std::min<uint64_t>(allocated_time * 2, max_time);
 
   soft_limit = allocated_time;
   hard_limit = max_time;
@@ -676,12 +665,10 @@ inline void TimeManager::initialize(uint64_t time_left, uint64_t increment,
     hard_limit = usable_time;
   if (soft_limit > hard_limit)
     soft_limit = hard_limit;
-
-  use_panic_mode = false;
 }
 
 inline bool TimeManager::should_stop(uint64_t elapsed, bool best_move_stable,
-                                     bool in_trouble, bool is_movetime) noexcept {
+                                     bool is_movetime) noexcept {
 
   if (elapsed >= hard_limit)
     return true;
@@ -689,13 +676,8 @@ inline bool TimeManager::should_stop(uint64_t elapsed, bool best_move_stable,
   if (is_movetime)
     return false;
 
-  if (in_trouble && !use_panic_mode && elapsed < panic_time) {
-    use_panic_mode = true;
-    soft_limit = panic_time;
-  }
-
   if (elapsed >= soft_limit) {
-    if (best_move_stable || use_panic_mode)
+    if (best_move_stable)
       return true;
     soft_limit = std::min(soft_limit + allocated_time / 8, hard_limit);
   }
@@ -711,10 +693,6 @@ inline void adjust_soft_limit(ThreadInfo &thread_info, uint64_t best_move_nodes,
   double factor = (static_cast<double>(NodeTmFactor1) / 100.0 - fract) *
                   NodeTmFactor2 / 100.0;
   const double bm_factor = BmFactor1 / 100.0f - (bm_stability * 0.06);
-
-  if (thread_info.time_manager.use_panic_mode) {
-    factor *= 1.5;
-  }
 
   double node_factor = 1.0;
   if (node_count > 100000) {

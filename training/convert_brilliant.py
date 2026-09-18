@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """High-speed multi-core converter from Brilliant PGN to Stallion SBIN format."""
 
+import argparse
 import ctypes
 import json
 import multiprocessing as mp
@@ -113,24 +114,33 @@ def worker_convert(worker_id: int, pgn_path: str, start_offset: int, end_offset:
     return games_processed, positions_extracted
 
 
-def main():
-    if not PGN_PATH.is_file():
-        print(f"[HATA] PGN dosyası bulunamadı: {PGN_PATH}", file=sys.stderr)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="BrilliantPly PGN -> WDL-etiketli SBIN feda havuzu")
+    parser.add_argument("--pgn", default=str(PGN_PATH))
+    parser.add_argument("--output", default=str(OUTPUT_PATH))
+    parser.add_argument("--data-dir", default=str(DATA_DIR))
+    parser.add_argument("--workers", type=int, default=10)
+    args = parser.parse_args(argv)
+    pgn_path = Path(args.pgn)
+    output_path = Path(args.output)
+    data_dir = Path(args.data_dir)
+    if not pgn_path.is_file():
+        print(f"[HATA] PGN dosyası bulunamadı: {pgn_path}", file=sys.stderr)
         return 1
 
-    num_workers = min(10, os.cpu_count() or 4)
-    file_size_mb = PGN_PATH.stat().st_size / (1024 * 1024)
+    num_workers = min(max(1, args.workers), os.cpu_count() or 4)
+    file_size_mb = pgn_path.stat().st_size / (1024 * 1024)
     print(f"=== Brilliant PGN -> SBIN Dönüştürme Başlatılıyor ===")
-    print(f"Kaynak: {PGN_PATH} ({file_size_mb:,.1f} MB)")
-    print(f"Hedef: {OUTPUT_PATH}")
+    print(f"Kaynak: {pgn_path} ({file_size_mb:,.1f} MB)")
+    print(f"Hedef: {output_path}")
     print(f"İş Parçacığı: {num_workers} çekirdek paralel")
 
     started = time.perf_counter()
-    boundaries = find_chunk_boundaries(PGN_PATH, num_workers)
-    temp_files = [DATA_DIR / f".brilliant_part_{i}.sbin" for i in range(num_workers)]
+    boundaries = find_chunk_boundaries(pgn_path, num_workers)
+    temp_files = [data_dir / f".brilliant_part_{i}.sbin" for i in range(num_workers)]
 
     tasks = [
-        (i, str(PGN_PATH), boundaries[i], boundaries[i + 1], str(temp_files[i]))
+        (i, str(pgn_path), boundaries[i], boundaries[i + 1], str(temp_files[i]))
         for i in range(num_workers)
     ]
 
@@ -146,8 +156,8 @@ def main():
     print(f"Toplam İşlenen Oyun: {total_games:,} ({total_games / parse_elapsed:,.0f} oyun/s)")
     print(f"Toplam Çıkarılan Pozisyon: {total_positions:,} ({total_positions / parse_elapsed:,.0f} pos/s)")
 
-    print(f"\nParçalar birleştiriliyor -> {OUTPUT_PATH}...")
-    temp_target = OUTPUT_PATH.with_suffix(".tmp")
+    print(f"\nParçalar birleştiriliyor -> {output_path}...")
+    temp_target = output_path.with_suffix(".tmp")
     with open(temp_target, "wb") as out_f:
         for temp_file in temp_files:
             if temp_file.is_file():
@@ -159,25 +169,25 @@ def main():
                         out_f.write(buf)
                 temp_file.unlink(missing_ok=True)
 
-    temp_target.replace(OUTPUT_PATH)
-    final_size_mb = OUTPUT_PATH.stat().st_size / (1024 * 1024)
+    temp_target.replace(output_path)
+    final_size_mb = output_path.stat().st_size / (1024 * 1024)
     total_elapsed = time.perf_counter() - started
 
     metadata = {
-        "source": str(PGN_PATH),
-        "output": str(OUTPUT_PATH),
+        "source": str(pgn_path),
+        "output": str(output_path),
         "total_games": total_games,
         "total_positions": total_positions,
-        "file_size_bytes": OUTPUT_PATH.stat().st_size,
+        "file_size_bytes": output_path.stat().st_size,
         "elapsed_seconds": round(total_elapsed, 2),
         "games_per_second": round(total_games / total_elapsed, 1),
         "positions_per_second": round(total_positions / total_elapsed, 1),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    with open(OUTPUT_PATH.with_suffix(".extract.json"), "w", encoding="utf-8") as f:
+    with open(output_path.with_suffix(".extract.json"), "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
-    print(f"[BAŞARILI] {total_positions:,} pozisyonluk {OUTPUT_PATH.name} oluşturuldu ({final_size_mb:,.1f} MB, {total_elapsed:.1f} sn)!")
+    print(f"[BAŞARILI] {total_positions:,} pozisyonluk {output_path.name} oluşturuldu ({final_size_mb:,.1f} MB, {total_elapsed:.1f} sn)!")
     return 0
 
 

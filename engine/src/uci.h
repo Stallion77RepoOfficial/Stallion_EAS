@@ -4,6 +4,8 @@
 #include <cctype>
 #include <cinttypes>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -145,7 +147,9 @@ inline void bench(BoardState &position, ThreadInfo &thread_info, int depth = 12)
     thread_info.root_moves.clear();
     thread_data.stop = false;
     search_position(position, thread_info, TT);
-    total_nodes += thread_info.nodes.load();
+    total_nodes += thread_info.nodes.load(std::memory_order_relaxed);
+    for (const auto &helper : thread_data.thread_infos)
+      total_nodes += helper.nodes.load(std::memory_order_relaxed);
   }
 
   safe_printf("Bench: %" PRIu64 " nodes %" PRIi64 " nps\n", total_nodes,
@@ -157,14 +161,13 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
   setvbuf(stdin, NULL, _IONBF, 0);
   setvbuf(stdout, NULL, _IONBF, 0);
 
-  if (interactive) {
-    safe_printf("Stallion, written by LegendOfCompiling\n\n\n");
-  }
-
   new_game(thread_info, TT);
   set_board(position, thread_info,
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-  load_nnue(resolve_file_path("nets/stallion.nnue"));
+  if (!load_embedded_nnue()) {
+    std::cerr << "no nnue binary found" << std::endl;
+    std::exit(1);
+  }
 
   std::string input;
 
@@ -206,7 +209,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
     if (command == "setoption" || command == "ucinewgame" || command == "position" ||
         command == "go" || command == "bench" || command == "perft" || command == "eval" ||
-        command == "flip" || command == "hashfull" || command == "d") stop_search();
+        command == "flip" || command == "hashfull" || command == "d" || command == "printparams") stop_search();
 
     if (command == "d") {
       print_board(position);
@@ -221,7 +224,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           "id name Stallion EAS NNUE\n"
           "id author LegendOfCompiling\n"
 
-          "option name EvalFile type string default nets/stallion.nnue\n"
           "option name Hash type spin default 256 min 1 max 131072\n"
           "option name Threads type spin default 1 min 1 max 1024\n"
           "option name MultiPV type spin default 1 min 1 max 256\n"
@@ -353,18 +355,11 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         const auto value = lowercase(valueStr);
         if (value != "true" && value != "false" && value != "1" && value != "0" &&
             value != "yes" && value != "no" && value != "on" && value != "off") {
-          safe_printf("info string Invalid boolean option value\n");
           continue;
         }
       }
 
-      std::fill(TT.begin(), TT.end(), TTBucket{});
-      thread_info.PawnCorrHist.fill({});
-      thread_info.NonPawnCorrHist.fill({});
-      if (optName == "evalfile") {
-        const bool loaded = load_nnue(resolve_file_path(valueStr));
-        safe_printf("info string EvalFile %s\n", loaded ? "loaded" : "load failed; previous network retained");
-      } else if (optName == "hash") {
+      if (optName == "hash") {
         bool ok = false;
         int mb = parse_int(valueStr, ok);
         if (!ok)
@@ -380,9 +375,9 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           std::vector<ThreadInfo> workers(thr - 1);
           thread_data.threads.reserve(thr - 1);
           thread_data.thread_infos.swap(workers);
-          thread_data.num_threads = thr;
         } catch (const std::bad_alloc &) {
-          safe_printf("info string Thread allocation failed\n");
+          std::cerr << "Failed to allocate search threads." << std::endl;
+          std::exit(EXIT_FAILURE);
         }
       } else if (optName == "multipv") {
         int mv;
@@ -474,7 +469,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       thread_info.is_movetime = false;
       thread_info.best_move_stable = false;
       thread_info.stability_counter = 0;
-      thread_info.previous_best_move = MoveNone;
       thread_info.root_moves.clear();
       thread_info.root_moves_limited = false;
       set_board(position, thread_info,
@@ -507,14 +501,12 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         }
 
         if (!set_board(position, thread_info, fen)) {
-          safe_printf("info string Invalid FEN; position unchanged\n");
           continue;
         }
       } else if (setup == "startpos") {
         std::string token;
         if (input_stream >> token) {
           if (token != "moves") {
-            safe_printf("info string Invalid position command; position unchanged\n");
             continue;
           }
           has_moves_token = true;
@@ -522,7 +514,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         set_board(position, thread_info,
                   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
       } else {
-        safe_printf("info string Invalid position command\n");
         continue;
       }
 
@@ -557,7 +548,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           thread_info.game_hist = previous_game_hist;
           thread_info.game_ply = previous_game_ply;
           thread_info.search_ply = previous_search_ply;
-          safe_printf("info string Invalid move; position unchanged\n");
           continue;
         }
 
@@ -639,9 +629,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
         if (token == "ponder") {
           thread_info.pondering = thread_info.use_ponder;
-          if (thread_info.pondering) {
-            thread_info.ponder_start_time = std::chrono::steady_clock::now();
-          }
           continue;
         }
 
@@ -737,8 +724,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       thread_info.time_manager.soft_limit = thread_info.opt_time;
       thread_info.time_manager.max_time = thread_info.max_time;
       thread_info.time_manager.hard_limit = thread_info.max_time;
-      thread_info.time_manager.panic_time = thread_info.max_time;
-      thread_info.time_manager.use_panic_mode = false;
       thread_data.pondering = thread_info.pondering.load();
 
       if (!thread_info.infinite_search && !searchmoves_specified && !thread_info.pondering &&
@@ -842,7 +827,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         thread_info.nnue_state.reset_nnue(position);
         const int piece_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
         const int raw = thread_info.nnue_state.evaluate(position.color, piece_count);
-        safe_printf("info string NNUE raw: %d (eval: %d cp)\n",
+        safe_printf("NNUE raw: %d (eval: %d cp)\n",
                     raw, raw * 100 / NormalizationFactor);
       }
     }
@@ -850,7 +835,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     else if (command == "flip") {
       position.color ^= 1;
       position.ep_square = SquareNone;
-      position.zobrist_key ^= zobrist_keys[side_index];
       calculate(position);
     }
 

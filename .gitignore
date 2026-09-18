@@ -10,3 +10,4 @@ training/libstallion_sbin.dylib
 training/stockfish
 training/cutechess-cli
 training/statistics_EAS_ratinglist.txt
+training/patricia

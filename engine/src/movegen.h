@@ -11,10 +11,8 @@ constexpr uint8_t GenCaptures = 1;
 constexpr uint8_t GenAll = 2;
 }
 
-constexpr int TTMoveScore = 10000000;
 constexpr int QueenPromoScore = 5000000;
 constexpr int GoodCaptureBaseScore = 2000000;
-constexpr int BadCaptureBaseScore = -2000000;
 constexpr int KillerMoveScore = 100000;
 
 inline void pawn_moves(const Position &position, uint64_t check_filter,

@@ -1,5 +1,6 @@
 #include "sbin.h"
 #include "../engine/src/bitboard.h"
+#include "../engine/src/nnue.h"
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -43,6 +44,7 @@ static bool decode_position(const PackedPosition* in, uint8_t board[64], int& co
 
     uint64_t occ = in->occupied;
     int kings[2]{}, pawns[2]{}, colors[2]{};
+    int pieces[2][7]{}, bishops[2][2]{};
     count = 0;
     while (occ) {
         const int sq = __builtin_ctzll(occ);
@@ -52,6 +54,8 @@ static bool decode_position(const PackedPosition* in, uint8_t board[64], int& co
         if (code < 2 || code > 13) return false;
         board[sq] = code;
         ++colors[code & 1];
+        ++pieces[code & 1][code / 2];
+        if (code / 2 == 3) ++bishops[code & 1][(sq + (sq >> 3)) & 1];
         if (code >= 12) ++kings[code & 1];
         if (code <= 3) {
             ++pawns[code & 1];
@@ -62,6 +66,14 @@ static bool decode_position(const PackedPosition* in, uint8_t board[64], int& co
     if (count != occupied_count || kings[0] != 1 || kings[1] != 1 ||
         pawns[0] > 8 || pawns[1] > 8 || colors[0] > 16 || colors[1] > 16) {
         return false;
+    }
+    for (int c = 0; c < 2; ++c) {
+        const int excess = std::max(0, pieces[c][2] - 2) + std::max(0, pieces[c][3] - 2) +
+                           std::max(0, pieces[c][4] - 2) + std::max(0, pieces[c][5] - 1);
+        if (pawns[c] + excess > 8) return false;
+        const int promoted_bishops =
+            std::max(0, bishops[c][0] - 1) + std::max(0, bishops[c][1] - 1);
+        if (promoted_bishops > 8 - pawns[c]) return false;
     }
 
     if ((count & 1) && (in->pieces[count / 2] & 0xf0)) return false;
@@ -80,6 +92,7 @@ static bool decode_position(const PackedPosition* in, uint8_t board[64], int& co
 
     const bool black_turn = (in->flags & 1) != 0;
     const int ep_file = h_file_ep ? 8 : int(ep_code);
+    int ep_captured = -1;
     if (ep_file != 0) {
         const int target = (black_turn ? 2 : 5) * 8 + (ep_file - 1);
         const int captured = target + (black_turn ? 8 : -8);
@@ -90,6 +103,7 @@ static bool decode_position(const PackedPosition* in, uint8_t board[64], int& co
             piece_at(captured) != uint8_t(2 + (black_turn ? 0 : 1))) {
             return false;
         }
+        ep_captured = captured;
     }
 
     Position position{};
@@ -105,8 +119,32 @@ static bool decode_position(const PackedPosition* in, uint8_t board[64], int& co
     }
     const int turn = in->flags & 1;
     if (attackers_to(position, king_squares[turn ^ 1], turn, in->occupied)) return false;
-    if (pop_count(attackers_to(position, king_squares[turn], turn ^ 1, in->occupied)) > 2)
-        return false;
+    const uint64_t checkers =
+        attackers_to(position, king_squares[turn], turn ^ 1, in->occupied);
+    const int ncheckers = pop_count(checkers);
+    if (ncheckers > 2) return false;
+    auto is_slider = [&](int sq) {
+        const int type = board[sq] / 2;
+        return type >= 3 && type <= 5;
+    };
+    if (ncheckers == 2) {
+        uint64_t c = checkers;
+        bool slider = false;
+        while (c) {
+            const int sq = __builtin_ctzll(c);
+            c &= c - 1;
+            if (is_slider(sq)) { slider = true; break; }
+        }
+        if (!slider) return false;
+    }
+    if (ep_file != 0 && checkers) {
+        uint64_t c = checkers;
+        while (c) {
+            const int sq = __builtin_ctzll(c);
+            c &= c - 1;
+            if (sq != ep_captured && !is_slider(sq)) return false;
+        }
+    }
     return true;
 }
 
@@ -196,7 +234,7 @@ int sbin_pack_fen(const char* fen, float wdl, int16_t eval, PackedPosition* out)
 
     out->eval = eval;
     out->wdl = static_cast<uint16_t>(std::round(wdl * 65535.0f));
-    out->plies = static_cast<uint8_t>(halfmove);
+    out->halfmove = static_cast<uint8_t>(halfmove);
     out->reserved[0] = metadata & 255;
     out->reserved[1] = metadata >> 8;
 
@@ -255,7 +293,7 @@ int sbin_unpack_fen(const PackedPosition* in, char* fen_buf, size_t buf_len, flo
         fen += "-";
     }
 
-    fen += " " + std::to_string(in->plies) + " " + std::to_string(metadata & 0x7fff);
+    fen += " " + std::to_string(in->halfmove) + " " + std::to_string(metadata & 0x7fff);
 
     if (fen.size() >= buf_len) return -2;
     std::memcpy(fen_buf, fen.c_str(), fen.size() + 1);
@@ -266,17 +304,8 @@ int sbin_unpack_fen(const PackedPosition* in, char* fen_buf, size_t buf_len, flo
     return 0;
 }
 
-constexpr int KingBucketTable[64] = {
-    0,  1,  2,  3,  3,  2,  1,  0,
-    0,  1,  2,  3,  3,  2,  1,  0,
-    4,  5,  6,  7,  7,  6,  5,  4,
-    4,  5,  6,  7,  7,  6,  5,  4,
-    8,  9, 10, 11, 11, 10,  9,  8,
-    8,  9, 10, 11, 11, 10,  9,  8,
-   12, 13, 14, 15, 15, 14, 13, 12,
-   12, 13, 14, 15, 15, 14, 13, 12
-};
-
+// King buckets and feature indices come straight from the engine (nnue.h),
+// so the native decoder cannot drift out of sync with training or search.
 int sbin_extract_nnue(const PackedPosition* in, int16_t* us, int16_t* them, int* out_white_turn) {
     if (!in || !us || !them) return -1;
     uint8_t board[64];
@@ -287,8 +316,8 @@ int sbin_extract_nnue(const PackedPosition* in, int16_t* us, int16_t* them, int*
     bool white_turn = ((in->flags & 1) == 0);
     if (out_white_turn) *out_white_turn = white_turn ? 1 : 0;
 
-    std::fill_n(us, 32, -1);
-    std::fill_n(them, 32, -1);
+    std::fill_n(us, SBIN_NNUE_SLOTS, -1);
+    std::fill_n(them, SBIN_NNUE_SLOTS, -1);
 
     int wking_sq = -1, bking_sq = -1;
     uint64_t occ_scan = occ;
@@ -309,21 +338,39 @@ int sbin_extract_nnue(const PackedPosition* in, int16_t* us, int16_t* them, int*
         occ &= occ - 1;
         const uint8_t code = board[sq];
 
-        uint8_t color = code & 1;
-        uint8_t base = (code >> 1) - 1;
-        int16_t white_idx = static_cast<int16_t>(w_bucket * 768 + color * 384 + base * 64 + sq);
-        int16_t black_idx = static_cast<int16_t>(b_bucket * 768 + (color ^ 1) * 384 + base * 64 + (sq ^ 56));
+        const auto [white_idx, black_idx] =
+            feature_indices(code, sq, static_cast<int>(w_bucket), static_cast<int>(b_bucket));
 
         if (white_turn) {
-            us[count] = white_idx;
-            them[count] = black_idx;
+            us[count] = static_cast<int16_t>(white_idx);
+            them[count] = static_cast<int16_t>(black_idx);
         } else {
-            us[count] = black_idx;
-            them[count] = white_idx;
+            us[count] = static_cast<int16_t>(black_idx);
+            them[count] = static_cast<int16_t>(white_idx);
         }
         count++;
     }
-    return count;
+
+    uint64_t colors_bb[2] = {0, 0};
+    uint64_t pieces_bb[7] = {0, 0, 0, 0, 0, 0, 0};
+    for (int sq = 0; sq < 64; ++sq) {
+        const uint8_t code = board[sq];
+        if (code < 2 || code > 13) continue;
+        colors_bb[code & 1] |= (1ULL << sq);
+        pieces_bb[code / 2] |= (1ULL << sq);
+    }
+    int extra_w[SBIN_NNUE_SLOTS], extra_b[SBIN_NNUE_SLOTS];
+    const int nw = collect_extra_features(board, colors_bb, pieces_bb, false, extra_w, SBIN_NNUE_SLOTS);
+    const int nb = collect_extra_features(board, colors_bb, pieces_bb, true, extra_b, SBIN_NNUE_SLOTS);
+    if (nw < 0 || nb < 0) return -1;
+    if (count + nw > SBIN_NNUE_SLOTS || count + nb > SBIN_NNUE_SLOTS) return -1;
+    const int* first = white_turn ? extra_w : extra_b;
+    const int* second = white_turn ? extra_b : extra_w;
+    const int n_first = white_turn ? nw : nb;
+    const int n_second = white_turn ? nb : nw;
+    for (int i = 0; i < n_first; ++i) us[count + i] = static_cast<int16_t>(first[i]);
+    for (int i = 0; i < n_second; ++i) them[count + i] = static_cast<int16_t>(second[i]);
+    return count + (n_first > n_second ? n_first : n_second);
 }
 
 size_t sbin_validate_batch(const PackedPosition* positions, size_t count, uint8_t* status) {
@@ -370,8 +417,8 @@ size_t sbin_batch_decode_indexed(
     size_t decoded = 0;
     for (size_t i = 0; i < count; ++i) {
         const PackedPosition& pos = in_positions[i];
-        int16_t* feat_us = out_features + (decoded * 64);
-        int16_t* feat_them = feat_us + 32;
+        int16_t* feat_us = out_features + (decoded * SBIN_NNUE_SLOTS * 2);
+        int16_t* feat_them = feat_us + SBIN_NNUE_SLOTS;
 
         int white_turn = 1;
         int pieces = sbin_extract_nnue(&pos, feat_us, feat_them, &white_turn);

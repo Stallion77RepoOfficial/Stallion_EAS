@@ -178,7 +178,6 @@ constexpr std::array<int, 7> MaterialValues = {0,   105, 320,  330,
 
 namespace Random {
 inline thread_local std::mt19937 rd(std::random_device{}());
-inline thread_local std::uniform_int_distribution<int> dist(0, INT32_MAX);
 } // namespace Random
 
 constexpr inline uint8_t get_color(uint8_t piece) noexcept { return piece & 1; }
@@ -187,7 +186,6 @@ constexpr inline bool is_valid_square(int sq) noexcept {
 }
 
 void safe_printf(const char *fmt, ...);
-void safe_print_cerr(const std::string &s);
 
 constexpr inline Move pack_move(uint8_t from, uint8_t to,
                                 uint8_t type = MoveTypes::Normal) noexcept {
@@ -208,6 +206,49 @@ constexpr inline uint8_t extract_promo(Move move) noexcept {
   return (move >> 2) & 3;
 }
 constexpr inline uint8_t extract_type(Move move) noexcept { return move & 3; }
+
+// ---- Extended NNUE feature layout (single source of truth) ----
+// Base HalfKP features occupy [0, NNUE_BASE_FEATURES). Extra blocks follow in
+// ascending order. Every producer (engine refresh/update, SBIN extractor,
+// training parser) must emit index sets in ascending block order with
+// ascending indices inside each block, so incremental diffs are a linear
+// merge. Learned weights only: humans define WHAT is visible, never its value.
+constexpr size_t NNUE_BASE_FEATURES = 12288;
+constexpr size_t NNUE_OFF_MATERIAL = NNUE_BASE_FEATURES;          // +100
+constexpr size_t NNUE_OFF_ZONE_OCC = NNUE_OFF_MATERIAL + 100;     // +234
+constexpr size_t NNUE_OFF_ZONE_ATK = NNUE_OFF_ZONE_OCC + 234;     // +18
+constexpr size_t NNUE_OFF_PAWN = NNUE_OFF_ZONE_ATK + 18;          // +384
+constexpr size_t NNUE_OFF_ROOKFILE = NNUE_OFF_PAWN + 384;         // +256
+constexpr size_t NNUE_OFF_COMPLEX = NNUE_OFF_ROOKFILE + 256;      // +36
+constexpr size_t NNUE_INPUT_SIZE = NNUE_OFF_COMPLEX + 36;         // 13316
+constexpr int NNUE_EXTRA_SLOTS = 256;
+
+constexpr inline size_t nnue_material_index(int side, int type, int count) noexcept {
+  const int c = count < 0 ? 0 : (count > 9 ? 9 : count);
+  return NNUE_OFF_MATERIAL + static_cast<size_t>(side) * 50 +
+         static_cast<size_t>(type) * 10 + static_cast<size_t>(c);
+}
+constexpr inline size_t nnue_zone_occ_index(int king, int off, int occ) noexcept {
+  return NNUE_OFF_ZONE_OCC + static_cast<size_t>(king) * 117 +
+         static_cast<size_t>(off) * 13 + static_cast<size_t>(occ);
+}
+constexpr inline size_t nnue_zone_atk_index(int king, int off) noexcept {
+  return NNUE_OFF_ZONE_ATK + static_cast<size_t>(king) * 9 +
+         static_cast<size_t>(off);
+}
+constexpr inline size_t nnue_pawn_index(int color, int state, int sq) noexcept {
+  return NNUE_OFF_PAWN + static_cast<size_t>(color) * 192 +
+         static_cast<size_t>(state) * 64 + static_cast<size_t>(sq);
+}
+constexpr inline size_t nnue_rookfile_index(int color, int kind, int sq) noexcept {
+  return NNUE_OFF_ROOKFILE + static_cast<size_t>(color) * 128 +
+         static_cast<size_t>(kind) * 64 + static_cast<size_t>(sq);
+}
+constexpr inline size_t nnue_complex_index(int side, int sqcolor, int count) noexcept {
+  const int c = count < 0 ? 0 : (count > 8 ? 8 : count);
+  return NNUE_OFF_COMPLEX + static_cast<size_t>(side) * 18 +
+         static_cast<size_t>(sqcolor) * 9 + static_cast<size_t>(c);
+}
 
 constexpr inline uint16_t get_zobrist_key(uint8_t piece, uint8_t sq) noexcept {
   return static_cast<uint16_t>(((piece - 2) * 64) + sq);

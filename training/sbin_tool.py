@@ -32,6 +32,7 @@ source_identity = workflow.file_identity
 ROOT = Path(__file__).resolve().parent
 FORMAT_VERSION = 2
 WRITER_VERSION = 3
+NNUE_SLOTS = 256
 DYLIB_PATH = ROOT / ("libstallion_sbin.dylib" if sys.platform == "darwin" else "libstallion_sbin.so")
 
 # 32-byte PackedPosition struct in Python ctypes
@@ -43,17 +44,25 @@ class PackedPosition(Structure):
         ("eval", ctypes.c_int16),
         ("wdl", ctypes.c_uint16),
         ("flags", ctypes.c_uint8),
-        ("plies", ctypes.c_uint8),
+        ("halfmove", ctypes.c_uint8),
         ("reserved", ctypes.c_uint8 * 2),
     ]
 
 assert ctypes.sizeof(PackedPosition) == 32, "PackedPosition must be exactly 32 bytes"
 
+# Mirror of SbinValidationStatus in sbin.h.
+SBIN_MISSING_FULLMOVE = 1
+SBIN_NONZERO_PADDING = 2
+SBIN_INVALID_POSITION = 4
+SBIN_STATUS_FLAGS = ((SBIN_MISSING_FULLMOVE, "missing_fullmove"),
+                     (SBIN_NONZERO_PADDING, "nonzero_padding"),
+                     (SBIN_INVALID_POSITION, "invalid_position"))
+
 
 @lru_cache(maxsize=1)
 def load_native_lib():
     sources = [ROOT / name for name in ("sbin.cpp", "sbin.h", "Makefile")]
-    sources += [ROOT.parent / "engine" / "src" / name for name in ("bitboard.h", "defs.h")]
+    sources += [ROOT.parent / "engine" / "src" / name for name in ("bitboard.h", "nnue.h", "defs.h")]
     if not DYLIB_PATH.is_file() or any(p.stat().st_mtime_ns > DYLIB_PATH.stat().st_mtime_ns for p in sources):
         subprocess.run(["make", "-C", str(ROOT)], check=True, capture_output=True, text=True)
     lib = ctypes.CDLL(str(DYLIB_PATH))
@@ -143,15 +152,29 @@ class SbinDataset:
             raise RuntimeError(f"Unpack hatası (code {ret})")
         return buf.value.decode("utf-8"), wdl.value, eval_cp.value
 
+    def eval_view(self):
+        """Read-only int16 view of the packed cp-eval field (offset 24, stride 32)."""
+        import numpy as np
+        return np.ndarray((self.count,), dtype="<i2", buffer=self._mmap, offset=24, strides=(32,))
+
+    def records_ptr(self, index: int):
+        """Record at index for batch native calls (shares the mmap buffer)."""
+        return self._array[index]
+
+    def record_bytes(self, index: int) -> bytes:
+        """Raw 32 bytes of the record at index."""
+        return self._mmap[index * 32:(index + 1) * 32]
+
     def get_nnue_features(self, index: int) -> tuple[list[int], list[int], bool]:
         pos = self._position(index)
-        us = (c_int16 * 32)()
-        them = (c_int16 * 32)()
+        us = (c_int16 * NNUE_SLOTS)()
+        them = (c_int16 * NNUE_SLOTS)()
         white_turn = c_int()
-        pieces = self.lib.sbin_extract_nnue(ctypes.byref(pos), us, them, ctypes.byref(white_turn))
-        if pieces < 0:
+        total = self.lib.sbin_extract_nnue(ctypes.byref(pos), us, them, ctypes.byref(white_turn))
+        if total < 0:
             raise RuntimeError("NNUE extract hatası")
-        return list(us)[:pieces], list(them)[:pieces], bool(white_turn.value)
+        return ([x for x in us[:total] if x >= 0], [x for x in them[:total] if x >= 0],
+                bool(white_turn.value))
 
     def close(self):
         if getattr(self, "_array", None) is not None:
@@ -289,7 +312,7 @@ def verify_sbin(sbin_path: Path, samples: int = 10000, *, full: bool = False,
                 del ptr
                 report["checked"] += count
                 report["invalid_records"] += count - valid
-                for flag, name in ((1, "missing_fullmove"), (2, "nonzero_padding"), (4, "invalid_position")):
+                for flag, name in SBIN_STATUS_FLAGS:
                     report[name] += int(np.count_nonzero(status & flag))
                 room = 20 - len(report["first_invalid_indices"])
                 if room > 0:
@@ -319,7 +342,7 @@ def verify_sbin(sbin_path: Path, samples: int = 10000, *, full: bool = False,
             if not full:
                 report["checked"] += 1
                 report["invalid_records"] += bool(status.value)
-                for flag, name in ((1, "missing_fullmove"), (2, "nonzero_padding"), (4, "invalid_position")):
+                for flag, name in SBIN_STATUS_FLAGS:
                     report[name] += bool(status.value & flag)
                 if status.value and len(report["first_invalid_indices"]) < 20:
                     report["first_invalid_indices"].append(idx)
@@ -356,7 +379,7 @@ def benchmark_read_speed(sbin_path: Path, batch_size: int = 1024) -> None:
         print(f"Veri Seti: {sbin_path} ({ds.count:,} pozisyon)")
         print(f"Batch Boyutu: {batch_size}")
 
-        out_features = (c_int16 * (batch_size * 64))()
+        out_features = (c_int16 * (batch_size * NNUE_SLOTS * 2))()
         out_targets = (c_float * batch_size)()
 
         t0 = time.perf_counter()

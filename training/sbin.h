@@ -11,12 +11,14 @@ struct PackedPosition {
     int16_t  eval;
     uint16_t wdl;
     uint8_t  flags;
-    uint8_t  plies;
+    uint8_t  halfmove;
     uint8_t  reserved[2];
 };
 #pragma pack(pop)
 
 static_assert(sizeof(PackedPosition) == 32, "PackedPosition must be exactly 32 bytes");
+
+enum { SBIN_NNUE_SLOTS = 256 };
 
 #ifdef __cplusplus
 extern "C" {

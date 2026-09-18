@@ -5,8 +5,6 @@
 #include <sstream>
 #include <string_view>
 
-struct ThreadInfo;
-
 inline std::string internal_to_uci(const BoardState &, Action move) {
   if (move == MoveNone) return "0000";
   const int from = extract_from(move);
@@ -250,6 +248,20 @@ constexpr inline bool is_cap(const BoardState &position, Action move) noexcept {
           extract_type(move) == MoveTypes::Promotion);
 }
 
+inline void diff_extra_sorted(const int16_t *pre, int n_pre, const int *post, int n_post,
+                              int *removed, int *added, int *n_removed, int *n_added) noexcept {
+  int i = 0, j = 0, r = 0, a = 0;
+  while (i < n_pre && j < n_post) {
+    if (pre[i] == post[j]) { ++i; ++j; }
+    else if (pre[i] < post[j]) removed[r++] = pre[i++];
+    else added[a++] = post[j++];
+  }
+  while (i < n_pre) removed[r++] = pre[i++];
+  while (j < n_post) added[a++] = post[j++];
+  *n_removed = r;
+  *n_added = a;
+}
+
 inline void update_nnue_state(ThreadInfo &thread_info, Action move,
                               const BoardState &position, const BoardState &new_position) noexcept {
   if (!nnue_loaded) return;
@@ -282,64 +294,66 @@ inline void update_nnue_state(ThreadInfo &thread_info, Action move,
     }
   }
 
+  const int base_idx = thread_info.nnue_state.m_idx;
+  int king_from = from, king_to = to;
   if (extract_type(move) == MoveTypes::Castling) {
     const int indx = color ? 56 : 0;
     const int side = to > from ? Sides::Kingside : Sides::Queenside;
-    const int king_to = (side == Sides::Kingside) ? (indx + 6) : (indx + 2);
+    king_to = (side == Sides::Kingside) ? (indx + 6) : (indx + 2);
     const int rook_to = (side == Sides::Kingside) ? (indx + 5) : (indx + 3);
 
     thread_info.nnue_state.add_add_sub_sub(
         from_piece, from, king_to, Pieces::WRook + color,
         position.castling_squares[color][side], rook_to);
-
-    if (color == Colors::White) {
-      const size_t old_b = KingBucketTable[from];
-      const size_t new_b = KingBucketTable[king_to];
-      if (old_b != new_b) {
-        thread_info.nnue_state.m_w_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
-        thread_info.nnue_state.refresh_white(new_position, new_b);
-      }
-    } else {
-      const size_t old_b = KingBucketTable[from ^ 56];
-      const size_t new_b = KingBucketTable[king_to ^ 56];
-      if (old_b != new_b) {
-        thread_info.nnue_state.m_b_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
-        thread_info.nnue_state.refresh_black(new_position, new_b);
-      }
-    }
   } else if (captured_piece != Pieces::Blank && is_valid_square(captured_square)) {
     thread_info.nnue_state.add_sub_sub(from_piece, from, to_piece, to, captured_piece, captured_square);
-    if (from_piece == Pieces::WKing) {
-      const size_t old_b = KingBucketTable[from];
-      const size_t new_b = KingBucketTable[to];
-      if (old_b != new_b) {
-        thread_info.nnue_state.m_w_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
-        thread_info.nnue_state.refresh_white(new_position, new_b);
-      }
-    } else if (from_piece == Pieces::BKing) {
-      const size_t old_b = KingBucketTable[from ^ 56];
-      const size_t new_b = KingBucketTable[to ^ 56];
-      if (old_b != new_b) {
-        thread_info.nnue_state.m_b_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
-        thread_info.nnue_state.refresh_black(new_position, new_b);
-      }
-    }
   } else {
     thread_info.nnue_state.add_sub(from_piece, from, to_piece, to);
-    if (from_piece == Pieces::WKing) {
-      const size_t old_b = KingBucketTable[from];
-      const size_t new_b = KingBucketTable[to];
-      if (old_b != new_b) {
-        thread_info.nnue_state.m_w_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
-        thread_info.nnue_state.refresh_white(new_position, new_b);
-      }
-    } else if (from_piece == Pieces::BKing) {
-      const size_t old_b = KingBucketTable[from ^ 56];
-      const size_t new_b = KingBucketTable[to ^ 56];
-      if (old_b != new_b) {
-        thread_info.nnue_state.m_b_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
-        thread_info.nnue_state.refresh_black(new_position, new_b);
-      }
+  }
+
+  if (thread_info.nnue_state.m_idx != base_idx) {
+    auto &st = thread_info.nnue_state;
+    const int nl = st.m_idx;
+    int post_w[NNUE_EXTRA_SLOTS], post_b[NNUE_EXTRA_SLOTS];
+    const int nw1 = collect_extra_features(new_position.board.data(), new_position.colors_bb.data(),
+                                           new_position.pieces_bb.data(), false, post_w, NNUE_EXTRA_SLOTS);
+    const int nb1 = collect_extra_features(new_position.board.data(), new_position.colors_bb.data(),
+                                           new_position.pieces_bb.data(), true, post_b, NNUE_EXTRA_SLOTS);
+    if (nw1 >= 0 && nb1 >= 0 && base_idx >= 0 && base_idx < MaxSearchDepth &&
+        nl >= 0 && nl < MaxSearchDepth) {
+      int rem_w[NNUE_EXTRA_SLOTS], add_w[NNUE_EXTRA_SLOTS];
+      int rem_b[NNUE_EXTRA_SLOTS], add_b[NNUE_EXTRA_SLOTS];
+      int nrw = 0, naw = 0, nrb = 0, nab = 0;
+      diff_extra_sorted(st.m_pre_w[base_idx], st.m_pre_nw[base_idx], post_w, nw1,
+                        rem_w, add_w, &nrw, &naw);
+      diff_extra_sorted(st.m_pre_b[base_idx], st.m_pre_nb[base_idx], post_b, nb1,
+                        rem_b, add_b, &nrb, &nab);
+      st.apply_extra_delta(rem_w, nrw, add_w, naw, rem_b, nrb, add_b, nab);
+      st.m_pre_nw[nl] = nw1;
+      st.m_pre_nb[nl] = nb1;
+      for (int i = 0; i < nw1; ++i) st.m_pre_w[nl][i] = static_cast<int16_t>(post_w[i]);
+      for (int i = 0; i < nb1; ++i) st.m_pre_b[nl][i] = static_cast<int16_t>(post_b[i]);
+    } else if (base_idx >= 0 && base_idx < MaxSearchDepth && nl >= 0 && nl < MaxSearchDepth) {
+      st.m_pre_nw[nl] = st.m_pre_nw[base_idx];
+      st.m_pre_nb[nl] = st.m_pre_nb[base_idx];
+      std::copy_n(st.m_pre_w[base_idx], NNUE_EXTRA_SLOTS, st.m_pre_w[nl]);
+      std::copy_n(st.m_pre_b[base_idx], NNUE_EXTRA_SLOTS, st.m_pre_b[nl]);
+    }
+  }
+
+  if (from_piece == Pieces::WKing) {
+    const size_t old_b = KingBucketTable[king_from];
+    const size_t new_b = KingBucketTable[king_to];
+    if (old_b != new_b) {
+      thread_info.nnue_state.m_w_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
+      thread_info.nnue_state.refresh_white(new_position, new_b);
+    }
+  } else if (from_piece == Pieces::BKing) {
+    const size_t old_b = KingBucketTable[king_from ^ 56];
+    const size_t new_b = KingBucketTable[king_to ^ 56];
+    if (old_b != new_b) {
+      thread_info.nnue_state.m_b_bucket[thread_info.nnue_state.m_idx] = static_cast<uint8_t>(new_b);
+      thread_info.nnue_state.refresh_black(new_position, new_b);
     }
   }
 }

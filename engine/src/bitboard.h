@@ -230,18 +230,12 @@ constexpr inline int get_lsb(uint64_t bb) noexcept {
   return bb ? __builtin_ctzll(bb) : SqNone;
 }
 
-constexpr inline int get_msb(uint64_t bb) noexcept {
-  return bb ? 63 - __builtin_clzll(bb) : SqNone;
-}
-
 inline int pop_lsb(uint64_t &bb) noexcept {
   if (!bb) [[unlikely]] return SqNone;
   const int s = __builtin_ctzll(bb);
   bb &= (bb - 1);
   return s;
 }
-
-constexpr inline uint64_t get_lsb_bb(uint64_t bb) noexcept { return bb & -bb; }
 
 inline uint64_t set_occ(int idx, int size, uint64_t mask) noexcept {
   uint64_t occ = 0;
@@ -473,4 +467,160 @@ constexpr inline uint64_t shift_pawns(uint64_t bb, int dir) noexcept {
   } else {
     return bb >> -dir;
   }
+}
+
+// Collect the active extra-feature indices for one accumulator perspective.
+// flip=false: White view (as-is). flip=true: Black view, i.e. the same rules
+// applied to the mirrored board (squares ^56, colors swapped).
+// Indices are emitted in ascending order. Returns the count, or -1 when a
+// king is missing or out[] (capacity cap) would overflow.
+inline int collect_extra_features(const uint8_t board[64],
+                                  const uint64_t colors_bb[2],
+                                  const uint64_t pieces_bb[7],
+                                  bool flip, int *out, int cap) noexcept {
+  if (!board || !colors_bb || !pieces_bb || !out || cap < NNUE_EXTRA_SLOTS) return -1;
+  ensure_bbs_initialized();
+  const uint64_t wbb = colors_bb[0] & pieces_bb[PieceTypes::King];
+  const uint64_t bbb = colors_bb[1] & pieces_bb[PieceTypes::King];
+  if (!wbb || !bbb) return -1;
+  const int kings[2] = {get_lsb(wbb), get_lsb(bbb)};
+
+  int n = 0;
+  auto push = [&](size_t idx) -> bool {
+    if (n >= cap) return false;
+    out[n++] = static_cast<int>(idx);
+    return true;
+  };
+
+  int mat_count[2][5] = {};
+  int complex_count[2][2] = {};
+  for (int sq = 0; sq < 64; ++sq) {
+    const int piece = board[sq];
+    if (piece < 2 || piece > 13) continue;
+    const int color = piece & 1;
+    const int base = (piece >> 1) - 1;
+    if (base <= 4) mat_count[color][base]++;
+    if (base == 0) complex_count[color][(get_file(sq) + get_rank(sq)) & 1]++;
+  }
+  for (int slot_side = 0; slot_side < 2; ++slot_side)
+    for (int type = 0; type < 5; ++type) {
+      const int real_side = flip ? (slot_side ^ 1) : slot_side;
+      if (!push(nnue_material_index(slot_side, type, mat_count[real_side][type]))) return -1;
+    }
+
+  for (int slot_king = 0; slot_king < 2; ++slot_king) {
+    const int real_king = flip ? (slot_king ^ 1) : slot_king;
+    const int king_view = flip ? (kings[real_king] ^ 56) : kings[real_king];
+    const int kf = get_file(king_view), kr = get_rank(king_view);
+    for (int off = 0; off < 9; ++off) {
+      const int tf = kf + (off % 3) - 1, tr = kr + (off / 3) - 1;
+      if (tf < 0 || tf > 7 || tr < 0 || tr > 7) continue;
+      const int target_real = flip ? ((tr * 8 + tf) ^ 56) : (tr * 8 + tf);
+      const int piece = board[target_real];
+      const int occ = (piece < 2 || piece > 13) ? 0 : ((flip ? (piece ^ 1) : piece) - 1);
+      if (!push(nnue_zone_occ_index(slot_king, off, occ))) return -1;
+    }
+  }
+
+  Position tmp{};
+  tmp.colors_bb[0] = colors_bb[0];
+  tmp.colors_bb[1] = colors_bb[1];
+  for (int i = 0; i < 7; ++i) tmp.pieces_bb[i] = pieces_bb[i];
+  const uint64_t occupied = colors_bb[0] | colors_bb[1];
+  for (int slot_king = 0; slot_king < 2; ++slot_king) {
+    const int real_king = flip ? (slot_king ^ 1) : slot_king;
+    const int king_view = flip ? (kings[real_king] ^ 56) : kings[real_king];
+    const int kf = get_file(king_view), kr = get_rank(king_view);
+    const int enemy_real = flip ? slot_king : (slot_king ^ 1);
+    for (int off = 0; off < 9; ++off) {
+      const int tf = kf + (off % 3) - 1, tr = kr + (off / 3) - 1;
+      if (tf < 0 || tf > 7 || tr < 0 || tr > 7) continue;
+      const int target_real = flip ? ((tr * 8 + tf) ^ 56) : (tr * 8 + tf);
+      if (attackers_to(tmp, target_real, enemy_real, occupied))
+        if (!push(nnue_zone_atk_index(slot_king, off))) return -1;
+    }
+  }
+
+  const uint64_t all_pawns = pieces_bb[PieceTypes::Pawn];
+  for (int slot_color = 0; slot_color < 2; ++slot_color) {
+    const int real_color = flip ? (slot_color ^ 1) : slot_color;
+    const uint64_t own_pawns = all_pawns & colors_bb[real_color];
+    const uint64_t enemy_pawns = all_pawns & colors_bb[real_color ^ 1];
+    int pawn_sq[16];
+    int np = 0;
+    uint64_t pb = own_pawns;
+    while (pb && np < 16) pawn_sq[np++] = pop_lsb(pb);
+    if (pb) return -1;
+    for (int a = 1; a < np; ++a) {
+      const int key = pawn_sq[a];
+      const int key_slot = flip ? (key ^ 56) : key;
+      int b = a - 1;
+      while (b >= 0 && (flip ? (pawn_sq[b] ^ 56) : pawn_sq[b]) > key_slot) {
+        pawn_sq[b + 1] = pawn_sq[b];
+        --b;
+      }
+      pawn_sq[b + 1] = key;
+    }
+    for (int state = 0; state < 3; ++state) {
+      for (int i = 0; i < np; ++i) {
+        const int real = pawn_sq[i];
+        const int sq = flip ? (real ^ 56) : real;
+        const int f = get_file(real), r = get_rank(real);
+        bool has = false;
+        if (state == 0) {
+          const uint64_t adj = Files[f] | (f > 0 ? Files[f - 1] : 0ULL) | (f < 7 ? Files[f + 1] : 0ULL);
+          uint64_t ahead;
+          if (real_color == 0)
+            ahead = r >= 7 ? 0ULL : (~0ULL << ((r + 1) * 8));
+          else
+            ahead = r <= 0 ? 0ULL : ((1ULL << (r * 8)) - 1ULL);
+          has = !(enemy_pawns & adj & ahead);
+        } else if (state == 1) {
+          const uint64_t adj = (f > 0 ? Files[f - 1] : 0ULL) | (f < 7 ? Files[f + 1] : 0ULL);
+          has = !(own_pawns & adj);
+        } else {
+          has = (own_pawns & Files[f] & ~(1ULL << real)) != 0ULL;
+        }
+        if (has && !push(nnue_pawn_index(slot_color, state, sq))) return -1;
+      }
+    }
+  }
+
+  for (int slot_color = 0; slot_color < 2; ++slot_color) {
+    const int real_color = flip ? (slot_color ^ 1) : slot_color;
+    const uint64_t own_pawns = all_pawns & colors_bb[real_color];
+    int rook_sq[16];
+    int nr = 0;
+    uint64_t rb = pieces_bb[PieceTypes::Rook] & colors_bb[real_color];
+    while (rb && nr < 16) rook_sq[nr++] = pop_lsb(rb);
+    if (rb) return -1;
+    for (int a = 1; a < nr; ++a) {
+      const int key = rook_sq[a];
+      const int key_slot = flip ? (key ^ 56) : key;
+      int b = a - 1;
+      while (b >= 0 && (flip ? (rook_sq[b] ^ 56) : rook_sq[b]) > key_slot) {
+        rook_sq[b + 1] = rook_sq[b];
+        --b;
+      }
+      rook_sq[b + 1] = key;
+    }
+    for (int kind = 0; kind < 2; ++kind) {
+      for (int i = 0; i < nr; ++i) {
+        const int real = rook_sq[i];
+        const int sq = flip ? (real ^ 56) : real;
+        const int f = get_file(real);
+        const bool ok = kind == 0 ? !(all_pawns & Files[f]) : !(own_pawns & Files[f]);
+        if (ok && !push(nnue_rookfile_index(slot_color, kind, sq))) return -1;
+      }
+    }
+  }
+
+  for (int slot_side = 0; slot_side < 2; ++slot_side)
+    for (int sc = 0; sc < 2; ++sc) {
+      const int real_side = flip ? (slot_side ^ 1) : slot_side;
+      const int real_sc = flip ? (sc ^ 1) : sc;
+      if (!push(nnue_complex_index(slot_side, sc, complex_count[real_side][real_sc]))) return -1;
+    }
+
+  return n;
 }

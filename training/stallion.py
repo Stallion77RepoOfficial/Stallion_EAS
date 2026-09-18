@@ -9,6 +9,7 @@ Commands:
   match        candidate/baseline cutechess comparison
   eas          local aggressiveness report from a PGN
   sacrifices   SGS sacrifice scan from a PGN
+  iwins        IWS interesting-wins filter from a PGN
   pipeline     run a selected subset with --steps
 
 All Python workflow code is intentionally kept in this file. Native assets
@@ -27,6 +28,7 @@ import json
 import math
 import os
 from pathlib import Path
+import random
 import re
 import shutil
 import subprocess
@@ -47,14 +49,27 @@ DEFAULT_PUZZLES = ROOT / "data" / "puzzle_sacrifices.sbin"
 DEFAULT_BOOK = ROOT / "openings.epd"
 KING_BUCKETS = 16
 NNUE_OUTPUT_BUCKETS = 8
-NNUE_FEATURES = 768 * KING_BUCKETS  # 12288
+NNUE_BASE_FEATURES = 768 * KING_BUCKETS  # 12288
+NNUE_OFF_MATERIAL = NNUE_BASE_FEATURES            # +100
+NNUE_OFF_ZONE_OCC = NNUE_OFF_MATERIAL + 100       # +234
+NNUE_OFF_ZONE_ATK = NNUE_OFF_ZONE_OCC + 234       # +18
+NNUE_OFF_PAWN = NNUE_OFF_ZONE_ATK + 18            # +384
+NNUE_OFF_ROOKFILE = NNUE_OFF_PAWN + 384           # +256
+NNUE_OFF_COMPLEX = NNUE_OFF_ROOKFILE + 256        # +36
+NNUE_FEATURES = NNUE_OFF_COMPLEX + 36             # 13316
+NNUE_SLOTS = 256
 NNUE_ACCUMULATOR = 1024
 NNUE_PAYLOAD_SIZE = 2 * (NNUE_FEATURES * NNUE_ACCUMULATOR + NNUE_ACCUMULATOR + NNUE_OUTPUT_BUCKETS * (2 * NNUE_ACCUMULATOR) + NNUE_OUTPUT_BUCKETS)
 NNUE_FILE_SIZE = (NNUE_PAYLOAD_SIZE + 63) // 64 * 64
 
 NNUE_1OUT_PAYLOAD = 2 * (NNUE_FEATURES * NNUE_ACCUMULATOR + 3 * NNUE_ACCUMULATOR + 1)
 NNUE_1OUT_FILE_SIZE = (NNUE_1OUT_PAYLOAD + 63) // 64 * 64
-CACHE_VERSION = 8
+# Frozen sizes of the previous 12288-feature nets (base HalfKP only, no extras).
+LEGACY12288_8OUT_PAYLOAD = 25200656
+LEGACY12288_8OUT_FILE_SIZE = 25200704
+LEGACY12288_1OUT_PAYLOAD = 25171970
+LEGACY12288_1OUT_FILE_SIZE = 25172032
+CACHE_VERSION = 9
 SCALE = 400
 QA = 255
 QB = 64
@@ -75,6 +90,205 @@ PIECE_CODES = {
     "P": 2, "p": 3, "N": 4, "n": 5, "B": 6, "b": 7,
     "R": 8, "r": 9, "Q": 10, "q": 11, "K": 12, "k": 13,
 }
+
+
+def _build_pawn_atk() -> list[list[int]]:
+    white = [0] * 64
+    for sq in range(0, 56):
+        f = sq & 7
+        if f > 0:
+            white[sq] |= 1 << (sq + 7)
+        if f < 7:
+            white[sq] |= 1 << (sq + 9)
+    black = [0] * 64
+    for sq in range(8, 64):
+        f = sq & 7
+        if f > 0:
+            black[sq] |= 1 << (sq - 9)
+        if f < 7:
+            black[sq] |= 1 << (sq - 7)
+    return [white, black]
+
+
+def _build_knight_atk() -> list[int]:
+    table = [0] * 64
+    for sq in range(64):
+        f, r = sq & 7, sq >> 3
+        for df, dr in ((-2, -1), (-2, 1), (-1, 2), (1, 2), (2, 1), (2, -1), (1, -2), (-1, -2)):
+            tf, tr = f + df, r + dr
+            if 0 <= tf < 8 and 0 <= tr < 8:
+                table[sq] |= 1 << (tr * 8 + tf)
+    return table
+
+
+def _build_king_atk() -> list[int]:
+    table = [0] * 64
+    for sq in range(64):
+        f, r = sq & 7, sq >> 3
+        for df in (-1, 0, 1):
+            for dr in (-1, 0, 1):
+                if df == 0 and dr == 0:
+                    continue
+                tf, tr = f + df, r + dr
+                if 0 <= tf < 8 and 0 <= tr < 8:
+                    table[sq] |= 1 << (tr * 8 + tf)
+    return table
+
+
+_PAWN_ATK = _build_pawn_atk()
+_KNIGHT_ATK = _build_knight_atk()
+_KING_ATK = _build_king_atk()
+
+
+def _slider_attacked(sq: int, occ: int, pieces: list[int], colors: list[int],
+                     color: int, diagonal: bool) -> bool:
+    f, r = sq & 7, sq >> 3
+    if diagonal:
+        dirs = ((1, 1), (-1, 1), (1, -1), (-1, -1))
+        want = (pieces[3] | pieces[5]) & colors[color]
+    else:
+        dirs = ((1, 0), (-1, 0), (0, 1), (0, -1))
+        want = (pieces[4] | pieces[5]) & colors[color]
+    for df, dr in dirs:
+        tf, tr = f + df, r + dr
+        while 0 <= tf < 8 and 0 <= tr < 8:
+            t = tr * 8 + tf
+            if (occ >> t) & 1:
+                if (want >> t) & 1:
+                    return True
+                break
+            tf += df
+            tr += dr
+    return False
+
+
+def _attacked_by(sq: int, color: int, occ: int, colors: list[int], pieces: list[int]) -> bool:
+    if _PAWN_ATK[color ^ 1][sq] & pieces[1] & colors[color]:
+        return True
+    if _KNIGHT_ATK[sq] & pieces[2] & colors[color]:
+        return True
+    if _slider_attacked(sq, occ, pieces, colors, color, True):
+        return True
+    if _slider_attacked(sq, occ, pieces, colors, color, False):
+        return True
+    return bool(_KING_ATK[sq] & pieces[6] & colors[color])
+
+
+def _collect_extra_view(board: list[int], colors: list[int], pieces: list[int],
+                        wking: int, bking: int, flip: bool) -> list[int]:
+    """Mirror of engine collect_extra_features(); ascending index order."""
+    out: list[int] = []
+    kings = (wking, bking)
+    mat_count = [[0] * 5 for _ in range(2)]
+    complex_count = [[0] * 2 for _ in range(2)]
+    for sq in range(64):
+        piece = board[sq]
+        if piece < 2 or piece > 13:
+            continue
+        color = piece & 1
+        base = (piece >> 1) - 1
+        if base <= 4:
+            mat_count[color][base] += 1
+        if base == 0:
+            complex_count[color][((sq & 7) + (sq >> 3)) & 1] += 1
+    for slot_side in range(2):
+        real_side = slot_side ^ 1 if flip else slot_side
+        for typ in range(5):
+            out.append(NNUE_OFF_MATERIAL + slot_side * 50 + typ * 10 +
+                       min(max(mat_count[real_side][typ], 0), 9))
+    for slot_king in range(2):
+        real_king = slot_king ^ 1 if flip else slot_king
+        king_view = kings[real_king] ^ 56 if flip else kings[real_king]
+        kf, kr = king_view & 7, king_view >> 3
+        for off in range(9):
+            tf, tr = kf + (off % 3) - 1, kr + (off // 3) - 1
+            if tf < 0 or tf > 7 or tr < 0 or tr > 7:
+                continue
+            target_real = ((tr * 8 + tf) ^ 56) if flip else (tr * 8 + tf)
+            piece = board[target_real]
+            occ = 0 if piece < 2 or piece > 13 else (piece ^ 1 if flip else piece) - 1
+            out.append(NNUE_OFF_ZONE_OCC + slot_king * 117 + off * 13 + occ)
+    occ_bb = colors[0] | colors[1]
+    for slot_king in range(2):
+        real_king = slot_king ^ 1 if flip else slot_king
+        king_view = kings[real_king] ^ 56 if flip else kings[real_king]
+        kf, kr = king_view & 7, king_view >> 3
+        enemy_real = slot_king if flip else slot_king ^ 1
+        for off in range(9):
+            tf, tr = kf + (off % 3) - 1, kr + (off // 3) - 1
+            if tf < 0 or tf > 7 or tr < 0 or tr > 7:
+                continue
+            target_real = ((tr * 8 + tf) ^ 56) if flip else (tr * 8 + tf)
+            if _attacked_by(target_real, enemy_real, occ_bb, colors, pieces):
+                out.append(NNUE_OFF_ZONE_ATK + slot_king * 9 + off)
+    for slot_color in range(2):
+        real_color = slot_color ^ 1 if flip else slot_color
+        pawn_code = 2 + real_color
+        enemy_pawn = 3 - real_color
+        for state in range(3):
+            for sq in range(64):
+                real = sq ^ 56 if flip else sq
+                if board[real] != pawn_code:
+                    continue
+                f, r = real & 7, real >> 3
+                has = False
+                if state == 0:
+                    has = True
+                    for df in (-1, 0, 1):
+                        ff = f + df
+                        if ff < 0 or ff > 7 or not has:
+                            continue
+                        for rr in range(8):
+                            if rr <= r if real_color == 0 else rr >= r:
+                                continue
+                            if board[rr * 8 + ff] == enemy_pawn:
+                                has = False
+                                break
+                elif state == 1:
+                    has = True
+                    for df in (-1, 1):
+                        ff = f + df
+                        if ff < 0 or ff > 7 or not has:
+                            continue
+                        for rr in range(8):
+                            if board[rr * 8 + ff] == pawn_code:
+                                has = False
+                                break
+                else:
+                    for rr in range(8):
+                        if rr * 8 + f != real and board[rr * 8 + f] == pawn_code:
+                            has = True
+                            break
+                if has:
+                    out.append(NNUE_OFF_PAWN + slot_color * 192 + state * 64 + sq)
+    for slot_color in range(2):
+        real_color = slot_color ^ 1 if flip else slot_color
+        rook_code = 8 + real_color
+        for kind in range(2):
+            for sq in range(64):
+                real = sq ^ 56 if flip else sq
+                if board[real] != rook_code:
+                    continue
+                f = real & 7
+                ok = True
+                for rr in range(8):
+                    p = board[rr * 8 + f]
+                    if p == 2 or p == 3:
+                        if kind == 0:
+                            ok = False
+                        elif (p & 1) == real_color:
+                            ok = False
+                    if not ok:
+                        break
+                if ok:
+                    out.append(NNUE_OFF_ROOKFILE + slot_color * 128 + kind * 64 + sq)
+    for slot_side in range(2):
+        for sc in range(2):
+            real_side = slot_side ^ 1 if flip else slot_side
+            real_sc = sc ^ 1 if flip else sc
+            out.append(NNUE_OFF_COMPLEX + slot_side * 18 + sc * 9 +
+                       min(max(complex_count[real_side][real_sc], 0), 8))
+    return out
 PIECE_VALUES = {"p": 105, "n": 320, "b": 330, "r": 520, "q": 950}
 
 
@@ -156,6 +370,14 @@ def file_sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _sbin() -> Any:
+    """Import sbin_tool regardless of invocation style (package or script)."""
+    try:
+        return importlib.import_module("training.sbin_tool" if __package__ else "sbin_tool")
+    except ImportError:
+        return importlib.import_module("sbin_tool" if __package__ else "training.sbin_tool")
 
 
 def require_network(path: Any, label: str = "NNUE") -> Path:
@@ -248,6 +470,25 @@ def parse_fen_fast(fen: str) -> tuple[list[int], list[int], bool]:
         else:
             us.append(black_index)
             them.append(white_index)
+
+    board = [0] * 64
+    colors_bb = [0, 0]
+    pieces_bb = [0] * 7
+    for color, base, square in pieces_data:
+        code = (base + 1) * 2 + color
+        board[square] = code
+        colors_bb[color] |= 1 << square
+        pieces_bb[base + 1] |= 1 << square
+    white_extra = _collect_extra_view(board, colors_bb, pieces_bb, w_king_sq, b_king_sq, False)
+    black_extra = _collect_extra_view(board, colors_bb, pieces_bb, w_king_sq, b_king_sq, True)
+    if parts[1] == "w":
+        us.extend(white_extra)
+        them.extend(black_extra)
+    else:
+        us.extend(black_extra)
+        them.extend(white_extra)
+    if len(us) > NNUE_SLOTS or len(them) > NNUE_SLOTS:
+        raise ValueError(f"Fazla özellik: {fen}")
     return us, them, parts[1] == "w"
 
 
@@ -289,7 +530,7 @@ def parse_position_metrics(fen: str) -> dict[str, Any]:
     turn = parts[1]
     has_fullmove = len(parts) >= 6 and parts[5].isdigit()
     fullmove = int(parts[5]) if has_fullmove else 1
-    # Plies: 2 * (fullmove - 1) + (0 if turn == 'w' else 1), exactly matching C++ search.h:2068
+    # Plies: 2 * (fullmove - 1) + (0 if turn == 'w' else 1), matching sbin.cpp classify.
     plies = 2 * max(0, fullmove - 1) + (0 if turn == "w" else 1)
 
     white_material = black_material = 0
@@ -310,7 +551,7 @@ def parse_position_metrics(fen: str) -> dict[str, Any]:
     my_material = white_material if turn == "w" else black_material
     opponent_material = black_material if turn == "w" else white_material
 
-    # C++ Engine phase thresholds (params.h: LatePhaseMaterial=4200, EndgameMaterial=3000, OpeningMinPly=20)
+    # Phase thresholds shared with sbin.cpp: endgame <= 3000, late_middle <= 4200, opening ply < 20.
     if total_material <= 3000:
         phase = "endgame"
     elif total_material <= 4200:
@@ -356,6 +597,11 @@ def add_dataset_record(records: list[tuple[str, float]], seen: set[str],
 
 
 def write_dataset(records: Sequence[tuple[str, float]], output: Path) -> None:
+    """Write validated (fen, wdl) records; FENs must already be normalized.
+
+    All callers build records through add_dataset_record, so no second
+    python-chess normalization pass is done here.
+    """
     if not records:
         raise RuntimeError("Uygun veri bulunamadı.")
     if output.suffix.lower() not in (".sbin", ".parquet"):
@@ -365,48 +611,63 @@ def write_dataset(records: Sequence[tuple[str, float]], output: Path) -> None:
 
     try:
         if output.suffix.lower() == ".sbin":
-            try:
-                from training.sbin_tool import PackedPosition, load_native_lib
-            except ImportError:
-                from sbin_tool import PackedPosition, load_native_lib  # type: ignore[no-redef]
             import ctypes
-            lib = load_native_lib()
-            packed_buf = PackedPosition()
+            sbin = _sbin()
+            lib = sbin.load_native_lib()
+            packed_buf = sbin.PackedPosition()
             batch_bytes = bytearray()
+            written = 0
+            skipped: dict[int, int] = {}
             with open(temporary, "wb") as out_f:
                 for index, (fen, wdl) in enumerate(records):
                     w_val = float(wdl)
                     if not math.isfinite(w_val) or not 0.0 <= w_val <= 1.0:
                         raise ValueError(f"Geçersiz WDL; kayıt={index}")
-                    fen_norm = normalize_engine_fen(fen)
                     ret = lib.sbin_pack_fen(
-                        fen_norm.encode("utf-8"), ctypes.c_float(w_val),
+                        fen.encode("utf-8"), ctypes.c_float(w_val),
                         ctypes.c_int16(0), ctypes.byref(packed_buf),
                     )
                     if ret != 0:
-                        raise ValueError(f"SBIN yazılamadı; kayıt={index}, kod={ret}")
+                        skipped[ret] = skipped.get(ret, 0) + 1
+                        continue
                     batch_bytes.extend(bytes(packed_buf))
+                    written += 1
                     if len(batch_bytes) >= 65536 * 32:
                         out_f.write(batch_bytes)
                         batch_bytes.clear()
                 if batch_bytes:
                     out_f.write(batch_bytes)
+            if not written:
+                raise RuntimeError("Uygun veri bulunamadı: tüm kayıtlar paketleyici tarafından reddedildi.")
+            if skipped:
+                print(f"[UYARI] {sum(skipped.values()):,} kayıt paketleyici tarafından atlandı: {skipped}",
+                      flush=True)
         else:
             pa = dependency("pyarrow")
             pq = dependency("pyarrow.parquet")
-            fens = []
-            targets = []
-            for index, (fen, wdl) in enumerate(records):
-                value = float(wdl)
-                if not math.isfinite(value) or not 0 <= value <= 1:
-                    raise ValueError(f"Geçersiz WDL; kayıt={index}")
-                fens.append(normalize_engine_fen(fen))
-                targets.append(value)
-            table = pa.Table.from_arrays(
-                [pa.array(fens), pa.array(targets, type=pa.float32())],
-                names=["fen", "wdl"],
-            )
-            pq.write_table(table, str(temporary), compression="zstd")
+            schema = pa.schema([("fen", pa.string()), ("wdl", pa.float32())])
+            with pq.ParquetWriter(str(temporary), schema, compression="zstd") as writer:
+                fens: list[str] = []
+                targets: list[float] = []
+
+                def flush_batch() -> None:
+                    if fens:
+                        writer.write_table(pa.Table.from_arrays(
+                            [pa.array(fens), pa.array(targets, type=pa.float32())],
+                            schema=schema,
+                        ))
+                        fens.clear()
+                        targets.clear()
+
+                for index, (fen, wdl) in enumerate(records):
+                    value = float(wdl)
+                    if not math.isfinite(value) or not 0 <= value <= 1:
+                        raise ValueError(f"Geçersiz WDL; kayıt={index}")
+                    fens.append(fen)
+                    targets.append(value)
+                    if len(fens) >= 65536:
+                        flush_batch()
+                flush_batch()
         temporary.replace(output)
     finally:
         temporary.unlink(missing_ok=True)
@@ -519,11 +780,30 @@ def eval_wdl(white_cp: float, stored_wdl: float, lambda_val: float = 0.25) -> fl
     return cp_wdl
 
 
+def _require_cp_labels(source: Path, sample: int = 2048) -> None:
+    """Fail fast when cp-derived labels are requested from a cp-less SBIN.
+
+    Files written by this pipeline (self-play, puzzles, prepared sets) store
+    eval=0 with WDL-only labels. Calibrating them as cp would silently rewrite
+    every label to 0.5, so refuse and point at --sbin-labels wdl instead.
+    """
+    np = dependency("numpy")
+    with _sbin().SbinDataset(source) as ds:
+        count = min(max(1, sample), ds.count)
+        stride = max(1, ds.count // count)
+        nonzero = int(np.count_nonzero(ds.eval_view()[::stride][:count]))
+    if nonzero < max(1, count // 100):
+        raise ValueError(
+            f"{source.name} cp etiketi taşımıyor (örneklemde {nonzero}/{count} sıfır-dışı); "
+            "WDL-etiketli kaynak için --sbin-labels wdl kullanın."
+        )
+
+
 def extract_sbin_base(args: argparse.Namespace, source: Path, output: Path,
                       skip: int, distribution: dict[str, int], rng: Any,
                       source_before: dict[str, Any]) -> dict[str, Any]:
     np = dependency("numpy")
-    sbin = dependency("training.sbin_tool" if __package__ else "sbin_tool")
+    sbin = _sbin()
     import ctypes
     target = sum(distribution.values())
     counts = {name: 0 for name in distribution}
@@ -534,6 +814,8 @@ def extract_sbin_base(args: argparse.Namespace, source: Path, output: Path,
     started = last_print = time.monotonic()
     phases = np.empty(262144, dtype=np.uint8)
     labels = getattr(args, "sbin_labels", "cp")
+    if labels == "cp":
+        _require_cp_labels(source)
     with sbin.SbinDataset(source) as ds:
         split = min(skip, ds.count)
         for begin, end in ((split, ds.count), (0, split)):
@@ -541,7 +823,7 @@ def extract_sbin_base(args: argparse.Namespace, source: Path, output: Path,
                 if len(selected) >= target:
                     break
                 count = min(len(phases), end - cur)
-                ptr = ctypes.byref(ds._array[cur])
+                ptr = ctypes.byref(ds.records_ptr(cur))
                 try:
                     ds.lib.sbin_classify_phases_batch(ptr, count, phases.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)))
                 finally:
@@ -557,7 +839,7 @@ def extract_sbin_base(args: argparse.Namespace, source: Path, output: Path,
                     name = names[int(phases[relative])]
                     if counts[name] >= distribution[name]:
                         continue
-                    raw = ds._mmap[index * 32:(index + 1) * 32]
+                    raw = ds.record_bytes(index)
                     key = raw[:24] + bytes([raw[28] & 1])
                     if key in seen:
                         duplicates += 1
@@ -585,7 +867,7 @@ def extract_sbin_base(args: argparse.Namespace, source: Path, output: Path,
         try:
             with temporary.open("wb") as stream:
                 for begin in range(0, len(selected), 65536):
-                    data = b"".join(ds._mmap[index * 32:(index + 1) * 32] for index in selected[begin:begin + 65536])
+                    data = b"".join(ds.record_bytes(index) for index in selected[begin:begin + 65536])
                     stream.write(sbin.calibrate_eval_records(data) if labels == "cp" else data)
             if file_identity(source) != source_before:
                 raise RuntimeError("Eval kaynağı çıkarma sırasında değişti; çıktı yayımlanmadı.")
@@ -601,11 +883,12 @@ def mine_hard_dataset(args: argparse.Namespace) -> Path:
     """Evaluate positions with a champion NNUE model on GPU and extract the hardest examples."""
     torch = dependency("torch")
     np = dependency("numpy")
-    sbin = dependency("training.sbin_tool" if __package__ else "sbin_tool")
+    sbin = _sbin()
     import ctypes
 
-    source = resolve_path(getattr(args, "source", None) or getattr(args, "zst", None), DEFAULT_EVAL)
+    source = resolve_path(getattr(args, "source", None), DEFAULT_EVAL)
     source = require_file(source, "Eval SBIN kaynağı")
+    _require_cp_labels(source)
     model_path = resolve_path(getattr(args, "model", None), NETS / "stallion.nnue")
     model_path = require_network(model_path, "Madencilik Modeli")
     output = resolve_path(args.output, ROOT / "data" / "base_hard.sbin")
@@ -641,7 +924,7 @@ def mine_hard_dataset(args: argparse.Namespace) -> Path:
 
     started = time.perf_counter()
     scanned = 0
-    features_buf = np.empty((chunk_size, 2, 32), dtype=np.int16)
+    features_buf = np.empty((chunk_size, 2, NNUE_SLOTS), dtype=np.int16)
     targets_buf = np.empty(chunk_size, dtype=np.float32)
     indices_buf = np.empty(chunk_size, dtype=np.uint32)
     f_ptr = features_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_int16))
@@ -659,7 +942,7 @@ def mine_hard_dataset(args: argparse.Namespace) -> Path:
                 cur = 0
             count = min(count, total_in_ds - cur)
 
-            pos_ptr = ctypes.byref(ds._array[cur])
+            pos_ptr = ctypes.byref(ds.records_ptr(cur))
             try:
                 decoded = ds.lib.sbin_batch_decode_indexed(pos_ptr, count, f_ptr, t_ptr, i_ptr)
             finally:
@@ -727,7 +1010,7 @@ def mine_hard_dataset(args: argparse.Namespace) -> Path:
         try:
             with temporary.open("wb") as stream:
                 for begin in range(0, len(mined_indices), 65536):
-                    data = b"".join(ds._mmap[idx * 32:(idx + 1) * 32] for idx in mined_indices[begin:begin + 65536])
+                    data = b"".join(ds.record_bytes(idx) for idx in mined_indices[begin:begin + 65536])
                     stream.write(sbin.calibrate_eval_records(data))
             temporary.replace(output)
         finally:
@@ -771,11 +1054,7 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
 
         if output == puzzle_sbin.resolve():
             raise ValueError("Puzzle havuzu ve çıktı aynı dosya olamaz.")
-        try:
-            from training.sbin_tool import SbinDataset
-        except ImportError:
-            from sbin_tool import SbinDataset  # type: ignore[no-redef]
-        with SbinDataset(puzzle_sbin) as p_ds:
+        with _sbin().SbinDataset(puzzle_sbin) as p_ds:
             p_len = len(p_ds)
             seed_val = getattr(args, "seed", None)
             p_rng = np.random.default_rng(int(seed_val) if seed_val is not None else int(time.time()))
@@ -791,7 +1070,7 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
             raise RuntimeError(f"Hedef tamamlanmadı: {len(records):,}/{target_limit:,}; kısmi veri {output} içinde korundu.")
         return output
 
-    source = resolve_path(getattr(args, "source", None) or getattr(args, "zst", None), DEFAULT_EVAL)
+    source = resolve_path(getattr(args, "source", None), DEFAULT_EVAL)
     source = require_file(source, "Eval SBIN kaynağı")
     if source.suffix.lower() != ".sbin":
         raise ValueError(f"Yalnızca .sbin eval arşivleri desteklenir: {source}")
@@ -873,15 +1152,11 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
 
     puzzle_count = 0
     puzzle_target = 0
-    if phase == "aggressive" and puzzle_ratio:
+    if puzzle_ratio:
         puzzle_sbin = resolve_path(args.puzzles, DEFAULT_PUZZLES)
         puzzle_target = min(target, int(target * puzzle_ratio))
         if puzzle_sbin and puzzle_sbin.is_file():
-            try:
-                from training.sbin_tool import SbinDataset
-            except ImportError:
-                from sbin_tool import SbinDataset  # type: ignore[no-redef]
-            with SbinDataset(puzzle_sbin) as p_ds:
+            with _sbin().SbinDataset(puzzle_sbin) as p_ds:
                 p_len = len(p_ds)
                 sample_count = min(puzzle_target, p_len)
                 puzzle_seed = (seed + (skip_lines % 100000)
@@ -922,20 +1197,17 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
 
     def scan_file(start_after: int, stop_after: int | None = None) -> None:
         nonlocal total_scanned, invalid
-        try:
-            from training.sbin_tool import SbinDataset, load_native_lib
-        except ImportError:
-            from sbin_tool import SbinDataset, load_native_lib  # type: ignore[no-redef]
         import ctypes
-        lib = load_native_lib()
-        with SbinDataset(source) as ds:
+        sbin = _sbin()
+        lib = sbin.load_native_lib()
+        with sbin.SbinDataset(source) as ds:
             batch_size = 65536
             status = np.zeros(batch_size, dtype=np.uint8)
             cur = start_after
             limit = ds.count if stop_after is None else min(ds.count, stop_after)
             while cur < limit and len(records) < target:
                 count = min(batch_size, limit - cur)
-                ptr = ctypes.byref(ds._array[cur])
+                ptr = ctypes.byref(ds.records_ptr(cur))
                 try:
                     valid_count = lib.sbin_validate_batch(ptr, count, status[:count].ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)))
                 finally:
@@ -962,6 +1234,8 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
                     print(f"Taranan: {total_scanned:,} Toplanan: {len(records):,}/{target:,} "
                           f"({detail}) [{speed:.0f} pos/sn]", flush=True)
 
+    if getattr(args, "sbin_labels", "cp") == "cp":
+        _require_cp_labels(source)
     scan_file(skip_lines)
     if len(records) < target and skip_lines > 0:
         print(f"\nDosya sonuna ulaşıldı ({total_scanned:,}). Hedef ({target:,}) için dosya başından devam ediliyor...", flush=True)
@@ -981,13 +1255,12 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
         "rows": len(records), "counts": counts, "invalid_rows": invalid,
         "start_after": skip_lines, "next_offset": total_scanned,
         "min_depth_requested": args.min_depth, "source_min_depth": source_min_depth, "seed": seed,
-        "label_source": getattr(args, "sbin_labels", "cp") if source.suffix.lower() == ".sbin" else "cp",
-        "phase_dist": distribution if phase == "base" else None,
+        "label_source": getattr(args, "sbin_labels", "cp"),
+        "phase_dist": None,
     })
     if len(records) < target and not getattr(args, "allow_short_dataset", False):
         raise RuntimeError(f"Hedef tamamlanmadı: {len(records):,}/{target:,}. Kısmi veri {output} içinde korundu; kullanmak için --allow-short-dataset gerekli.")
-    if phase == "aggressive":
-        print(f"SGS Feda Dağılımı: Vezir={sac_counts.get(9, 0):,}, Kale={sac_counts.get(5, 0):,}, HafifTaş={sac_counts.get(3, 0)+sac_counts.get(4, 0):,}, Piyon={sac_counts.get(1, 0)+sac_counts.get(2, 0):,}", flush=True)
+    print(f"SGS Feda Dağılımı: Vezir={sac_counts.get(9, 0):,}, Kale={sac_counts.get(5, 0):,}, HafifTaş={sac_counts.get(3, 0)+sac_counts.get(4, 0):,}, Piyon={sac_counts.get(1, 0)+sac_counts.get(2, 0):,}", flush=True)
     print(f"[BAŞARILI] {output}: {len(records):,} kayıt; atlanan={invalid:,}")
     return output
 
@@ -1009,21 +1282,34 @@ def _parse_range(value: str, label: str) -> tuple[int, int]:
     return low, high
 
 
+def _load_epd_fens(book: Path | None) -> list[str]:
+    """Read opening FENs (first four EPD fields); empty when the book is missing."""
+    if book is None or not book.is_file():
+        return []
+    fens = []
+    for line in book.read_text(encoding="utf-8", errors="replace").splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and "/" in fields[0]:
+            fens.append(" ".join(fields[:4]))
+    return fens
+
+
 def _selfplay_game(engine_path: Path, depth: int, random_chance: float,
                    opening_moves: tuple[int, int], max_moves: int,
-                   seed: int) -> list[tuple[str, float]]:
+                   seed: int, book_fens: Sequence[str] | None = None) -> list[tuple[str, float]]:
     """Play one fully adjudicated game and return outcome-labelled positions.
 
     A separate persistent UCI process is used per game.  Starting an engine
     for every ply (the old selfplay helper did this) loses state and makes the
-    generated labels and timing incomparable.
+    generated labels and timing incomparable.  Games start from a random book
+    line when available, otherwise from random opening moves.
     """
     chess = dependency("chess")
     try:
         engine_api = importlib.import_module("chess.engine")
     except ImportError as exc:
         raise RuntimeError("python-chess engine API gerekli.") from exc
-    rng = __import__("random").Random(seed)
+    rng = random.Random(seed)
     process = None
     positions: list[str] = []
     try:
@@ -1035,11 +1321,20 @@ def _selfplay_game(engine_path: Path, depth: int, random_chance: float,
             # valid with their default setting.
             pass
         board = chess.Board()
-        opening_plies = rng.randint(*opening_moves) * 2
-        for _ in range(opening_plies):
-            if board.is_game_over(claim_draw=True):
-                break
-            board.push(rng.choice(list(board.legal_moves)))
+        started_from_book = False
+        if book_fens:
+            try:
+                board.set_fen(rng.choice(book_fens))
+                started_from_book = not board.is_game_over(claim_draw=True)
+            except ValueError:
+                started_from_book = False
+        if not started_from_book:
+            board.reset()
+            opening_plies = rng.randint(*opening_moves) * 2
+            for _ in range(opening_plies):
+                if board.is_game_over(claim_draw=True):
+                    break
+                board.push(rng.choice(list(board.legal_moves)))
 
         max_plies = max_moves * 2
         while len(board.move_stack) < max_plies and not board.is_game_over(claim_draw=True):
@@ -1088,19 +1383,21 @@ def run_datagen(args: argparse.Namespace) -> Path:
     if not math.isfinite(random_chance) or not 0.0 <= random_chance <= 1.0:
         raise ValueError("random-chance 0 ile 1 arasında olmalı.")
     output = (resolve_path(getattr(args, "output", None)) or
-              ROOT / "data" / "selfplay.parquet").resolve()
+              ROOT / "data" / "selfplay.sbin").resolve()
     seed = int(getattr(args, "seed", 42))
+    book_fens = _load_epd_fens(resolve_path(getattr(args, "book", None), DEFAULT_BOOK))
     from concurrent.futures import ThreadPoolExecutor
     records: list[tuple[str, float]] = []
     seen: set[str] = set()
     completed = 0
     failed = 0
     discarded = 0
-    print(f"Self-play: motor={engine} oyun={games} depth={depth} threads={concurrency}", flush=True)
+    print(f"Self-play: motor={engine} oyun={games} depth={depth} threads={concurrency} "
+          f"acilis={'kitap:' + str(len(book_fens)) if book_fens else 'rastgele'}", flush=True)
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = [pool.submit(
             _selfplay_game, engine, depth, random_chance, opening_moves,
-            max_moves, seed + index,
+            max_moves, seed + index, book_fens,
         ) for index in range(games)]
         for future in futures:
             try:
@@ -1125,8 +1422,145 @@ def run_datagen(args: argparse.Namespace) -> Path:
         "positions": len(records), "depth": depth, "max_moves": max_moves,
         "random_chance": random_chance, "opening_moves": list(opening_moves),
         "concurrency": concurrency, "seed": seed,
+        "book_lines": len(book_fens),
     })
     print(f"[BAŞARILI] Self-play: {len(records):,} benzersiz pozisyon -> {output}", flush=True)
+    return output
+
+
+def _label_items(process: Any, depth: int, items: list[tuple[int, str]],
+                 chess: Any) -> list[tuple[int, int | None]]:
+    """Analyse FENs on a persistent engine; returns white-POV cp per index."""
+    engine_api = importlib.import_module("chess.engine")
+    results: list[tuple[int, int | None]] = []
+    for index, fen in items:
+        try:
+            board = chess.Board(fen)
+            info = process.analyse(board, engine_api.Limit(depth=depth))
+            pov = info.get("score")
+            score = pov.white() if pov is not None else None
+            if score is None:
+                results.append((index, None))
+                continue
+            if score.is_mate():
+                mate_raw = score.mate
+                mate_in = mate_raw() if callable(mate_raw) else mate_raw or 0
+                if mate_in == 0:
+                    cp = -2000 if board.turn == chess.WHITE else 2000
+                else:
+                    cp = 2000 if mate_in > 0 else -2000
+            else:
+                cp_raw = score.cp
+                cp_val = cp_raw() if callable(cp_raw) else cp_raw or 0
+                cp = max(-32000, min(32000, cp_val))
+            results.append((index, cp))
+        except Exception:
+            results.append((index, None))
+    return results
+
+
+def run_label(args: argparse.Namespace) -> Path:
+    """Label a WDL-only SBIN with cp evals from an external UCI engine."""
+    import ctypes
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    sbin = _sbin()
+    source = require_file(getattr(args, "dataset", None), "Etiketlenecek SBIN")
+    engine = require_file(getattr(args, "engine", None), "Etiket motoru")
+    depth = int(getattr(args, "depth", 14))
+    workers = int(getattr(args, "concurrency", 4))
+    if depth < 1 or workers < 1:
+        raise ValueError("label için depth ve concurrency pozitif olmalı.")
+    output = resolve_path(getattr(args, "output", None)) or source.with_name(f"{source.stem}-lbl.sbin")
+    output = output.resolve()
+    if output == source.resolve():
+        raise ValueError("Etiket çıktısı girdi dosyasıyla aynı olamaz.")
+    with sbin.SbinDataset(source) as ds:
+        inputs = [(i, ds.get_fen(i)[0], ds.get_fen(i)[1]) for i in range(len(ds))]
+    print(f"Etiketleme: {source.name} ({len(inputs):,} konum) motor={engine.name} depth={depth} workers={workers}",
+          flush=True)
+    local = threading.local()
+    processes: list[Any] = []
+    processes_lock = threading.Lock()
+
+    def get_process():
+        proc = getattr(local, "process", None)
+        if proc is None:
+            engine_api = importlib.import_module("chess.engine")
+            proc = engine_api.SimpleEngine.popen_uci(str(engine))
+            try:
+                proc.configure({"Threads": 1})
+            except Exception:
+                pass
+            local.process = proc
+            with processes_lock:
+                processes.append(proc)
+        return proc
+
+    def analyse(items: list[tuple[int, str]]) -> list[tuple[int, int | None]]:
+        import chess
+        return _label_items(get_process(), depth, items, chess)
+
+    chunks = [inputs[i::workers * 4] for i in range(workers * 4)]
+    chunks = [c for c in chunks if c]
+    started = time.time()
+    labelled: dict[int, int] = {}
+    failed = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = [pool.submit(analyse, [(i, f) for i, f, _ in c]) for c in chunks]
+        done = 0
+        for job in pending:
+            for index, cp in job.result():
+                if cp is None:
+                    failed += 1
+                else:
+                    labelled[index] = cp
+            done += 1
+            print(f"  ilerleme: {done}/{len(pending)} parça ({len(labelled):,} etiketli, {failed} atlanan)",
+                  flush=True)
+    for proc in processes:
+        try:
+            proc.quit()
+        except Exception:
+            try:
+                proc.close()
+            except Exception:
+                pass
+    lib = sbin.load_native_lib()
+    packed_buf = sbin.PackedPosition()
+    batch_bytes = bytearray()
+    temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    cp_abs_sum = 0
+    with open(temporary, "wb") as out_f:
+        for index, fen, wdl in inputs:
+            if index not in labelled:
+                continue
+            cp = labelled[index]
+            ret = lib.sbin_pack_fen(fen.encode("utf-8"), ctypes.c_float(float(wdl)),
+                                    ctypes.c_int16(cp), ctypes.byref(packed_buf))
+            if ret != 0:
+                failed += 1
+                continue
+            batch_bytes.extend(bytes(packed_buf))
+            written += 1
+            cp_abs_sum += abs(cp)
+            if len(batch_bytes) >= 65536 * 32:
+                out_f.write(batch_bytes)
+                batch_bytes.clear()
+        if batch_bytes:
+            out_f.write(batch_bytes)
+    os.replace(temporary, output)
+    atomic_json(output.with_suffix(".label.json"), {
+        "source": file_identity(source), "output": file_identity(output),
+        "engine": file_identity(engine), "depth": depth, "workers": workers,
+        "positions": len(inputs), "written": written, "failed": failed,
+        "mean_abs_cp": cp_abs_sum / written if written else 0,
+        "seconds": time.time() - started,
+    })
+    print(f"[BAŞARILI] Etiketlendi: {written:,}/{len(inputs):,} -> {output} "
+          f"({time.time() - started:.0f} sn)", flush=True)
     return output
 
 
@@ -1144,23 +1578,38 @@ def prepare_dataset(args: argparse.Namespace) -> Path:
 
 @contextmanager
 def advisory_lock(path: Path) -> Iterator[None]:
+    """Exclusive cross-platform lock; fails fast if another process holds it."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        import msvcrt
+        path.touch(exist_ok=True)
+        if path.stat().st_size == 0:
+            path.write_bytes(b"\x00")
+        handle = path.open("r+b")
+        try:
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise RuntimeError(f"Çıktı başka bir işlem tarafından hazırlanıyor: {path}") from exc
+            yield
+        finally:
+            try:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLOCK, 1)
+            finally:
+                handle.close()
+        return
+    import fcntl
     handle = path.open("a+")
-    locked = False
     try:
         try:
-            import fcntl
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            locked = True
-        except ImportError:
-            pass
         except BlockingIOError as exc:
             raise RuntimeError(f"Çıktı başka bir işlem tarafından hazırlanıyor: {path}") from exc
         yield
     finally:
-        if locked:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         handle.close()
 
 
@@ -1172,8 +1621,8 @@ def feature_group_ids(features: Any) -> Any:
     """
     np = dependency("numpy")
     values = np.asarray(features, dtype=np.int32)
-    if values.ndim != 3 or values.shape[1:] != (2, 32):
-        raise ValueError(f"NNUE özellik şekli [N,2,32] olmalı: {values.shape}")
+    if values.ndim != 3 or values.shape[1:] != (2, NNUE_SLOTS):
+        raise ValueError(f"NNUE özellik şekli [N,2,{NNUE_SLOTS}] olmalı: {values.shape}")
     # Both accumulators are observable by the network.  Hashing only the
     # side-to-move half lets mirrored/opponent-swapped positions leak between
     # train and validation despite having different predictions.
@@ -1202,6 +1651,21 @@ def split_feature_groups(groups: Any, validation: float) -> tuple[Any, Any]:
     return np.flatnonzero(~selected), np.flatnonzero(selected)
 
 
+def _open_cache_memmaps(directory: Path, rows: int) -> tuple[Any, Any, Any]:
+    """Create the (features, targets, groups) memmaps for a feature cache."""
+    np = dependency("numpy")
+    features = np.lib.format.open_memmap(
+        directory / "features.npy", mode="w+", dtype=np.int16, shape=(rows, 2, NNUE_SLOTS)
+    )
+    targets = np.lib.format.open_memmap(
+        directory / "targets.npy", mode="w+", dtype=np.float32, shape=(rows,)
+    )
+    groups = np.lib.format.open_memmap(
+        directory / "groups.npy", mode="w+", dtype=np.uint32, shape=(rows,)
+    )
+    return features, targets, groups
+
+
 def prepare_feature_cache(dataset: Path) -> tuple[Any, Any, Any, dict[str, Any]]:
     """Decode Parquet or SBIN safely into a versioned, memory-mapped feature cache."""
     np = dependency("numpy")
@@ -1225,7 +1689,7 @@ def prepare_feature_cache(dataset: Path) -> tuple[Any, Any, Any, dict[str, Any]]
                            for name in ("features.npy", "targets.npy", "groups.npy"))
             rows = int(info["rows"])
             if (info["version"] == CACHE_VERSION and rows >= 2 and
-                    arrays[0].shape == (rows, 2, 32) and arrays[0].dtype == np.int16 and
+                    arrays[0].shape == (rows, 2, NNUE_SLOTS) and arrays[0].dtype == np.int16 and
                     arrays[1].shape == arrays[2].shape == (rows,) and
                     arrays[1].dtype == np.float32 and arrays[2].dtype == np.uint32):
                 return arrays[0], arrays[1], arrays[2], info
@@ -1248,40 +1712,25 @@ def prepare_feature_cache(dataset: Path) -> tuple[Any, Any, Any, dict[str, Any]]
             sbin_file = dataset if dataset.suffix.lower() == ".sbin" else temporary / "source.sbin"
             if dataset.suffix.lower() != ".sbin":
                 try:
-                    try:
-                        from training.sbin_tool import convert_parquet_to_sbin
-                    except ImportError:
-                        from sbin_tool import convert_parquet_to_sbin
-                    convert_parquet_to_sbin(dataset, sbin_file)
+                    _sbin().convert_parquet_to_sbin(dataset, sbin_file)
                 except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                     print(f"[ÖNBELLEK] Native SBIN kullanılamıyor; Parquet okunuyor: {exc}", flush=True)
                     sbin_file = None
 
             if sbin_file is not None and sbin_file.is_file():
-                try:
-                    from training.sbin_tool import SbinDataset, load_native_lib
-                except ImportError:
-                    from sbin_tool import SbinDataset, load_native_lib  # type: ignore[no-redef]
                 import ctypes
-                lib = load_native_lib()
-                with SbinDataset(sbin_file) as ds:
+                sbin = _sbin()
+                lib = sbin.load_native_lib()
+                with sbin.SbinDataset(sbin_file) as ds:
                     rows = ds.count
                     if rows < 2:
                         raise RuntimeError("Dataset en az iki satır içermeli.")
-                    features = np.lib.format.open_memmap(
-                        temporary / "features.npy", mode="w+", dtype=np.int16, shape=(rows, 2, 32)
-                    )
-                    targets = np.lib.format.open_memmap(
-                        temporary / "targets.npy", mode="w+", dtype=np.float32, shape=(rows,)
-                    )
-                    groups = np.lib.format.open_memmap(
-                        temporary / "groups.npy", mode="w+", dtype=np.uint32, shape=(rows,)
-                    )
+                    features, targets, groups = _open_cache_memmaps(temporary, rows)
                     for begin in range(0, rows, 65536):
                         count = min(65536, rows - begin)
                         f_ptr = features[begin:].ctypes.data_as(ctypes.POINTER(ctypes.c_int16))
                         t_ptr = targets[begin:].ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-                        pos_ptr = ctypes.byref(ds._array[begin])
+                        pos_ptr = ctypes.byref(ds.records_ptr(begin))
                         try:
                             decoded = lib.sbin_batch_decode(pos_ptr, count, f_ptr, t_ptr)
                         finally:
@@ -1295,15 +1744,7 @@ def prepare_feature_cache(dataset: Path) -> tuple[Any, Any, Any, dict[str, Any]]
                 rows = int(parquet.metadata.num_rows)
                 if rows < 2:
                     raise RuntimeError("Dataset en az iki satır içermeli.")
-                features = np.lib.format.open_memmap(
-                    temporary / "features.npy", mode="w+", dtype=np.int16, shape=(rows, 2, 32)
-                )
-                targets = np.lib.format.open_memmap(
-                    temporary / "targets.npy", mode="w+", dtype=np.float32, shape=(rows,)
-                )
-                groups = np.lib.format.open_memmap(
-                    temporary / "groups.npy", mode="w+", dtype=np.uint32, shape=(rows,)
-                )
+                features, targets, groups = _open_cache_memmaps(temporary, rows)
                 for batch in parquet.iter_batches(batch_size=65536, columns=["fen", "wdl"]):
                     for fen, wdl in zip(batch.column(0).to_pylist(), batch.column(1).to_pylist()):
                         try:
@@ -1383,7 +1824,8 @@ def _make_nnue_model() -> Any:
             them = torch.clamp(them_acc, 0.0, 1.0).square()
             us_them = torch.cat((us, them), dim=1)
             if out_buckets is None:
-                piece_count = us_mask.sum(dim=1).long()
+                base_only = (us_idx < NNUE_BASE_FEATURES) & (us_mask > 0)
+                piece_count = base_only.sum(dim=1).long()
                 out_buckets = torch.clamp((piece_count - 1) // 4, 0, NNUE_OUTPUT_BUCKETS - 1)
             w = self.output_weights[out_buckets]
             b = self.output_biases[out_buckets]
@@ -1452,58 +1894,42 @@ def load_nnue(model: Any, network: Path) -> None:
     old_768_file_size = (old_768_payload + 63) // 64 * 64
 
     if len(data) in (old_768_payload, old_768_file_size):
-        offset = 0
-        feature_bytes = 768 * NNUE_ACCUMULATOR * 2
-        feature_768 = np.frombuffer(data[offset:offset + feature_bytes], dtype="<i2")
-        feature_tiled = np.tile(feature_768, KING_BUCKETS)
-        feature = feature_tiled.reshape(NNUE_FEATURES, NNUE_ACCUMULATOR).astype(np.float32) / QA
-        offset += feature_bytes
-        bias_bytes = NNUE_ACCUMULATOR * 2
-        bias = np.frombuffer(data[offset:offset + bias_bytes], dtype="<i2").astype(np.float32) / QA
-        offset += bias_bytes
-        output_bytes = NNUE_ACCUMULATOR * 2 * 2
-        single_output = np.frombuffer(data[offset:offset + output_bytes], dtype="<i2")
-        single_output = single_output.astype(np.float32) / QB * SCALE / (400.0 / math.log(10.0))
-        output = np.tile(single_output, (NNUE_OUTPUT_BUCKETS, 1))
-        offset += output_bytes
-        single_bias = np.frombuffer(data[offset:offset + 2], dtype="<i2").astype(np.float32)
-        single_bias = single_bias / QAB * SCALE / (400.0 / math.log(10.0))
-        output_bias = np.full(NNUE_OUTPUT_BUCKETS, float(single_bias[0]), dtype=np.float32)
+        file_rows, n_out = 768, 1
+    elif len(data) in (LEGACY12288_1OUT_PAYLOAD, LEGACY12288_1OUT_FILE_SIZE):
+        file_rows, n_out = NNUE_BASE_FEATURES, 1
+    elif len(data) in (LEGACY12288_8OUT_PAYLOAD, LEGACY12288_8OUT_FILE_SIZE):
+        file_rows, n_out = NNUE_BASE_FEATURES, NNUE_OUTPUT_BUCKETS
     elif len(data) in (NNUE_1OUT_PAYLOAD, NNUE_1OUT_FILE_SIZE):
-        offset = 0
-        feature_bytes = NNUE_FEATURES * NNUE_ACCUMULATOR * 2
-        feature = np.frombuffer(data[offset:offset + feature_bytes], dtype="<i2")
-        feature = feature.reshape(NNUE_FEATURES, NNUE_ACCUMULATOR).astype(np.float32) / QA
-        offset += feature_bytes
-        bias_bytes = NNUE_ACCUMULATOR * 2
-        bias = np.frombuffer(data[offset:offset + bias_bytes], dtype="<i2").astype(np.float32) / QA
-        offset += bias_bytes
-        output_bytes = NNUE_ACCUMULATOR * 2 * 2
-        single_output = np.frombuffer(data[offset:offset + output_bytes], dtype="<i2")
-        single_output = single_output.astype(np.float32) / QB * SCALE / (400.0 / math.log(10.0))
-        output = np.tile(single_output, (NNUE_OUTPUT_BUCKETS, 1))
-        offset += output_bytes
-        single_bias = np.frombuffer(data[offset:offset + 2], dtype="<i2").astype(np.float32)
-        single_bias = single_bias / QAB * SCALE / (400.0 / math.log(10.0))
-        output_bias = np.full(NNUE_OUTPUT_BUCKETS, float(single_bias[0]), dtype=np.float32)
+        file_rows, n_out = NNUE_FEATURES, 1
     elif len(data) in (NNUE_PAYLOAD_SIZE, NNUE_FILE_SIZE):
-        offset = 0
-        feature_bytes = NNUE_FEATURES * NNUE_ACCUMULATOR * 2
-        feature = np.frombuffer(data[offset:offset + feature_bytes], dtype="<i2")
-        feature = feature.reshape(NNUE_FEATURES, NNUE_ACCUMULATOR).astype(np.float32) / QA
-        offset += feature_bytes
-        bias_bytes = NNUE_ACCUMULATOR * 2
-        bias = np.frombuffer(data[offset:offset + bias_bytes], dtype="<i2").astype(np.float32) / QA
-        offset += bias_bytes
-        output_bytes = NNUE_OUTPUT_BUCKETS * (NNUE_ACCUMULATOR * 2) * 2
-        output = np.frombuffer(data[offset:offset + output_bytes], dtype="<i2")
-        output = output.reshape(NNUE_OUTPUT_BUCKETS, NNUE_ACCUMULATOR * 2).astype(np.float32) / QB * SCALE / (400.0 / math.log(10.0))
-        offset += output_bytes
-        bias_bytes = NNUE_OUTPUT_BUCKETS * 2
-        output_bias = np.frombuffer(data[offset:offset + bias_bytes], dtype="<i2").astype(np.float32)
-        output_bias = output_bias / QAB * SCALE / (400.0 / math.log(10.0))
+        file_rows, n_out = NNUE_FEATURES, NNUE_OUTPUT_BUCKETS
     else:
-        raise ValueError(f"NNUE boyutu geçersiz: {len(data)} (Beklenen: 8-out {NNUE_FILE_SIZE}, 1-out {NNUE_1OUT_FILE_SIZE} veya 768 {old_768_file_size})")
+        raise ValueError(f"NNUE boyutu geçersiz: {len(data)} (Beklenen: 8-out {NNUE_FILE_SIZE}, 1-out {NNUE_1OUT_FILE_SIZE}, 12288 {LEGACY12288_8OUT_FILE_SIZE}/{LEGACY12288_1OUT_FILE_SIZE} veya 768 {old_768_file_size})")
+
+    raw = np.frombuffer(data[:file_rows * NNUE_ACCUMULATOR * 2], dtype="<i2")
+    rows = file_rows
+    if rows == 768:
+        raw = np.tile(raw, NNUE_BASE_FEATURES // 768)
+        rows = NNUE_BASE_FEATURES
+    feature = raw.reshape(rows, NNUE_ACCUMULATOR).astype(np.float32) / QA
+    if rows < NNUE_FEATURES:
+        pad = np.zeros((NNUE_FEATURES - rows, NNUE_ACCUMULATOR), dtype=np.float32)
+        feature = np.concatenate([feature, pad], axis=0)
+    offset = file_rows * NNUE_ACCUMULATOR * 2
+    bias = np.frombuffer(data[offset:offset + NNUE_ACCUMULATOR * 2], dtype="<i2").astype(np.float32) / QA
+    offset += NNUE_ACCUMULATOR * 2
+    out_w = np.frombuffer(data[offset:offset + n_out * NNUE_ACCUMULATOR * 4], dtype="<i2").astype(np.float32)
+    out_w = out_w.reshape(n_out, NNUE_ACCUMULATOR * 2)
+    if n_out == 1:
+        output = np.tile(out_w / QB * SCALE / (400.0 / math.log(10.0)), (NNUE_OUTPUT_BUCKETS, 1))
+    else:
+        output = out_w / QB * SCALE / (400.0 / math.log(10.0))
+    offset += n_out * NNUE_ACCUMULATOR * 4
+    out_b = np.frombuffer(data[offset:offset + n_out * 2], dtype="<i2").astype(np.float32)
+    if n_out == 1:
+        output_bias = np.full(NNUE_OUTPUT_BUCKETS, float(out_b[0] / QAB * SCALE / (400.0 / math.log(10.0))), dtype=np.float32)
+    else:
+        output_bias = out_b / QAB * SCALE / (400.0 / math.log(10.0))
 
     with torch.no_grad():
         model.embedding.weight.copy_(torch.from_numpy(feature))
@@ -1569,10 +1995,7 @@ def train_nnue(dataset: Path, output: Path, *, epochs: int, batch_size: int,
             load_nnue(model, resume)
         else:
             checkpoint_file = require_file(resume, "NNUE checkpoint")
-            try:
-                saved = torch.load(str(checkpoint_file), map_location=device, weights_only=True)
-            except TypeError:
-                saved = torch.load(str(checkpoint_file), map_location=device)
+            saved = torch.load(str(checkpoint_file), map_location=device, weights_only=True)
             if not isinstance(saved, dict) or "model" not in saved:
                 raise ValueError("Checkpoint model alanı içermiyor.")
             if saved.get("dataset_identity", file_identity(dataset)) != file_identity(dataset):
@@ -1663,11 +2086,13 @@ def train_nnue(dataset: Path, output: Path, *, epochs: int, batch_size: int,
 
         for us, them, us_mask, them_mask, labels in chunked_batches(training_ids, shuffle_chunks=True, epoch_seed=seed + epoch):
             optimizer.zero_grad(set_to_none=True)
+            base_only = (us < NNUE_BASE_FEATURES) & (us_mask > 0)
+            out_buckets = torch.clamp((base_only.sum(dim=1).long() - 1) // 4, 0, NNUE_OUTPUT_BUCKETS - 1)
             if feature_dropout > 0.0:
                 us_mask = us_mask * (torch.rand_like(us_mask) > feature_dropout).float()
                 them_mask = them_mask * (torch.rand_like(them_mask) > feature_dropout).float()
             loss = functional.binary_cross_entropy_with_logits(
-                model(us, them, us_mask, them_mask), labels
+                model(us, them, us_mask, them_mask, out_buckets), labels
             )
             loss.backward()
             optimizer.step()
@@ -1845,32 +2270,76 @@ def _parse_match_score(line: str) -> tuple[int, int, int] | None:
     return int(values[0]), int(values[1]), int(values[2])
 
 
-def verify_engine_networks(engine: Path, options: Sequence[str]) -> None:
-    """Require the UCI acknowledgements; an ignored EvalFile invalidates a match."""
-    commands = ["uci", "setoption name Hash value 16"]
-    expected = []
-    for option in options:
-        name, value = option.removeprefix("option.").split("=", 1)
-        if "\n" in value or "\r" in value:
-            raise ValueError("UCI dosya yolları satır sonu içeremez.")
-        commands.append(f"setoption name {name} value {value}")
-        if name in ("EvalFile", "EvalFileAggressive"):
-            expected.append(f"info string {name} loaded")
+def _engine_source_fingerprint(engine_src: Path) -> str:
+    """Hash the engine sources so cached match binaries stay valid."""
+    digest = hashlib.sha256()
+    files = sorted((engine_src / "src").glob("*.cpp")) + sorted((engine_src / "src").glob("*.h"))
+    files += sorted((engine_src / "fathom" / "src").glob("*.cpp")) + sorted((engine_src / "fathom" / "src").glob("*.h"))
+    files += [engine_src / name for name in ("net_embed.S", "Makefile.rules", "Makefile.mac",
+                                             "Makefile.linux", "Makefile.windows", "Makefile.android")]
+    for path in files:
+        if path.is_file():
+            digest.update(path.name.encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
+def _build_embedded_engine(engine_src: Path, network: Path, cache_dir: Path) -> Path:
+    """Build (or reuse a cached) engine binary with the given net embedded."""
+    engine_src = engine_src.resolve()
+    network = require_network(network, "NNUE")
+    for needed in ("src/stallion.cpp", "net_embed.S", "Makefile.rules"):
+        if not (engine_src / needed).is_file():
+            raise RuntimeError(f"Motor kaynağı eksik: {engine_src / needed}")
+    key = f"{_engine_source_fingerprint(engine_src)}_{file_sha256(network)[:16]}"
+    binary_name = {"darwin": "stallion_eas_mac", "win32": "stallion_eas_windows.exe"}.get(
+        sys.platform, "stallion_eas_linux")
+    build_dir = (cache_dir / key).resolve()
+    binary = build_dir / binary_name
+    marker = build_dir / "complete.json"
+    if binary.is_file() and marker.is_file():
+        return binary
+    with advisory_lock(cache_dir / f"{key}.build.lock"):
+        if binary.is_file() and marker.is_file():
+            return binary
+        if build_dir.exists():
+            shutil.rmtree(build_dir)
+        build_dir.mkdir(parents=True)
+        for name in ("src", "fathom"):
+            shutil.copytree(engine_src / name, build_dir / name)
+        for name in ("Makefile", "Makefile.rules", "Makefile.mac", "Makefile.linux",
+                     "Makefile.windows", "Makefile.android", "net_embed.S"):
+            shutil.copy2(engine_src / name, build_dir / name)
+        nets_dir = build_dir / "nets"
+        nets_dir.mkdir()
+        shutil.copy2(network, nets_dir / "stallion.nnue")
+        print(f"Motor derleniyor: {network.name} -> {binary_name} ({key})", flush=True)
+        run_checked(["make", "-C", str(build_dir)], capture=False)
+        if not binary.is_file():
+            raise RuntimeError(f"Motor derlenemedi: {build_dir}")
+        atomic_json(marker, {"network_sha256": file_sha256(network), "source": key})
+    return binary
+
+
+def verify_embedded_engine(binary: Path) -> None:
+    """Smoke-test a match binary: handshake plus a shallow fixed-depth search."""
     result = subprocess.run(
-        [str(engine)], input="\n".join(commands + ["isready", "quit", ""]),
-        capture_output=True, text=True, timeout=30,
+        [str(binary)],
+        input="uci\nisready\nposition startpos\ngo depth 3\nquit\n",
+        capture_output=True, text=True, timeout=120,
     )
-    lines = result.stdout.splitlines()
-    if (result.returncode or "uciok" not in lines or "readyok" not in lines or
-            any(line not in lines for line in expected)):
-        raise RuntimeError(f"Motor NNUE yüklemesini doğrulamadı: {engine}\n{result.stdout[-2000:]}\n{result.stderr[-1000:]}")
+    if (result.returncode or "uciok" not in result.stdout or
+            "readyok" not in result.stdout or "bestmove" not in result.stdout):
+        raise RuntimeError(f"Motor duman testi geçemedi: {binary}\n{result.stdout[-2000:]}\n{result.stderr[-1000:]}")
 
 
 def run_match(args: argparse.Namespace, phase: str | None = None) -> MatchResult:
     phase = phase or getattr(args, "phase", None) or "nnue"
     candidate = require_network(args.candidate, "Aday NNUE")
     baseline = require_network(args.baseline, "Taban NNUE")
-    engine = require_file(args.engine, "Stallion motoru")
+    engine_src = resolve_path(getattr(args, "engine_src", None), ENGINE_ROOT) or ENGINE_ROOT
+    if not engine_src.is_dir():
+        raise RuntimeError(f"Motor kaynağı bulunamadı: {engine_src}")
     book = resolve_path(getattr(args, "book", None))
     if book and not book.is_file():
         raise RuntimeError(f"Açılış kitabı bulunamadı: {book}")
@@ -1902,21 +2371,23 @@ def run_match(args: argparse.Namespace, phase: str | None = None) -> MatchResult
 
     candidate = freeze(candidate, "candidate.nnue")
     baseline = freeze(baseline, "baseline.nnue")
-    engine = freeze(engine, "engine" + engine.suffix)
+    cache_dir = ROOT / "runs" / "engine-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    candidate_engine = _build_embedded_engine(engine_src, candidate, cache_dir)
+    baseline_engine = _build_embedded_engine(engine_src, baseline, cache_dir)
+    verify_embedded_engine(candidate_engine)
+    verify_embedded_engine(baseline_engine)
+    candidate_engine = freeze(candidate_engine, "candidate-engine" + candidate_engine.suffix)
+    baseline_engine = freeze(baseline_engine, "baseline-engine" + baseline_engine.suffix)
     if book:
         book = freeze(book, "openings.epd")
 
-    candidate_options = [f"option.EvalFile={candidate}"]
-    baseline_options = [f"option.EvalFile={baseline}"]
-
     common_options = ["option.UseOpeningBook=false", "option.UseSyzygy=false",
                       "option.Threads=1", "option.Hash=64", "option.MultiPV=1"]
-    verify_engine_networks(engine, candidate_options + common_options)
-    verify_engine_networks(engine, baseline_options + common_options)
     command = [
         str(cli),
-        "-engine", f"cmd={engine}", "name=Candidate", *candidate_options,
-        "-engine", f"cmd={engine}", "name=Baseline", *baseline_options,
+        "-engine", f"cmd={candidate_engine}", "name=Candidate",
+        "-engine", f"cmd={baseline_engine}", "name=Baseline",
         "-each", "proto=uci", f"tc={getattr(args, 'tc', '5+0.05')}", *common_options,
         "-rounds", str(games // 2), "-games", "2", "-repeat", "-recover",
         "-concurrency", str(concurrency),
@@ -2301,6 +2772,183 @@ def run_sacrifices(args: argparse.Namespace) -> Path:
     return output
 
 
+def _iws_annotate(source: Path, tag_file: Path, output: Path) -> None:
+    """Insert the IWS Annotator tag into every game (replaces tagCreate.exe)."""
+    tag_line = tag_file.read_text(encoding="latin-1", errors="ignore").strip()
+    if not tag_line:
+        raise ValueError(f"Boş IWS etiket dosyası: {tag_file}")
+    games: list[str] = []
+    current: list[str] = []
+    in_tags = True
+    for line in source.read_text(encoding="latin-1", errors="ignore").splitlines():
+        if line.lstrip().startswith("[") and not in_tags and current:
+            games.append("\n".join(current))
+            current = []
+            in_tags = True
+        current.append(line)
+        if line.strip() and not line.lstrip().startswith("["):
+            in_tags = False
+    if current:
+        games.append("\n".join(current))
+    annotated: list[str] = []
+    for game in games:
+        if "[White " not in game:
+            continue
+        lines = [line for line in game.splitlines()
+                 if not line.lstrip().startswith("[Annotator ")]
+        insert_at = next((i for i, line in enumerate(lines)
+                          if line.strip() and not line.lstrip().startswith("[")), len(lines))
+        lines.insert(insert_at, tag_line)
+        annotated.append("\n".join(lines).strip())
+    output.write_text("\n\n".join(annotated) + ("\n" if annotated else ""), encoding="latin-1")
+
+
+def run_iwins(args: argparse.Namespace) -> Path:
+    """Port of the IWS-Tool V4.1 batch pipeline (interesting wins filter)."""
+    pgn = require_file(args.pgn, "PGN")
+    assets = resolve_path(getattr(args, "assets", None), DEFAULT_ASSETS) or DEFAULT_ASSETS
+    binary = require_file(assets / "pgn-extract", "pgn-extract")
+    movelimit = int(args.max_moves)
+    movelimit = 100 if movelimit < 30 else min(movelimit, 250)
+    player = (getattr(args, "player", None) or "").strip()
+    output = (resolve_path(args.output) or ROOT / "interesting_wins.pgn").resolve()
+    very_output = output.with_name(f"{output.stem}-very{output.suffix or '.pgn'}")
+
+    def sort_by_length(source: Path, target: Path, work: Path) -> None:
+        buckets = [(None, 19)] + [(low, low + 9) for low in range(20, 120, 10)] + [(120, None)]
+        parts: list[Path] = []
+        for index, (low, high) in enumerate(buckets):
+            part = work / f"len-{index}.pgn"
+            cmd = ["--quiet"]
+            if high is not None:
+                cmd.append(f"-bu{high}")
+            if low is not None:
+                cmd.append(f"-bl{low}")
+            _pgn_extract(binary, [*cmd, source, "--output", part], work)
+            parts.append(part)
+        combine_text_files(parts, target)
+
+    with tempfile.TemporaryDirectory(prefix="stallion-iws-") as temporary_name:
+        work = Path(temporary_name)
+        newsource = work / "newsource.pgn"
+        if player:
+            white = work / "player-w.pgn"
+            black = work / "player-b.pgn"
+            _pgn_extract(binary, ["--quiet", f"-Tw{player}", f"-bu{movelimit}",
+                                  "--fixresulttags", "-Tr1-0", "-C", "-N", "-V",
+                                  pgn, "--output", white], work)
+            _pgn_extract(binary, ["--quiet", f"-Tb{player}", f"-bu{movelimit}",
+                                  "--fixresulttags", "-Tr0-1", "-C", "-N", "-V",
+                                  pgn, "--output", black], work)
+            combine_text_files((white, black), newsource)
+        else:
+            _pgn_extract(binary, ["--quiet", f"-bu{movelimit}", "--fixresulttags",
+                                  "-Tr1-0", "-Tr0-1", "-C", "-N", "-V",
+                                  pgn, "--output", newsource], work)
+        white_wins = work / "whitewins.pgn"
+        black_wins = work / "blackwins.pgn"
+        _pgn_extract(binary, ["--quiet", "-Tr1-0", newsource, "--output", white_wins], work)
+        _pgn_extract(binary, ["--quiet", "-Tr0-1", newsource, "--output", black_wins], work)
+
+        results: dict[int, Path] = {}
+        for level in (1, 2, 3, 4, 5, 9):
+            tag = f"{level}_pawnsac" if level != 9 else "queensac"
+            white = work / f"results-w{level}.pgn"
+            black = work / f"results-b{level}.pgn"
+            merged = work / f"results_opt{level}.pgn"
+            _pgn_extract(binary, ["--quiet", "-y" + str(require_file(assets / f"{tag}_white", "IWS pattern")),
+                                  white_wins, "--output", white], work)
+            _pgn_extract(binary, ["--quiet", "-y" + str(require_file(assets / f"{tag}_black", "IWS pattern")),
+                                  black_wins, "--output", black], work)
+            combine_text_files((white, black), merged)
+            white_wins.write_bytes(white.read_bytes() if white.exists() else b"")
+            black_wins.write_bytes(black.read_bytes() if black.exists() else b"")
+            results[level] = merged
+
+        unique: dict[int, Path] = {}
+        previous: Path | None = None
+        for level in (9, 5, 4, 3, 2, 1):
+            target = work / f"unique_opt{level}.pgn"
+            if previous is None:
+                _pgn_extract(binary, ["--quiet", "-D", results[level], "--output", target], work)
+            else:
+                _pgn_extract(binary, ["--quiet", "-c" + str(previous), "-D",
+                                      "-o" + str(target), results[level]], work)
+            previous = results[level]
+            unique[level] = target
+
+        found: list[Path] = []
+        found_top: list[Path] = []
+        counts: dict[str, int] = {}
+        for level in (9, 5, 4, 3, 2, 1):
+            name = f"{level}sac"
+            sorted_pgn = work / f"sorted-{level}.pgn"
+            if pgn_game_count(unique[level]) > 0:
+                sort_by_length(unique[level], sorted_pgn, work)
+            else:
+                sorted_pgn.write_text("", encoding="latin-1")
+            annotated = work / f"anno-{level}.pgn"
+            _iws_annotate(sorted_pgn, require_file(assets / f"iws_anno_{name}", "IWS etiket"),
+                          annotated)
+            found.append(annotated)
+            if level != 1:
+                found_top.append(annotated)
+            counts[name] = pgn_game_count(annotated)
+
+        reached_endgame = work / "reached-endgame.pgn"
+        _pgn_extract(binary, ["--quiet", "-z" + str(require_file(assets / "no_endgame", "IWS pattern")),
+                              newsource, "--output", reached_endgame], work)
+        no_endgame = work / "no_endgame_wins.pgn"
+        _pgn_extract(binary, ["--quiet", "-c" + str(reached_endgame), "-D",
+                              "-o" + str(no_endgame), newsource], work)
+        if pgn_game_count(no_endgame) > 0:
+            no_endgame_sorted = work / "no_endgame_sorted.pgn"
+            sort_by_length(no_endgame, no_endgame_sorted, work)
+        else:
+            no_endgame_sorted = no_endgame
+        no_endgame_anno = work / "anno-noendgame.pgn"
+        _iws_annotate(no_endgame_sorted, require_file(assets / "iws_anno_before_endgame", "IWS etiket"),
+                      no_endgame_anno)
+        found.append(no_endgame_anno)
+        found_top.append(no_endgame_anno)
+        counts["before_endgame"] = pgn_game_count(no_endgame_anno)
+
+        imbalance = work / "imbalance.pgn"
+        _pgn_extract(binary, ["--quiet", "-z" + str(require_file(assets / "imbalance", "IWS pattern")),
+                              newsource, "--output", imbalance], work)
+        if pgn_game_count(imbalance) > 0:
+            imbalance_sorted = work / "imbalance_sorted.pgn"
+            sort_by_length(imbalance, imbalance_sorted, work)
+        else:
+            imbalance_sorted = imbalance
+        imbalance_anno = work / "anno-imbalance.pgn"
+        _iws_annotate(imbalance_sorted, require_file(assets / "iws_anno_material_imbalance", "IWS etiket"),
+                      imbalance_anno)
+        found.append(imbalance_anno)
+        counts["imbalance"] = pgn_game_count(imbalance_anno)
+
+        merged_all = work / "foundgames.pgn"
+        merged_top = work / "foundtopgames.pgn"
+        combine_text_files(found, merged_all)
+        combine_text_files(found_top, merged_top)
+        final_all = work / "interesting.pgn"
+        final_top = work / "very.pgn"
+        _pgn_extract(binary, ["--quiet", "-D", merged_all, "--output", final_all], work)
+        _pgn_extract(binary, ["--quiet", "-D", merged_top, "--output", final_top], work)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        atomic_bytes(output, final_all.read_bytes() if final_all.exists() else b"")
+        atomic_bytes(very_output, final_top.read_bytes() if final_top.exists() else b"")
+    counts["interesting"] = pgn_game_count(output)
+    counts["very_interesting"] = pgn_game_count(very_output)
+    atomic_json(output.with_suffix(".iwins.json"), {
+        "pgn": file_identity(pgn), "movelimit": movelimit, "player": player or None,
+        "interesting": str(output), "very_interesting": str(very_output), **counts,
+    })
+    print(f"[BAŞARILI] IWS: {output} ({counts['interesting']:,} oyun), "
+          f"{very_output} ({counts['very_interesting']:,} oyun)", flush=True)
+    return output
+
+
 def promote_network(candidate: Path, baseline: Path, *, expected_baseline: str,
                     expected_candidate: str) -> None:
     candidate = require_network(candidate, "Aday NNUE")
@@ -2329,7 +2977,8 @@ def promote_network(candidate: Path, baseline: Path, *, expected_baseline: str,
             "promoted_at": datetime.now().isoformat(),
         })
 
-    print(f"[TERFİ] {candidate.name} -> {baseline}; yedek={backup.name}")
+    print(f"[TERFİ] {candidate.name} -> {baseline}; yedek={backup.name}. "
+          f"Eski netle derlenmiş motor ikilileri bayatladı; yeniden derleyin.")
 
 
 def maybe_promote(args: argparse.Namespace, phase: str, result: MatchResult,
@@ -2380,11 +3029,13 @@ def parse_steps(value: str | None) -> list[str]:
         "eas-comparison": "eas",
         "sacrifice": "sacrifices",
         "sgs": "sacrifices",
+        "iws": "iwins",
+        "interesting": "iwins",
         "selfplay": "datagen",
         "datagen": "datagen",
         "everything": "all",
     }
-    order = ["prepare", "extract", "datagen", "train", "match", "eas", "sacrifices", "promote"]
+    order = ["prepare", "extract", "datagen", "train", "match", "eas", "sacrifices", "iwins", "promote"]
     tokens = [
         aliases.get(token.lower(), token.lower())
         for token in re.split(r"[,\s]+", value or "all") if token
@@ -2437,6 +3088,8 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     )
     for phase in phases:
         baseline = NETS / f"{phase}.nnue"
+        if not baseline.is_file():
+            baseline = NETS / "stallion.nnue"
         if args.baseline and len(phases) == 1:
             baseline = args.baseline
         if any(step in steps for step in ("train", "match", "promote")):
@@ -2510,9 +3163,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
                         args, phase=phase, candidate=candidate, baseline=baseline,
                         pgnout=pgnout, json_out=match_json,
                         games=(args.games_base or args.games) if phase == "base" else (args.games_aggressive or args.games),
-                        fixed_base=args.fixed_base,
-                        fixed_aggressive=args.fixed_aggressive,
-                        engine=args.engine,
+                        engine_src=args.engine_src,
                     )
                     match_result = run_match(match_args, phase)
                 elif step == "eas":
@@ -2533,6 +3184,15 @@ def run_pipeline(args: argparse.Namespace) -> Path:
                     run_sacrifices(_namespace_copy(
                         args, pgn=args.pgn, output=prefix.with_suffix(".sacrifices.pgn")
                     ))
+                elif step == "iwins":
+                    iwins_input = pgnout if pgnout.is_file() else args.pgn
+                    if iwins_input is None:
+                        raise RuntimeError(
+                            "iwins adımı için match PGN'i yok; match çalıştırın veya --pgn verin."
+                        )
+                    run_iwins(_namespace_copy(
+                        args, pgn=iwins_input, output=prefix.with_suffix(".iwins.pgn")
+                    ))
                 elif step == "promote":
                     if match_result is None:
                         raise RuntimeError("promote adımı match adımından sonra gelmeli.")
@@ -2550,19 +3210,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "command", nargs="?", default="pipeline",
-        choices=["pipeline", "extract", "prepare", "datagen", "train", "match", "eas", "sacrifices", "mine"],
+        choices=["pipeline", "extract", "prepare", "datagen", "train", "match", "eas", "sacrifices", "mine", "label", "iwins"],
     )
     parser.add_argument("--phase", "--mode", "--net-type", dest="phase",
                         choices=["nnue", "all", "base", "aggressive"], default="nnue",
                         help=argparse.SUPPRESS)
     parser.add_argument("--steps", default="all",
-                        help="pipeline adımları: extract,train,match,eas,sacrifices,promote,all")
+                        help="pipeline adımları: extract,train,match,eas,sacrifices,iwins,promote,all")
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--aggressive-dataset", default=None)
 
-    parser.add_argument("--source", "--sbin", "--zst", dest="source", default=str(DEFAULT_EVAL),
+    parser.add_argument("--source", "--sbin", dest="source", default=str(DEFAULT_EVAL),
                         help="Eval SBIN veri kaynağı (varsayılan: training/data/evals.sbin)")
     parser.add_argument("--puzzles", default=str(DEFAULT_PUZZLES),
                         help="Feda bulmaca SBIN kaynağı (varsayılan: training/data/puzzle_sacrifices.sbin)")
@@ -2614,14 +3274,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pool-size", type=int, default=15_000_000,
                         help="Madencilikte taranacak pozisyon havuzu boyutu (varsayılan: 15,000,000)")
 
-    parser.add_argument("--engine", default=None)
+    parser.add_argument("--engine", default=None, help="Self-play/datagen motor binary")
+    parser.add_argument("--engine-src", default=None, help="Match için motor kaynak dizini (gömülü derleme)")
     parser.add_argument("--assets", default=str(DEFAULT_ASSETS),
                         help="cutechess/pgn-extract ve pattern dosyalarının bulunduğu klasör")
     parser.add_argument("--book", default=str(DEFAULT_BOOK))
     parser.add_argument("--candidate", default=None)
     parser.add_argument("--baseline", default=None)
-    parser.add_argument("--fixed-base", default=None)
-    parser.add_argument("--fixed-aggressive", default=None)
     parser.add_argument("--games", type=int, default=100)
     parser.add_argument("--games-base", type=int, default=None)
     parser.add_argument("--games-aggressive", "--games-agg", dest="games_aggressive",
@@ -2642,6 +3301,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pgn", default=None)
     parser.add_argument("--pgnout", default=None)
     parser.add_argument("--json-out", "--json", dest="json_out", default=None)
+    parser.add_argument("--player", default=None,
+                        help="iwins için yalnızca bu motor/oyuncunun galibiyetleri")
     parser.add_argument("--sac-type", type=int, choices=[0, 1, 2, 3, 4, 5, 9], default=0)
     parser.add_argument("--max-moves", type=int, default=80)
     parser.add_argument("--max-iters", type=int, default=1)
@@ -2655,8 +3316,7 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.games_aggressive is None:
         args.games_aggressive = args.games
     args.assets = resolve_path(getattr(args, "assets", None), DEFAULT_ASSETS)
-    args.source = resolve_path(getattr(args, "source", None) or getattr(args, "zst", None), DEFAULT_EVAL)
-    args.zst = args.source
+    args.source = resolve_path(getattr(args, "source", None), DEFAULT_EVAL)
     args.puzzles = resolve_path(args.puzzles, DEFAULT_PUZZLES)
     args.book = resolve_path(args.book, DEFAULT_BOOK)
     args.offset_file = resolve_path(args.offset_file)
@@ -2666,8 +3326,7 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.resume = resolve_path(args.resume)
     args.candidate = resolve_path(args.candidate)
     args.baseline = resolve_path(args.baseline)
-    args.fixed_base = resolve_path(args.fixed_base, NETS / "stallion.nnue")
-    args.fixed_aggressive = resolve_path(args.fixed_aggressive, NETS / "stallion.nnue")
+    args.engine_src = resolve_path(getattr(args, "engine_src", None), ENGINE_ROOT)
     if args.engine is None:
         filename = {"darwin": "stallion_eas_mac", "win32": "stallion_eas_windows.exe"}.get(sys.platform, "stallion_eas_linux")
         preferred = ENGINE_ROOT / filename
@@ -2690,6 +3349,8 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.output = ROOT / "statistics_EAS_ratinglist.txt"
     if args.command == "sacrifices" and args.output is None:
         args.output = ROOT / "games_with_sacrifices.pgn"
+    if args.command == "iwins" and args.output is None:
+        args.output = ROOT / "interesting_wins.pgn"
     args.output = resolve_path(args.output)
     if args.command == "match":
         if args.candidate is None or args.baseline is None:
@@ -2703,7 +3364,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     try:
         args = normalize_args(parser.parse_args(argv))
-        if getattr(args, "phase", None) in ("all", None):
+        if args.command != "pipeline" and getattr(args, "phase", None) in ("all", None):
             args.phase = "nnue"
         if args.command == "extract":
             extract_dataset(args, args.phase, args.output)
@@ -2716,6 +3377,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "mine":
             mine_hard_dataset(args)
+            return 0
+        if args.command == "label":
+            run_label(args)
             return 0
         if args.command == "train":
             if args.dataset is None:
@@ -2749,6 +3413,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.pgn is None:
                 raise ValueError("sacrifices için --pgn gerekli.")
             run_sacrifices(args)
+            return 0
+        if args.command == "iwins":
+            if args.pgn is None:
+                raise ValueError("iwins için --pgn gerekli.")
+            run_iwins(args)
             return 0
         run_pipeline(args)
         return 0

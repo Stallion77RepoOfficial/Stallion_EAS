@@ -1,13 +1,11 @@
 #pragma once
+#include "bitboard.h"
 #include "defs.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <fstream>
 #include <memory>
-#include <string>
-#include <vector>
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
@@ -24,7 +22,7 @@
 #endif
 
 constexpr size_t KING_BUCKETS = 16;
-constexpr size_t INPUT_SIZE = 768 * KING_BUCKETS; // 12288
+constexpr size_t INPUT_SIZE = NNUE_INPUT_SIZE; // 13316 = 12288 base + 1028 extra
 constexpr size_t LAYER1_SIZE = 1024;
 
 constexpr int KingBucketTable[64] = {
@@ -61,27 +59,22 @@ inline std::unique_ptr<NNUE_Params> g_nnue_data = nullptr;
 inline const NNUE_Params *g_nnue = nullptr;
 inline bool nnue_loaded = false;
 
-inline std::unique_ptr<NNUE_Params> read_nnue_binary(const std::string &path) {
-  constexpr size_t words_8out = INPUT_SIZE * LAYER1_SIZE + LAYER1_SIZE + OUTPUT_BUCKETS * LAYER1_SIZE * 2 + OUTPUT_BUCKETS;
-  constexpr size_t payload_8out = words_8out * 2;
-  constexpr size_t padded_8out = (payload_8out + 63) / 64 * 64;
+extern "C" {
+extern const unsigned char stallion_nnue[];
+extern const unsigned char stallion_nnue_end[];
+}
 
-  constexpr size_t words_1out = INPUT_SIZE * LAYER1_SIZE + LAYER1_SIZE * 3 + 1;
-  constexpr size_t payload_1out = words_1out * 2;
-  constexpr size_t padded_1out = (payload_1out + 63) / 64 * 64;
+inline std::unique_ptr<NNUE_Params> read_nnue_embedded() {
+  // Only the 8-output-bucket format is supported. The bytes come from the
+  // embedded net (net_embed.S); no network file is read at runtime.
+  constexpr size_t words = INPUT_SIZE * LAYER1_SIZE + LAYER1_SIZE + OUTPUT_BUCKETS * LAYER1_SIZE * 2 + OUTPUT_BUCKETS;
+  constexpr size_t payload = words * 2;
+  constexpr size_t padded = (payload + 63) / 64 * 64;
 
-  std::ifstream file(path, std::ios::binary | std::ios::ate);
-  if (!file) return nullptr;
-  const auto length = file.tellg();
+  const unsigned char *const data = stallion_nnue;
+  const size_t length = static_cast<size_t>(stallion_nnue_end - stallion_nnue);
 
-  const bool is_8out = (length == std::streamoff(payload_8out) || length == std::streamoff(padded_8out));
-  const bool is_1out = (length == std::streamoff(payload_1out) || length == std::streamoff(padded_1out));
-  if (!is_8out && !is_1out) return nullptr;
-
-  const size_t payload_to_read = is_8out ? payload_8out : payload_1out;
-  std::vector<uint8_t> data(payload_to_read);
-  file.seekg(0);
-  if (!file.read(reinterpret_cast<char *>(data.data()), payload_to_read)) return nullptr;
+  if (length != payload && length != padded) return nullptr;
 
   auto loaded_params = std::make_unique<NNUE_Params>();
   size_t offset = 0;
@@ -95,27 +88,17 @@ inline std::unique_ptr<NNUE_Params> read_nnue_binary(const std::string &path) {
   for (auto &v : loaded_params->feature_v) v = read_value();
   for (auto &v : loaded_params->feature_bias) v = read_value();
 
-  if (is_8out) {
-    for (size_t b = 0; b < OUTPUT_BUCKETS; ++b) {
-      for (auto &v : loaded_params->output_v[b]) v = read_value();
-    }
-    for (size_t b = 0; b < OUTPUT_BUCKETS; ++b) {
-      loaded_params->output_bias[b] = read_value();
-    }
-  } else {
-    std::array<int16_t, LAYER1_SIZE * 2> single_out;
-    for (auto &v : single_out) v = read_value();
-    const int16_t single_bias = read_value();
-    for (size_t b = 0; b < OUTPUT_BUCKETS; ++b) {
-      loaded_params->output_v[b] = single_out;
-      loaded_params->output_bias[b] = single_bias;
-    }
+  for (size_t b = 0; b < OUTPUT_BUCKETS; ++b) {
+    for (auto &v : loaded_params->output_v[b]) v = read_value();
+  }
+  for (size_t b = 0; b < OUTPUT_BUCKETS; ++b) {
+    loaded_params->output_bias[b] = read_value();
   }
   return loaded_params;
 }
 
-inline bool load_nnue(const std::string &path) {
-  auto net = read_nnue_binary(path);
+inline bool load_embedded_nnue() {
+  auto net = read_nnue_embedded();
   if (net) {
     g_nnue_data = std::move(net);
     g_nnue = g_nnue_data.get();
@@ -273,6 +256,10 @@ public:
   Accumulator<LAYER1_SIZE> *m_curr = &m_accumulator_stack[0];
   uint8_t m_w_bucket[MaxSearchDepth]{};
   uint8_t m_b_bucket[MaxSearchDepth]{};
+  int16_t m_pre_w[MaxSearchDepth][NNUE_EXTRA_SLOTS]{};
+  int16_t m_pre_b[MaxSearchDepth][NNUE_EXTRA_SLOTS]{};
+  int m_pre_nw[MaxSearchDepth]{};
+  int m_pre_nb[MaxSearchDepth]{};
   int m_idx = 0;
 
   NNUE_State() = default;
@@ -283,9 +270,26 @@ public:
       std::copy_n(other.m_accumulator_stack, m_idx + 1, m_accumulator_stack);
       std::copy_n(other.m_w_bucket, m_idx + 1, m_w_bucket);
       std::copy_n(other.m_b_bucket, m_idx + 1, m_b_bucket);
+      std::copy_n(&other.m_pre_w[0][0], (m_idx + 1) * NNUE_EXTRA_SLOTS, &m_pre_w[0][0]);
+      std::copy_n(&other.m_pre_b[0][0], (m_idx + 1) * NNUE_EXTRA_SLOTS, &m_pre_b[0][0]);
+      std::copy_n(other.m_pre_nw, m_idx + 1, m_pre_nw);
+      std::copy_n(other.m_pre_nb, m_idx + 1, m_pre_nb);
       m_curr = &m_accumulator_stack[m_idx];
     }
     return *this;
+  }
+
+  inline void store_extra_lists(const BoardState &position, int level) noexcept {
+    if (level < 0 || level >= MaxSearchDepth) return;
+    int buf[NNUE_EXTRA_SLOTS];
+    int nw = collect_extra_features(position.board.data(), position.colors_bb.data(),
+                                    position.pieces_bb.data(), false, buf, NNUE_EXTRA_SLOTS);
+    m_pre_nw[level] = nw < 0 ? 0 : nw;
+    for (int i = 0; i < m_pre_nw[level]; ++i) m_pre_w[level][i] = static_cast<int16_t>(buf[i]);
+    int nb = collect_extra_features(position.board.data(), position.colors_bb.data(),
+                                    position.pieces_bb.data(), true, buf, NNUE_EXTRA_SLOTS);
+    m_pre_nb[level] = nb < 0 ? 0 : nb;
+    for (int i = 0; i < m_pre_nb[level]; ++i) m_pre_b[level][i] = static_cast<int16_t>(buf[i]);
   }
 
   inline void pop() noexcept {
@@ -295,11 +299,56 @@ public:
     }
   }
 
+  inline void add_extra_view(const BoardState &position, bool flip) noexcept {
+    if (!g_nnue || !nnue_loaded) return;
+    int extra[NNUE_EXTRA_SLOTS];
+    const int n = collect_extra_features(position.board.data(), position.colors_bb.data(),
+                                         position.pieces_bb.data(), flip, extra, NNUE_EXTRA_SLOTS);
+    if (n < 0) return;
+    auto &acc = flip ? m_curr->black : m_curr->white;
+    const int16_t *F = g_nnue->feature_v.data();
+    for (int k = 0; k < n; ++k) {
+      const size_t off = static_cast<size_t>(extra[k]) * LAYER1_SIZE;
+      #pragma unroll 4
+      for (size_t i = 0; i < LAYER1_SIZE; ++i) {
+        acc[i] += F[off + i];
+      }
+    }
+  }
+
+  inline void apply_extra_delta(const int *rem_w, int nrw, const int *add_w, int naw,
+                                const int *rem_b, int nrb, const int *add_b, int nab) noexcept {
+    if (!g_nnue || !nnue_loaded) return;
+    const int16_t *F = g_nnue->feature_v.data();
+    auto *W = m_curr->white.data();
+    auto *B = m_curr->black.data();
+    for (int k = 0; k < nrw; ++k) {
+      const int16_t *f = F + static_cast<size_t>(rem_w[k]) * LAYER1_SIZE;
+      for (size_t i = 0; i < LAYER1_SIZE; ++i) W[i] -= f[i];
+    }
+    for (int k = 0; k < naw; ++k) {
+      const int16_t *f = F + static_cast<size_t>(add_w[k]) * LAYER1_SIZE;
+      for (size_t i = 0; i < LAYER1_SIZE; ++i) W[i] += f[i];
+    }
+    for (int k = 0; k < nrb; ++k) {
+      const int16_t *f = F + static_cast<size_t>(rem_b[k]) * LAYER1_SIZE;
+      for (size_t i = 0; i < LAYER1_SIZE; ++i) B[i] -= f[i];
+    }
+    for (int k = 0; k < nab; ++k) {
+      const int16_t *f = F + static_cast<size_t>(add_b[k]) * LAYER1_SIZE;
+      for (size_t i = 0; i < LAYER1_SIZE; ++i) B[i] += f[i];
+    }
+  }
+
   inline void push_null() noexcept {
     if (m_idx >= MaxSearchDepth - 1 || !g_nnue || !nnue_loaded) return;
     m_accumulator_stack[m_idx + 1] = m_accumulator_stack[m_idx];
     m_w_bucket[m_idx + 1] = m_w_bucket[m_idx];
     m_b_bucket[m_idx + 1] = m_b_bucket[m_idx];
+    std::copy_n(m_pre_w[m_idx], NNUE_EXTRA_SLOTS, m_pre_w[m_idx + 1]);
+    std::copy_n(m_pre_b[m_idx], NNUE_EXTRA_SLOTS, m_pre_b[m_idx + 1]);
+    m_pre_nw[m_idx + 1] = m_pre_nw[m_idx];
+    m_pre_nb[m_idx + 1] = m_pre_nb[m_idx];
     ++m_idx;
     m_curr = &m_accumulator_stack[m_idx];
   }
@@ -346,6 +395,9 @@ public:
         }
       }
     }
+    add_extra_view(position, false);
+    add_extra_view(position, true);
+    store_extra_lists(position, 0);
   }
 
   inline void refresh_white(const BoardState &position, size_t new_w_bucket) noexcept {
@@ -368,6 +420,7 @@ public:
         }
       }
     }
+    add_extra_view(position, false);
   }
 
   inline void refresh_black(const BoardState &position, size_t new_b_bucket) noexcept {
@@ -390,6 +443,7 @@ public:
         }
       }
     }
+    add_extra_view(position, true);
   }
 
   inline void add_sub(int from_piece, int from, int to_piece, int to) noexcept {

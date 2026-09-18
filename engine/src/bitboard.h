@@ -102,7 +102,7 @@ inline std::atomic<bool> BBS_INITIALIZING{false};
 inline thread_local bool BBS_INIT_IN_THIS_THREAD = false;
 
 inline void ensure_bbs_initialized() noexcept {
-  if (BBS_INITIALIZED.load(std::memory_order_relaxed)) [[likely]]
+  if (BBS_INITIALIZED.load(std::memory_order_acquire)) [[likely]]
     return;
   if (BBS_INIT_IN_THIS_THREAD) [[unlikely]]
     return;

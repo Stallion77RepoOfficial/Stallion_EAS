@@ -5,6 +5,7 @@
 
 #include "../fathom/src/tbprobe.h"
 #include "utils.h"
+#include <cassert>
 #include <memory>
 
 inline Action uci_to_internal(const BoardState &position, const std::string &uci) {
@@ -27,6 +28,19 @@ safe_elapsed(const std::chrono::steady_clock::time_point &start) noexcept {
   return ms ? ms : 1;
 }
 
+
+inline unsigned tb_ep_square(const BoardState &position) noexcept {
+  const int ep = position.ep_square;
+  if (!is_valid_square(ep)) return 0;
+  const int color = position.color;
+  const int captured = ep + (color ? Directions::North : Directions::South);
+  if (!is_valid_square(captured) ||
+      position.board[captured] != Pieces::WPawn + (color ^ 1)) return 0;
+  const uint64_t our_pawns =
+      position.colors_bb[color] & position.pieces_bb[PieceTypes::Pawn];
+  if (!(PAWN_ATK_SAFE(color ^ 1, ep) & our_pawns)) return 0;
+  return static_cast<unsigned>(ep);
+}
 
 inline int probe_wdl_tb(const BoardState &position, const ThreadInfo &thread_info) noexcept {
 
@@ -53,7 +67,7 @@ inline int probe_wdl_tb(const BoardState &position, const ThreadInfo &thread_inf
     return ScoreNone;
 
   if (thread_info.syzygy_50_move_rule && position.halfmoves != 0) return ScoreNone;
-  const unsigned ep = position.ep_square != SquareNone ? position.ep_square : 0;
+  const unsigned ep = tb_ep_square(position);
 
   const unsigned result = tb_probe_wdl(position.colors_bb[0], position.colors_bb[1],
                                        position.pieces_bb[PieceTypes::King],
@@ -202,7 +216,6 @@ inline void ss_push(const BoardState &position, ThreadInfo &thread_info, Action 
   record.position_key = position.zobrist_key;
   record.played_move = move;
   record.piece_moved = move == MoveNone ? Pieces::Blank : position.board[extract_from(move)];
-  record.is_cap = is_cap(position, move);
   ++thread_info.search_ply;
   ++thread_info.game_ply;
 }
@@ -395,10 +408,7 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
     if (!is_legal(position, move))
       continue;
 
-    int from_sq = extract_from(move);
-    int to_sq = extract_to(move);
-    if (!is_valid_square(from_sq) || !is_valid_square(to_sq))
-      continue;
+    const int to_sq = extract_to(move);
 
     if (!in_check && stand_pat != ScoreNone) {
       int captured_piece = position.board[to_sq];
@@ -643,10 +653,6 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
 
       make_move(temp_pos, MoveNone);
 
-      if (thread_info.search_ply >= MaxSearchPly ||
-          thread_info.game_ply >= MaxGameLen) {
-        return ScoreNone;
-      }
       update_nnue_state(thread_info, MoveNone, position, temp_pos);
       ss_push(position, thread_info, MoveNone);
 
@@ -735,10 +741,6 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
 
       make_move(moved_position, move);
 
-      if (thread_info.search_ply >= MaxSearchPly ||
-          thread_info.game_ply >= MaxGameLen) {
-        return ScoreNone;
-      }
       update_nnue_state(thread_info, move, position, moved_position);
       ss_push(position, thread_info, move);
 
@@ -887,10 +889,6 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
     BoardState moved_position = position;
     make_move(moved_position, move);
 
-    if (thread_info.search_ply >= MaxSearchPly ||
-        thread_info.game_ply >= MaxGameLen) {
-      return best_score;
-    }
     update_nnue_state(thread_info, move, position, moved_position);
     ss_push(position, thread_info, move);
 
@@ -1574,7 +1572,7 @@ inline void filter_root_tablebase(const BoardState &position, ThreadInfo &thread
     }
   }
   auto results = std::make_unique<TbRootMoves>();
-  const unsigned ep = position.ep_square == SquareNone ? 0 : position.ep_square;
+  const unsigned ep = tb_ep_square(position);
   const unsigned rule50 = thread_info.syzygy_50_move_rule ? std::min<int>(position.halfmoves, 100) : 0;
   auto probe = [&](bool dtz) {
     const auto &bb = position.pieces_bb;

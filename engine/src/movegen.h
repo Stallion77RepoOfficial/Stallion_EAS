@@ -3,7 +3,6 @@
 #include "position.h"
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <cstdint>
 
 namespace Generate {
@@ -94,7 +93,7 @@ inline void pawn_moves(const Position &position, uint64_t check_filter,
                              position.colors_bb[color ^ 1] & check_filter;
 
   auto safe_push = [&](Move m) noexcept {
-    if (move_list && key >= 0 && key < ListSize)
+    if (key < ListSize)
       move_list[key++] = m;
   };
 
@@ -148,7 +147,7 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
   uint64_t king_attacks = KING_ATK_SAFE(king_pos) & targets;
   while (king_attacks) {
     const int to = pop_lsb(king_attacks);
-    if (move_list && idx < ListSize)
+    if (idx < ListSize)
       move_list[idx++] = pack_move(king_pos, to, MoveTypes::Normal);
   }
 
@@ -171,7 +170,7 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
     const int from = pop_lsb(knights);
     uint64_t to = KNIGHT_ATK_SAFE(from) & targets & check_filter;
     while (to) {
-      if (move_list && idx < ListSize)
+      if (idx < ListSize)
         move_list[idx++] = pack_move(from, pop_lsb(to), MoveTypes::Normal);
       else
         pop_lsb(to);
@@ -185,7 +184,7 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
     const int from = pop_lsb(diagonals);
     uint64_t to = get_bishop_attacks(from, occ) & targets & check_filter;
     while (to) {
-      if (move_list && idx < ListSize)
+      if (idx < ListSize)
         move_list[idx++] = pack_move(from, pop_lsb(to), MoveTypes::Normal);
       else
         pop_lsb(to);
@@ -199,7 +198,7 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
     const int from = pop_lsb(orthogonals);
     uint64_t to = get_rook_attacks(from, occ) & targets & check_filter;
     while (to) {
-      if (move_list && idx < ListSize)
+      if (idx < ListSize)
         move_list[idx++] = pack_move(from, pop_lsb(to), MoveTypes::Normal);
       else
         pop_lsb(to);
@@ -216,7 +215,7 @@ inline int movegen(const Position &position, Move *move_list, uint64_t checkers,
       continue;
     }
 
-    if (can_castle(position, king_pos, castling_sq) && move_list && idx < ListSize)
+    if (can_castle(position, king_pos, castling_sq) && idx < ListSize)
       move_list[idx++] = pack_move(king_pos, castling_sq, MoveTypes::Castling);
   }
 

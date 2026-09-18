@@ -546,8 +546,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           thread_info.game_hist[thread_info.game_ply].played_move = move;
           thread_info.game_hist[thread_info.game_ply].piece_moved =
               position.board[extract_from(move)];
-          thread_info.game_hist[thread_info.game_ply].is_cap =
-              is_cap(position, move);
           if (thread_info.game_ply + 1 < MaxGameLen)
             thread_info.game_ply++;
 

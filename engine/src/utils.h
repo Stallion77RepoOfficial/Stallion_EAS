@@ -516,28 +516,6 @@ inline int64_t time_elapsed(std::chrono::steady_clock::time_point start_time) no
       .count();
 }
 
-class Barrier {
-public:
-  explicit Barrier(size_t expected) : total(expected), remaining(expected) {}
-  void reset(size_t expected) {
-    std::lock_guard lock(mutex);
-    total = remaining = expected;
-  }
-  void arrive_and_wait() {
-    std::unique_lock lock(mutex);
-    const auto phase = generation;
-    if (--remaining == 0) {
-      remaining = total;
-      ++generation;
-      condition.notify_all();
-    } else condition.wait(lock, [&] { return generation != phase; });
-  }
-private:
-  size_t total, remaining, generation = 0;
-  std::mutex mutex;
-  std::condition_variable condition;
-};
-
 inline bool OpeningBook::load_book(const std::string &path) {
   clear_book();
   return !path.empty() && load_polyglot_book(resolve_file_path(path));

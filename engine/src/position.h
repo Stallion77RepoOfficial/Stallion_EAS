@@ -391,7 +391,8 @@ inline void make_move(BoardState &position, Action move) noexcept {
   const int move_type = extract_type(move);
   const int from_type = get_piece_type(from_piece);
   if (move_type != MoveTypes::Castling &&
-      (from == to || (position.board[to] && get_color(position.board[to]) == color))) return;
+      (from == to || (position.board[to] && get_color(position.board[to]) == color) ||
+       position.board[to] == Pieces::WKing + (color ^ 1))) return;
   if (move_type == MoveTypes::Castling && !can_castle(position, from, to)) return;
   if (move_type == MoveTypes::Promotion &&
       (from_type != PieceTypes::Pawn || get_rank(to) != (color ? 0 : 7))) return;
@@ -602,8 +603,10 @@ inline bool is_pseudo_legal(const BoardState &position, Action move,
 
   if (checkers) {
     const int checker_sq = get_lsb(checkers);
+    const int king_sq = get_king_pos(position, color);
+    if (!is_valid_square(king_sq)) return false;
     const uint64_t single_check_filter =
-        BetweenBBs[get_king_pos(position, color)][checker_sq] |
+        BetweenBBs[king_sq][checker_sq] |
         (1ULL << checker_sq);
     if (!(single_check_filter & (1ULL << to)))
       return false;
@@ -661,6 +664,7 @@ inline bool is_legal(const BoardState &position, Action move) noexcept {
     occupied &= ~(1ULL << captured);
   }
   const int king = get_piece_type(piece) == PieceTypes::King ? to : get_king_pos(position, color);
+  if (!is_valid_square(king)) return false;
   return !(attacks_square(position, king, color ^ 1, occupied) & ~(1ULL << to));
 }
 

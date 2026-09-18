@@ -135,7 +135,6 @@ struct GameHistory {
   Move played_move = MoveNone;
   uint8_t piece_moved = Pieces::Blank;
 
-  bool is_cap = false;
   int32_t static_eval = 0;
 };
 

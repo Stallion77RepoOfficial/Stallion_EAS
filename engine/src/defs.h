@@ -213,7 +213,11 @@ constexpr inline uint8_t extract_type(Move move) noexcept { return move & 3; }
 // training parser) must emit index sets in ascending block order with
 // ascending indices inside each block, so incremental diffs are a linear
 // merge. Learned weights only: humans define WHAT is visible, never its value.
-constexpr size_t NNUE_BASE_FEATURES = 12288;
+constexpr size_t NNUE_KING_BUCKETS = 16;
+constexpr size_t NNUE_FEATURES_PER_KING_BUCKET = 12 * 64;
+constexpr size_t NNUE_FEATURES_PER_COLOR = 6 * 64;
+constexpr size_t NNUE_FEATURES_PER_PIECE = 64;
+constexpr size_t NNUE_BASE_FEATURES = NNUE_KING_BUCKETS * NNUE_FEATURES_PER_KING_BUCKET;
 constexpr size_t NNUE_OFF_MATERIAL = NNUE_BASE_FEATURES;          // +100
 constexpr size_t NNUE_OFF_ZONE_OCC = NNUE_OFF_MATERIAL + 100;     // +234
 constexpr size_t NNUE_OFF_ZONE_ATK = NNUE_OFF_ZONE_OCC + 234;     // +18

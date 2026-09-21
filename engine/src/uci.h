@@ -22,8 +22,10 @@
 
 inline bool tb_initialized = false;
 
-inline void run_thread(BoardState &position, ThreadInfo &thread_info, std::thread &s) {
-  if (s.joinable()) s.join();
+inline void run_thread(BoardState &position, ThreadInfo &thread_info,
+                       std::thread &s) {
+  if (s.joinable())
+    s.join();
   {
     std::lock_guard lock(thread_data.control_mutex);
     thread_data.emit_bestmove = true;
@@ -35,7 +37,8 @@ inline void run_thread(BoardState &position, ThreadInfo &thread_info, std::threa
 
 inline uint64_t perft(int depth, BoardState &position, bool first,
                       ThreadInfo &thread_info) {
-  if (depth == 0) return 1;
+  if (depth == 0)
+    return 1;
   uint64_t total_nodes = 0;
   const uint64_t checkers = attacks_square(
       position, get_king_pos(position, position.color), position.color ^ 1);
@@ -53,8 +56,7 @@ inline uint64_t perft(int depth, BoardState &position, bool first,
   }
 
   MovePicker picker{};
-  init_picker(picker, position, -107, checkers,
-              &(thread_info.game_hist[thread_info.game_ply]));
+  init_picker(picker, position, -107, checkers);
 
   while (Action move =
              next_move(picker, position, thread_info, MoveNone, false))
@@ -79,7 +81,8 @@ inline uint64_t perft(int depth, BoardState &position, bool first,
   return total_nodes;
 }
 
-inline void bench(BoardState &position, ThreadInfo &thread_info, int depth = 12) {
+inline void bench(BoardState &position, ThreadInfo &thread_info,
+                  int depth = 12) {
   static const std::array<std::string, 49> fens = {
       "2r2k2/8/4P1R1/1p6/8/P4K1N/7b/2B5 b - - 0 55",
       "2r4r/1p4k1/1Pnp4/3Qb1pq/8/4BpPp/5P2/2RR1BK1 w - - 0 42",
@@ -135,7 +138,8 @@ inline void bench(BoardState &position, ThreadInfo &thread_info, int depth = 12)
   thread_info.max_iter_depth = std::clamp(depth, 1, MaxRootDepth);
   thread_info.time_manager.hard_limit = thread_info.max_time;
   thread_info.time_manager.soft_limit = thread_info.opt_time;
-  thread_info.max_nodes_searched = thread_info.opt_nodes_searched = UINT64_MAX / 2;
+  thread_info.max_nodes_searched = thread_info.opt_nodes_searched =
+      UINT64_MAX / 2;
   thread_info.is_movetime = false;
   thread_info.pondering = false;
   thread_data.pondering = false;
@@ -162,7 +166,7 @@ inline void bench(BoardState &position, ThreadInfo &thread_info, int depth = 12)
 }
 
 inline void uci(ThreadInfo &thread_info, BoardState &position,
-         std::istream &in_stream = std::cin, bool interactive = true) {
+                std::istream &in_stream = std::cin, bool interactive = true) {
   setvbuf(stdin, NULL, _IONBF, 0);
   setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -170,15 +174,17 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
   set_board(position, thread_info,
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
   if (!load_embedded_nnue()) {
-    std::cerr << "no nnue binary found" << std::endl;
-    std::exit(1);
+    std::exit(EXIT_FAILURE);
   }
 
   std::string input;
 
   std::thread s;
 
-  auto safe_join = [](std::thread &t) { if (t.joinable()) t.join(); };
+  auto safe_join = [](std::thread &t) {
+    if (t.joinable())
+      t.join();
+  };
   auto stop_search = [&](bool emit_bm = false) {
     {
       std::lock_guard lock(thread_data.control_mutex);
@@ -189,19 +195,30 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     safe_join(s);
   };
   auto init_tablebases = [&] {
-    if (tb_initialized) tb_free();
+    if (tb_initialized)
+      tb_free();
     tb_initialized = false;
     if (thread_info.use_syzygy && !thread_info.syzygy_path.empty()) {
-      tb_initialized = tb_init(thread_info.syzygy_path.c_str()) && TB_LARGEST > 0;
-      safe_printf("info string Syzygy %s (largest %u)\n", tb_initialized ? "loaded" : "unavailable", TB_LARGEST);
+      tb_initialized =
+          tb_init(thread_info.syzygy_path.c_str()) && TB_LARGEST > 0;
+      if (!tb_initialized)
+        std::exit(EXIT_FAILURE);
     }
   };
   auto init_book = [&] {
     thread_info.opening_book.clear_book();
     if (thread_info.use_opening_book && !thread_info.book_path.empty()) {
-      const bool loaded = thread_info.opening_book.load_book(thread_info.book_path);
-      safe_printf("info string Opening book %s\n", loaded ? "loaded" : "unavailable");
+      const bool loaded =
+          thread_info.opening_book.load_book(thread_info.book_path);
+      if (!loaded)
+        std::exit(EXIT_FAILURE);
     }
+  };
+  auto require_search_assets = [&] {
+    if (thread_info.use_syzygy && !tb_initialized)
+      std::exit(EXIT_FAILURE);
+    if (thread_info.use_opening_book && !thread_info.opening_book.is_loaded())
+      std::exit(EXIT_FAILURE);
   };
 
   while (getline(in_stream, input)) {
@@ -216,9 +233,11 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
     input_stream >> std::skipws >> command;
 
-    if (command == "setoption" || command == "ucinewgame" || command == "position" ||
-        command == "go" || command == "bench" || command == "perft" || command == "eval" ||
-        command == "flip" || command == "hashfull" || command == "d" || command == "printparams") stop_search(false);
+    if (command == "setoption" || command == "ucinewgame" ||
+        command == "position" || command == "go" || command == "bench" ||
+        command == "perft" || command == "eval" || command == "flip" ||
+        command == "hashfull" || command == "d" || command == "printparams")
+      stop_search(false);
 
     if (command == "d") {
       print_board(position);
@@ -258,21 +277,28 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
           "option name RazorMargin type spin default 140 min 100 max 500\n"
           "option name HistPruneDepth type spin default 4 min 2 max 8\n"
-          "option name HistPruneThreshold type spin default 6196 min 1000 max 8000\n"
+          "option name HistPruneThreshold type spin default 1200 min 800 max "
+          "2000\n"
           "option name ProbCutMargin type spin default 191 min 100 max 500\n"
           "option name MultiCutDepth type spin default 4 min 3 max 10\n"
           "option name MultiCutMoves type spin default 6 min 2 max 8\n"
           "option name MultiCutCuts type spin default 3 min 1 max 5\n"
-          "option name HistExtThreshold type spin default 7000 min 3000 max 15000\n"
+          "option name HistExtThreshold type spin default 7000 min 3000 max "
+          "15000\n"
           "option name DeltaMarginBase type spin default 180 min 50 max 400\n"
-          "option name NormalizationFactor type spin default 195 min 50 max 500\n"
-          "option name HalfmoveScaleMax type spin default 200 min 50 max 500\n");
+          "option name NormalizationFactor type spin default 195 min 50 max "
+          "500\n"
+          "option name HalfmoveScaleMax type spin default 200 min 50 max "
+          "500\n");
 
-      safe_printf("option name MaxDepth type spin default 0 min 0 max %d\n", MaxRootDepth);
+      safe_printf("option name MaxDepth type spin default 0 min 0 max %d\n",
+                  MaxRootDepth);
       for (const auto &param : params) {
         if (param.name == "RazorMargin" || param.name == "ProbCutMargin" ||
-            param.name == "MultiCutDepth" || param.name == "MultiCutMoves" || param.name == "MultiCutCuts" ||
-            param.name == "HistPruneDepth" || param.name == "HistPruneThreshold") continue;
+            param.name == "MultiCutDepth" || param.name == "MultiCutMoves" ||
+            param.name == "MultiCutCuts" || param.name == "HistPruneDepth" ||
+            param.name == "HistPruneThreshold")
+          continue;
         safe_printf("option name %s type spin default %d min %d max %d\n",
                     param.name.c_str(), param.value, param.min, param.max);
       }
@@ -311,8 +337,13 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       }
 
       const auto first = valueStr.find_first_not_of(" \t\r");
-      valueStr = first == std::string::npos ? "" : valueStr.substr(first, valueStr.find_last_not_of(" \t\r") - first + 1);
-      if (valueStr == "<empty>" || valueStr == "\"\"") valueStr.clear();
+      valueStr =
+          first == std::string::npos
+              ? ""
+              : valueStr.substr(first,
+                                valueStr.find_last_not_of(" \t\r") - first + 1);
+      if (valueStr == "<empty>" || valueStr == "\"\"")
+        valueStr.clear();
 
       auto parse_int = [](const std::string &s, bool &ok) {
         try {
@@ -337,24 +368,30 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         }
       };
       auto to_bool = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+          return static_cast<char>(std::tolower(c));
+        });
         return s == "true" || s == "1" || s == "yes" || s == "on";
       };
       auto set_spin = [&](int lo, int hi, int &out) {
         bool ok = false;
         int v = parse_int(valueStr, ok);
-        if (ok) out = std::clamp(v, lo, hi);
+        if (ok)
+          out = std::clamp(v, lo, hi);
       };
       auto set_spin_req = [&](int lo, int hi, int &out) -> bool {
         bool ok = false;
         int v = parse_int(valueStr, ok);
-        if (!ok) return false;
+        if (!ok)
+          return false;
         out = std::clamp(v, lo, hi);
         return true;
       };
 
       auto lowercase = [](std::string value) {
-        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::transform(
+            value.begin(), value.end(), value.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         return value;
       };
       optName = lowercase(optName);
@@ -363,10 +400,12 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       }
 
       if (optName == "uci_chess960" || optName == "ponder" ||
-          optName == "usesyzygy" || optName == "syzygy50moverule" || optName == "useopeningbook") {
+          optName == "usesyzygy" || optName == "syzygy50moverule" ||
+          optName == "useopeningbook") {
         const auto value = lowercase(valueStr);
-        if (value != "true" && value != "false" && value != "1" && value != "0" &&
-            value != "yes" && value != "no" && value != "on" && value != "off") {
+        if (value != "true" && value != "false" && value != "1" &&
+            value != "0" && value != "yes" && value != "no" && value != "on" &&
+            value != "off") {
           continue;
         }
       }
@@ -388,23 +427,25 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           thread_data.threads.reserve(thr - 1);
           thread_data.thread_infos.swap(workers);
         } catch (const std::bad_alloc &) {
-          std::cerr << "Failed to allocate search threads." << std::endl;
           std::exit(EXIT_FAILURE);
         }
       } else if (optName == "multipv") {
         int mv;
-        if (!set_spin_req(1, 256, mv)) continue;
+        if (!set_spin_req(1, 256, mv))
+          continue;
         thread_info.multipv = static_cast<uint16_t>(mv);
       } else if (optName == "uci_chess960") {
         bool b = to_bool(valueStr);
         thread_data.is_frc = b;
       } else if (optName == "maxmovetime") {
         int v;
-        if (!set_spin_req(0, 10000, v)) continue;
+        if (!set_spin_req(0, 10000, v))
+          continue;
         thread_info.max_move_time = static_cast<uint64_t>(v);
       } else if (optName == "moveoverhead") {
         int v;
-        if (!set_spin_req(0, 1000, v)) continue;
+        if (!set_spin_req(0, 1000, v))
+          continue;
         thread_info.move_overhead = static_cast<uint64_t>(v);
       } else if (optName == "ponder") {
         thread_info.use_ponder = to_bool(valueStr);
@@ -415,12 +456,14 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         }
       } else if (optName == "maxdepth") {
         int v;
-        if (!set_spin_req(0, MaxRootDepth, v)) continue;
+        if (!set_spin_req(0, MaxRootDepth, v))
+          continue;
         thread_info.max_depth = static_cast<uint16_t>(v);
       } else if (optName == "maxnodes") {
         bool ok = false;
         uint64_t v = parse_uint64(valueStr, ok);
-        if (!ok) continue;
+        if (!ok)
+          continue;
         thread_info.max_nodes = std::min(v, uint64_t{500000});
       } else if (optName == "usesyzygy") {
         thread_info.use_syzygy = to_bool(valueStr);
@@ -429,9 +472,11 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         thread_info.syzygy_path = valueStr;
         init_tablebases();
       } else if (optName == "syzygyprobedepth") {
-        if (!set_spin_req(1, 64, thread_info.syzygy_probe_depth)) continue;
+        if (!set_spin_req(1, 64, thread_info.syzygy_probe_depth))
+          continue;
       } else if (optName == "syzygyprobelimit") {
-        if (!set_spin_req(1, 7, thread_info.syzygy_probe_limit)) continue;
+        if (!set_spin_req(1, 7, thread_info.syzygy_probe_limit))
+          continue;
       } else if (optName == "syzygy50moverule") {
         thread_info.syzygy_50_move_rule = to_bool(valueStr);
       } else if (optName == "useopeningbook") {
@@ -441,11 +486,14 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         thread_info.book_path = valueStr;
         init_book();
       } else if (optName == "bookdepthlimit") {
-        if (!set_spin_req(0, 50, thread_info.book_depth_limit)) continue;
+        if (!set_spin_req(0, 50, thread_info.book_depth_limit))
+          continue;
       } else if (optName == "bookminweight") {
-        if (!set_spin_req(0, 1000, thread_info.book_min_weight)) continue;
+        if (!set_spin_req(0, 1000, thread_info.book_min_weight))
+          continue;
       } else if (optName == "pondertimefactor") {
-        if (!set_spin_req(0, 200, thread_info.ponder_time_factor)) continue;
+        if (!set_spin_req(0, 200, thread_info.ponder_time_factor))
+          continue;
       } else if (optName == "histextthreshold")
         set_spin(3000, 15000, HistExtThreshold);
       else if (optName == "deltamarginbase")
@@ -540,7 +588,9 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
             break;
           }
           if (thread_info.game_ply >= MaxGameLen - MaxSearchPly - 2) {
-            std::move(thread_info.game_hist.begin() + MaxGameLen / 2, thread_info.game_hist.end(), thread_info.game_hist.begin());
+            std::move(thread_info.game_hist.begin() + MaxGameLen / 2,
+                      thread_info.game_hist.end(),
+                      thread_info.game_hist.begin());
             thread_info.game_ply -= MaxGameLen / 2;
           }
 
@@ -564,12 +614,12 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         }
 
         thread_info.search_ply = 0;
-
       }
 
     }
 
     else if (command == "go") {
+      require_search_assets();
       thread_info.start_time = std::chrono::steady_clock::now();
       thread_info.infinite_search = false;
 
@@ -624,8 +674,8 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
             !valid_rank(s[3]))
           return false;
         if (s.size() == 5) {
-          char promo = static_cast<char>(
-              std::tolower(static_cast<unsigned char>(s[4])));
+          char promo =
+              static_cast<char>(std::tolower(static_cast<unsigned char>(s[4])));
           if (promo != 'q' && promo != 'r' && promo != 'b' && promo != 'n')
             return false;
         }
@@ -650,9 +700,8 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           thread_info.opt_time = UINT64_MAX;
           thread_info.infinite_search = true;
         } else if (token == "wtime" || token == "btime" || token == "winc" ||
-                   token == "binc" || token == "movestogo" ||
-                   token == "mate" || token == "depth" ||
-                   token == "movetime") {
+                   token == "binc" || token == "movestogo" || token == "mate" ||
+                   token == "depth" || token == "movetime") {
           if (i + 1 >= go_tokens.size())
             continue;
 
@@ -685,7 +734,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
             move_time = std::max(1, value);
           }
           ++i;
-          } else if (token == "nodes") {
+        } else if (token == "nodes") {
           if (i + 1 >= go_tokens.size())
             continue;
           uint64_t nodes = 0;
@@ -693,7 +742,8 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
             nodes = std::max<uint64_t>(1, nodes);
             thread_info.max_nodes_searched = nodes;
-            thread_info.opt_nodes_searched = std::max<uint64_t>(1, nodes / 10 * 8);
+            thread_info.opt_nodes_searched =
+                std::max<uint64_t>(1, nodes / 10 * 8);
           }
           ++i;
         } else if (token == "searchmoves") {
@@ -713,23 +763,42 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         }
       }
 
+      if (!interactive) {
+        const bool bound = thread_info.max_iter_depth != MaxRootDepth ||
+                           thread_info.mate_search > 0 || move_time >= 0 || time >= 0 ||
+                           thread_info.max_nodes_searched != UINT64_MAX / 2;
+        if (thread_info.infinite_search)
+          std::exit(EXIT_FAILURE);
+        if (thread_info.pondering.load())
+          std::exit(EXIT_FAILURE);
+        if (!bound)
+          std::exit(EXIT_FAILURE);
+      }
+
       constexpr uint64_t unlimited = UINT64_MAX / 2;
       thread_info.max_time = thread_info.opt_time = unlimited;
       thread_info.is_movetime = (move_time >= 0);
       if (!thread_info.infinite_search) {
         if (move_time >= 0) {
-          const auto overhead = std::min<uint64_t>(thread_info.move_overhead, static_cast<uint64_t>(move_time / 10));
-          thread_info.max_time = thread_info.opt_time = std::max<uint64_t>(1, static_cast<uint64_t>(move_time) - overhead);
+          const auto overhead = std::min<uint64_t>(
+              thread_info.move_overhead, static_cast<uint64_t>(move_time / 10));
+          thread_info.max_time = thread_info.opt_time = std::max<uint64_t>(
+              1, static_cast<uint64_t>(move_time) - overhead);
         } else if (time >= 0) {
-          const auto overhead = std::min<uint64_t>(thread_info.move_overhead, static_cast<uint64_t>(time / 10));
-          const uint64_t usable = std::max<uint64_t>(1, static_cast<uint64_t>(time) - overhead);
-          thread_info.time_manager.initialize(usable, increment, movestogo, position.fullmove);
+          const auto overhead = std::min<uint64_t>(
+              thread_info.move_overhead, static_cast<uint64_t>(time / 10));
+          const uint64_t usable =
+              std::max<uint64_t>(1, static_cast<uint64_t>(time) - overhead);
+          thread_info.time_manager.initialize(usable, increment, movestogo,
+                                              position.fullmove);
           thread_info.max_time = thread_info.time_manager.hard_limit;
           thread_info.opt_time = thread_info.time_manager.soft_limit;
         }
         if (thread_info.max_move_time > 0) {
-          thread_info.max_time = std::min(thread_info.max_time, thread_info.max_move_time);
-          thread_info.opt_time = std::min(thread_info.opt_time, thread_info.max_time);
+          thread_info.max_time =
+              std::min(thread_info.max_time, thread_info.max_move_time);
+          thread_info.opt_time =
+              std::min(thread_info.opt_time, thread_info.max_time);
         }
       }
       thread_info.time_manager.allocated_time = thread_info.opt_time;
@@ -738,20 +807,23 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       thread_info.time_manager.hard_limit = thread_info.max_time;
       thread_data.pondering = thread_info.pondering.load();
 
-      if (!thread_info.infinite_search && !searchmoves_specified && !thread_info.pondering &&
-          thread_info.use_opening_book &&
+      if (!thread_info.infinite_search && !searchmoves_specified &&
+          !thread_info.pondering && thread_info.use_opening_book &&
           thread_info.opening_book.is_loaded() &&
           (thread_info.book_depth_limit == 0 ||
-           uint64_t(position.fullmove - 1) * 2 + position.color < static_cast<uint64_t>(thread_info.book_depth_limit))) {
+           uint64_t(position.fullmove - 1) * 2 + position.color <
+               static_cast<uint64_t>(thread_info.book_depth_limit))) {
 
-        const uint64_t book_key = thread_info.opening_book.polyglot_key(position);
+        const uint64_t book_key =
+            thread_info.opening_book.polyglot_key(position);
         Action book_move = thread_info.opening_book.probe_book(
             position, thread_info.book_min_weight);
 
         if (book_move != MoveNone) {
-          const bool seen = std::find(thread_info.recent_book_keys.begin(),
-                                      thread_info.recent_book_keys.end(),
-                                      book_key) != thread_info.recent_book_keys.end();
+          const bool seen =
+              std::find(thread_info.recent_book_keys.begin(),
+                        thread_info.recent_book_keys.end(),
+                        book_key) != thread_info.recent_book_keys.end();
           if (seen) {
             static thread_local std::mt19937 rng(Random::rd());
             if ((std::uniform_int_distribution<int>(0, 99)(rng)) < 50) {
@@ -768,9 +840,9 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         if (book_move != MoveNone) {
           std::array<Action, MaxActions> legal_moves{};
           const int num_legal = legal_movegen(position, legal_moves.data());
-          const bool is_legal = std::find(legal_moves.begin(),
-                                          legal_moves.begin() + num_legal,
-                                          book_move) != (legal_moves.begin() + num_legal);
+          const bool is_legal =
+              std::find(legal_moves.begin(), legal_moves.begin() + num_legal,
+                        book_move) != (legal_moves.begin() + num_legal);
           if (is_legal) {
             const std::string bm = internal_to_uci(position, book_move);
             safe_printf("bestmove %s\n", bm.c_str());
@@ -810,14 +882,20 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
     else if (command == "ponderhit") {
       if (thread_data.pondering) {
-        thread_data.ponder_hit_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        { std::lock_guard lock(thread_data.control_mutex); thread_data.pondering = false; }
+        thread_data.ponder_hit_time =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        {
+          std::lock_guard lock(thread_data.control_mutex);
+          thread_data.pondering = false;
+        }
         thread_data.control_cv.notify_all();
       }
     }
 
     else if (command == "bench") {
+      require_search_assets();
       int depth = 12;
       input_stream >> depth;
       bench(position, thread_info, depth);
@@ -825,7 +903,8 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
 
     else if (command == "perft") {
       int perft_depth = 0;
-      if ((input_stream >> perft_depth) && perft_depth >= 0 && perft_depth <= 10) {
+      if ((input_stream >> perft_depth) && perft_depth >= 0 &&
+          perft_depth <= 10) {
         const auto perft_start = std::chrono::steady_clock::now();
         const uint64_t nodes = perft(perft_depth, position, true, thread_info);
         const uint64_t elapsed_ms = time_elapsed(perft_start);
@@ -835,13 +914,13 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     }
 
     else if (command == "eval") {
-      if (nnue_loaded) {
-        thread_info.nnue_state.reset_nnue(position);
-        const int piece_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
-        const int raw = thread_info.nnue_state.evaluate(position.color, piece_count);
-        safe_printf("NNUE raw: %d (eval: %d cp)\n",
-                    raw, raw * 100 / NormalizationFactor);
-      }
+      thread_info.nnue_state.reset_nnue(position);
+      const int piece_count =
+          pop_count(position.colors_bb[0] | position.colors_bb[1]);
+      const int raw =
+          thread_info.nnue_state.evaluate(position.color, piece_count);
+      safe_printf("NNUE raw: %d (eval: %d cp)\n", raw,
+                  raw * 100 / NormalizationFactor);
     }
 
     else if (command == "flip") {
@@ -874,8 +953,13 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     }
   }
 
-  if (interactive) stop_search(false);
-  else safe_join(s);
+  if (interactive)
+    stop_search(false);
+  else
+    safe_join(s);
   thread_data.stop = true;
-  if (tb_initialized) { tb_free(); tb_initialized = false; }
+  if (tb_initialized) {
+    tb_free();
+    tb_initialized = false;
+  }
 }

@@ -30,7 +30,7 @@ std::vector<std::string_view> collect_args(int argc, char* argv[]) {
 std::optional<int> handle_cli_mode(const std::vector<std::string_view>& args,
                                    BoardState& position,
                                    ThreadInfo& thread_info) {
-    if (args.size() <= 1 || args[1] == "uci") {
+    if (args.size() <= 1) {
         return std::nullopt;
     }
 

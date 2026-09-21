@@ -19,11 +19,10 @@ struct MovePicker {
   MoveInfo captures{};
   MoveInfo quiets{};
   MoveInfo bad_captures{};
-  StateRecord *ss = nullptr;
 };
 
 inline void init_picker(MovePicker &picker, [[maybe_unused]] const Position &position,
-                        int threshold, uint64_t checkers, StateRecord *ss) noexcept {
+                        int threshold, uint64_t checkers) noexcept {
   picker.see_threshold = threshold;
   picker.stage = Stages::TT;
   picker.checkers = checkers;
@@ -31,7 +30,6 @@ inline void init_picker(MovePicker &picker, [[maybe_unused]] const Position &pos
   picker.captures.len = 0;
   picker.quiets.len = 0;
   picker.bad_captures.len = 0;
-  picker.ss = ss;
 }
 
 inline Action next_move(MovePicker &picker, const Position &position,

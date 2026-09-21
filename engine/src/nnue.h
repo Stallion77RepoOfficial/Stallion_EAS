@@ -4,10 +4,15 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 
-#if defined(__ARM_NEON) || defined(__aarch64__)
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+#include <immintrin.h>
+#define STALLION_SIMD_AVX512 1
+#elif defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
 #define STALLION_SIMD_NEON 1
 #elif defined(__AVX2__)
@@ -21,7 +26,6 @@
 #define STALLION_SIMD_SSE2 1
 #endif
 
-constexpr size_t KING_BUCKETS = 16;
 constexpr size_t INPUT_SIZE = NNUE_INPUT_SIZE; // 13316 = 12288 base + 1028 extra
 constexpr size_t LAYER1_SIZE = 1024;
 
@@ -45,7 +49,7 @@ constexpr int QA = 255;
 constexpr int QB = 64;
 constexpr int QAB = QA * QB;
 
-constexpr size_t OUTPUT_BUCKETS = 8;
+constexpr size_t OUTPUT_BUCKETS = 16;
 
 struct alignas(64) NNUE_Params {
   std::array<int16_t, INPUT_SIZE * LAYER1_SIZE> feature_v;
@@ -57,7 +61,6 @@ struct alignas(64) NNUE_Params {
 inline std::unique_ptr<NNUE_Params> g_nnue_data = nullptr;
 
 inline const NNUE_Params *g_nnue = nullptr;
-inline bool nnue_loaded = false;
 
 extern "C" {
 extern const unsigned char stallion_nnue[];
@@ -65,7 +68,7 @@ extern const unsigned char stallion_nnue_end[];
 }
 
 inline std::unique_ptr<NNUE_Params> read_nnue_embedded() {
-  // Only the 8-output-bucket format is supported. The bytes come from the
+  // Only the 16-output-bucket format is supported. The bytes come from the
   // embedded net (net_embed.S); no network file is read at runtime.
   constexpr size_t words = INPUT_SIZE * LAYER1_SIZE + LAYER1_SIZE + OUTPUT_BUCKETS * LAYER1_SIZE * 2 + OUTPUT_BUCKETS;
   constexpr size_t payload = words * 2;
@@ -102,24 +105,24 @@ inline bool load_embedded_nnue() {
   if (net) {
     g_nnue_data = std::move(net);
     g_nnue = g_nnue_data.get();
-    nnue_loaded = true;
     return true;
   }
   return false;
 }
 
-constexpr inline std::pair<size_t, size_t> feature_indices(int piece, int sq, size_t w_bucket = 0, size_t b_bucket = 0) noexcept {
-  if (piece < Pieces::WPawn || piece > Pieces::BKing || !is_valid_square(sq)) {
-    return {0, 0};
+constexpr inline std::pair<size_t, size_t> feature_indices(int piece, int sq, size_t w_bucket, size_t b_bucket) noexcept {
+  if (piece < Pieces::WPawn || piece > Pieces::BKing || !is_valid_square(sq) ||
+      w_bucket >= NNUE_KING_BUCKETS || b_bucket >= NNUE_KING_BUCKETS) {
+    std::exit(EXIT_FAILURE);
   }
-  constexpr size_t color_stride = 384;
-  constexpr size_t piece_stride = 64;
+  constexpr size_t color_stride = NNUE_FEATURES_PER_COLOR;
+  constexpr size_t piece_stride = NNUE_FEATURES_PER_PIECE;
 
   const size_t base = static_cast<size_t>((piece >> 1) - 1);
   const size_t color = static_cast<size_t>(piece & 1);
 
-  const size_t whiteIdx = w_bucket * 768 + color * color_stride + base * piece_stride + static_cast<size_t>(sq);
-  const size_t blackIdx = b_bucket * 768 + (color ^ 1) * color_stride + base * piece_stride + static_cast<size_t>(sq ^ 56);
+  const size_t whiteIdx = w_bucket * NNUE_FEATURES_PER_KING_BUCKET + color * color_stride + base * piece_stride + static_cast<size_t>(sq);
+  const size_t blackIdx = b_bucket * NNUE_FEATURES_PER_KING_BUCKET + (color ^ 1) * color_stride + base * piece_stride + static_cast<size_t>(sq ^ 56);
 
   return {whiteIdx, blackIdx};
 }
@@ -156,7 +159,32 @@ constexpr inline int32_t screlu(int32_t x) noexcept {
 inline int64_t screlu_flatten(const std::array<int32_t, LAYER1_SIZE> &us,
                              const std::array<int32_t, LAYER1_SIZE> &them,
                              const std::array<int16_t, LAYER1_SIZE * 2> &weights) noexcept {
-#if defined(STALLION_SIMD_AVX2)
+#if defined(STALLION_SIMD_AVX512)
+  const __m512i zero = _mm512_setzero_si512();
+  const __m512i max255 = _mm512_set1_epi32(255);
+  __m512i acc64 = _mm512_setzero_si512();
+
+  auto process = [&](const int32_t *acc_in, const int16_t *w_in) noexcept {
+    for (size_t i = 0; i < LAYER1_SIZE; i += 16) {
+      __m512i a = _mm512_loadu_si512(reinterpret_cast<const void *>(acc_in + i));
+      a = _mm512_min_epi32(_mm512_max_epi32(a, zero), max255);
+      __m512i sq = _mm512_mullo_epi32(a, a);
+
+      __m256i w16 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(w_in + i));
+      __m512i w = _mm512_cvtepi16_epi32(w16);
+
+      __m512i prod = _mm512_mullo_epi32(sq, w);
+      acc64 = _mm512_add_epi64(acc64, _mm512_cvtepi32_epi64(_mm512_castsi512_si256(prod)));
+      acc64 = _mm512_add_epi64(acc64, _mm512_cvtepi32_epi64(_mm512_extracti64x4_epi64(prod, 1)));
+    }
+  };
+
+  process(us.data(), weights.data());
+  process(them.data(), weights.data() + LAYER1_SIZE);
+
+  return _mm512_reduce_add_epi64(acc64) / QA;
+
+#elif defined(STALLION_SIMD_AVX2)
   const __m256i zero = _mm256_setzero_si256();
   const __m256i max255 = _mm256_set1_epi32(255);
   __m256i acc64 = _mm256_setzero_si256();
@@ -239,6 +267,44 @@ inline int64_t screlu_flatten(const std::array<int32_t, LAYER1_SIZE> &us,
   int64_t total = vgetq_lane_s64(total2, 0) + vgetq_lane_s64(total2, 1);
   return total / QA;
 
+#elif defined(STALLION_SIMD_SSSE3) || defined(STALLION_SIMD_SSE2)
+  const __m128i zero = _mm_setzero_si128();
+  const __m128i max255 = _mm_set1_epi32(255);
+  __m128i acc_lo = _mm_setzero_si128();
+  __m128i acc_hi = _mm_setzero_si128();
+
+  auto process = [&](const int32_t *acc_in, const int16_t *w_in) noexcept {
+    for (size_t i = 0; i < LAYER1_SIZE; i += 4) {
+      __m128i a = _mm_loadu_si128(reinterpret_cast<const __m128i *>(acc_in + i));
+      __m128i neg = _mm_cmpgt_epi32(zero, a);
+      a = _mm_andnot_si128(neg, a);
+      __m128i over = _mm_cmpgt_epi32(a, max255);
+      a = _mm_or_si128(_mm_and_si128(over, max255), _mm_andnot_si128(over, a));
+
+      __m128i a16 = _mm_packs_epi32(a, a);
+      __m128i sq = _mm_mullo_epi16(a16, a16);
+      __m128i w16 = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(w_in + i));
+      __m128i wneg = _mm_cmpgt_epi16(zero, w16);
+      __m128i wabs = _mm_sub_epi16(_mm_xor_si128(w16, wneg), wneg);
+      __m128i mlo = _mm_mullo_epi16(sq, wabs);
+      __m128i mhi = _mm_mulhi_epu16(sq, wabs);
+      __m128i prod = _mm_unpacklo_epi16(mlo, mhi);
+      __m128i sgn32 = _mm_unpacklo_epi16(wneg, wneg);
+      prod = _mm_sub_epi32(_mm_xor_si128(prod, sgn32), sgn32);
+
+      __m128i psign = _mm_cmpgt_epi32(zero, prod);
+      acc_lo = _mm_add_epi64(acc_lo, _mm_unpacklo_epi32(prod, psign));
+      acc_hi = _mm_add_epi64(acc_hi, _mm_unpackhi_epi32(prod, psign));
+    }
+  };
+
+  process(us.data(), weights.data());
+  process(them.data(), weights.data() + LAYER1_SIZE);
+
+  __m128i sum2 = _mm_add_epi64(acc_lo, acc_hi);
+  int64_t total = _mm_cvtsi128_si64(sum2) + _mm_cvtsi128_si64(_mm_srli_si128(sum2, 8));
+  return total / QA;
+
 #else
   int64_t sum = 0;
   #pragma unroll 4
@@ -261,13 +327,16 @@ public:
   int m_pre_nw[MaxSearchDepth]{};
   int m_pre_nb[MaxSearchDepth]{};
   int m_idx = 0;
+  bool m_initialized = false;
 
   NNUE_State() = default;
   NNUE_State(const NNUE_State &other) noexcept { *this = other; }
   NNUE_State &operator=(const NNUE_State &other) noexcept {
     if (this != &other) {
       m_idx = other.m_idx;
-      std::copy_n(other.m_accumulator_stack, m_idx + 1, m_accumulator_stack);
+      m_initialized = other.m_initialized;
+      if (m_initialized)
+        std::copy_n(other.m_accumulator_stack, m_idx + 1, m_accumulator_stack);
       std::copy_n(other.m_w_bucket, m_idx + 1, m_w_bucket);
       std::copy_n(other.m_b_bucket, m_idx + 1, m_b_bucket);
       std::copy_n(&other.m_pre_w[0][0], (m_idx + 1) * NNUE_EXTRA_SLOTS, &m_pre_w[0][0]);
@@ -280,31 +349,33 @@ public:
   }
 
   inline void store_extra_lists(const BoardState &position, int level) noexcept {
-    if (level < 0 || level >= MaxSearchDepth) return;
+    if (level < 0 || level >= MaxSearchDepth) std::exit(EXIT_FAILURE);
     int buf[NNUE_EXTRA_SLOTS];
     int nw = collect_extra_features(position.board.data(), position.colors_bb.data(),
                                     position.pieces_bb.data(), false, buf, NNUE_EXTRA_SLOTS);
-    m_pre_nw[level] = nw < 0 ? 0 : nw;
+    if (nw < 0) std::exit(EXIT_FAILURE);
+    m_pre_nw[level] = nw;
     for (int i = 0; i < m_pre_nw[level]; ++i) m_pre_w[level][i] = static_cast<int16_t>(buf[i]);
     int nb = collect_extra_features(position.board.data(), position.colors_bb.data(),
                                     position.pieces_bb.data(), true, buf, NNUE_EXTRA_SLOTS);
-    m_pre_nb[level] = nb < 0 ? 0 : nb;
+    if (nb < 0) std::exit(EXIT_FAILURE);
+    m_pre_nb[level] = nb;
     for (int i = 0; i < m_pre_nb[level]; ++i) m_pre_b[level][i] = static_cast<int16_t>(buf[i]);
   }
 
   inline void pop() noexcept {
-    if (m_idx > 0) {
-      --m_idx;
-      m_curr = &m_accumulator_stack[m_idx];
-    }
+    if (!g_nnue || !m_initialized) std::exit(EXIT_FAILURE);
+    if (m_idx <= 0) std::exit(EXIT_FAILURE);
+    --m_idx;
+    m_curr = &m_accumulator_stack[m_idx];
   }
 
   inline void add_extra_view(const BoardState &position, bool flip) noexcept {
-    if (!g_nnue || !nnue_loaded) return;
+    if (!g_nnue) std::exit(EXIT_FAILURE);
     int extra[NNUE_EXTRA_SLOTS];
     const int n = collect_extra_features(position.board.data(), position.colors_bb.data(),
                                          position.pieces_bb.data(), flip, extra, NNUE_EXTRA_SLOTS);
-    if (n < 0) return;
+    if (n < 0) std::exit(EXIT_FAILURE);
     auto &acc = flip ? m_curr->black : m_curr->white;
     const int16_t *F = g_nnue->feature_v.data();
     for (int k = 0; k < n; ++k) {
@@ -318,12 +389,35 @@ public:
 
   inline void apply_extra_delta(const int *rem_w, int nrw, const int *add_w, int naw,
                                 const int *rem_b, int nrb, const int *add_b, int nab) noexcept {
-    if (!g_nnue || !nnue_loaded) return;
+    if (!g_nnue || !m_initialized) std::exit(EXIT_FAILURE);
     const int16_t *F = g_nnue->feature_v.data();
     auto *W = m_curr->white.data();
     auto *B = m_curr->black.data();
 
-#if defined(STALLION_SIMD_NEON)
+#if defined(STALLION_SIMD_AVX512)
+    auto vec_sub = [](int32_t *acc, const int16_t *f) noexcept {
+      for (size_t i = 0; i < LAYER1_SIZE; i += 16) {
+        __m256i f16 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(f + i));
+        __m512i f32 = _mm512_cvtepi16_epi32(f16);
+        __m512i a = _mm512_loadu_si512(reinterpret_cast<const void *>(acc + i));
+        _mm512_storeu_si512(reinterpret_cast<void *>(acc + i), _mm512_sub_epi32(a, f32));
+      }
+    };
+    auto vec_add = [](int32_t *acc, const int16_t *f) noexcept {
+      for (size_t i = 0; i < LAYER1_SIZE; i += 16) {
+        __m256i f16 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(f + i));
+        __m512i f32 = _mm512_cvtepi16_epi32(f16);
+        __m512i a = _mm512_loadu_si512(reinterpret_cast<const void *>(acc + i));
+        _mm512_storeu_si512(reinterpret_cast<void *>(acc + i), _mm512_add_epi32(a, f32));
+      }
+    };
+
+    for (int k = 0; k < nrw; ++k) vec_sub(W, F + static_cast<size_t>(rem_w[k]) * LAYER1_SIZE);
+    for (int k = 0; k < naw; ++k) vec_add(W, F + static_cast<size_t>(add_w[k]) * LAYER1_SIZE);
+    for (int k = 0; k < nrb; ++k) vec_sub(B, F + static_cast<size_t>(rem_b[k]) * LAYER1_SIZE);
+    for (int k = 0; k < nab; ++k) vec_add(B, F + static_cast<size_t>(add_b[k]) * LAYER1_SIZE);
+
+#elif defined(STALLION_SIMD_NEON)
     auto vec_sub = [](int32_t *acc, const int16_t *f) noexcept {
       for (size_t i = 0; i < LAYER1_SIZE; i += 8) {
         int16x8_t f_raw = vld1q_s16(f + i);
@@ -383,6 +477,33 @@ public:
     for (int k = 0; k < nrb; ++k) vec_sub(B, F + static_cast<size_t>(rem_b[k]) * LAYER1_SIZE);
     for (int k = 0; k < nab; ++k) vec_add(B, F + static_cast<size_t>(add_b[k]) * LAYER1_SIZE);
 
+#elif defined(STALLION_SIMD_SSSE3) || defined(STALLION_SIMD_SSE2)
+    auto vec_sub = [](int32_t *acc, const int16_t *f) noexcept {
+      const __m128i zero = _mm_setzero_si128();
+      for (size_t i = 0; i < LAYER1_SIZE; i += 4) {
+        __m128i f16 = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(f + i));
+        __m128i sgn = _mm_cmpgt_epi16(zero, f16);
+        __m128i f32 = _mm_unpacklo_epi16(f16, sgn);
+        __m128i a = _mm_loadu_si128(reinterpret_cast<const __m128i *>(acc + i));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(acc + i), _mm_sub_epi32(a, f32));
+      }
+    };
+    auto vec_add = [](int32_t *acc, const int16_t *f) noexcept {
+      const __m128i zero = _mm_setzero_si128();
+      for (size_t i = 0; i < LAYER1_SIZE; i += 4) {
+        __m128i f16 = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(f + i));
+        __m128i sgn = _mm_cmpgt_epi16(zero, f16);
+        __m128i f32 = _mm_unpacklo_epi16(f16, sgn);
+        __m128i a = _mm_loadu_si128(reinterpret_cast<const __m128i *>(acc + i));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(acc + i), _mm_add_epi32(a, f32));
+      }
+    };
+
+    for (int k = 0; k < nrw; ++k) vec_sub(W, F + static_cast<size_t>(rem_w[k]) * LAYER1_SIZE);
+    for (int k = 0; k < naw; ++k) vec_add(W, F + static_cast<size_t>(add_w[k]) * LAYER1_SIZE);
+    for (int k = 0; k < nrb; ++k) vec_sub(B, F + static_cast<size_t>(rem_b[k]) * LAYER1_SIZE);
+    for (int k = 0; k < nab; ++k) vec_add(B, F + static_cast<size_t>(add_b[k]) * LAYER1_SIZE);
+
 #else
     for (int k = 0; k < nrw; ++k) {
       const int16_t *f = F + static_cast<size_t>(rem_w[k]) * LAYER1_SIZE;
@@ -404,7 +525,7 @@ public:
   }
 
   inline void push_null() noexcept {
-    if (m_idx >= MaxSearchDepth - 1 || !g_nnue || !nnue_loaded) return;
+    if (!g_nnue || !m_initialized || m_idx < 0 || m_idx >= MaxSearchDepth - 1) std::exit(EXIT_FAILURE);
     m_accumulator_stack[m_idx + 1] = m_accumulator_stack[m_idx];
     m_w_bucket[m_idx + 1] = m_w_bucket[m_idx];
     m_b_bucket[m_idx + 1] = m_b_bucket[m_idx];
@@ -416,25 +537,30 @@ public:
     m_curr = &m_accumulator_stack[m_idx];
   }
 
-  inline int evaluate(int color, int piece_count = 32) const noexcept {
-    if (!g_nnue || !nnue_loaded) return 0;
+  inline int evaluate(int color, int piece_count) const noexcept {
+    if (!g_nnue || !m_initialized) std::exit(EXIT_FAILURE);
+    if ((color != Colors::White && color != Colors::Black) || piece_count < 2 || piece_count > 32)
+      std::exit(EXIT_FAILURE);
     const auto &us = (color == Colors::White) ? m_curr->white : m_curr->black;
     const auto &them = (color == Colors::White) ? m_curr->black : m_curr->white;
-    const size_t b = static_cast<size_t>(std::clamp((piece_count - 1) / 4, 0, 7));
+    const size_t b = static_cast<size_t>(std::clamp((piece_count - 1) / 2, 0, static_cast<int>(OUTPUT_BUCKETS) - 1));
     const int64_t output = screlu_flatten(us, them, g_nnue->output_v[b]);
     return static_cast<int>(std::clamp<int64_t>(
         (output + g_nnue->output_bias[b]) * SCALE / QAB, -MaxEval, MaxEval));
   }
 
   inline void reset_nnue(const BoardState &position) noexcept {
+    if (!g_nnue) std::exit(EXIT_FAILURE);
+    m_initialized = false;
     m_idx = 0;
     m_curr = &m_accumulator_stack[0];
-    if (!g_nnue || !nnue_loaded) return;
 
     const uint64_t w_kbb = position.colors_bb[Colors::White] & position.pieces_bb[PieceTypes::King];
     const uint64_t b_kbb = position.colors_bb[Colors::Black] & position.pieces_bb[PieceTypes::King];
-    const int wking = w_kbb ? __builtin_ctzll(w_kbb) : 4;
-    const int bking = b_kbb ? __builtin_ctzll(b_kbb) : 60;
+    if (pop_count(w_kbb) != 1 || pop_count(b_kbb) != 1)
+      std::exit(EXIT_FAILURE);
+    const int wking = get_lsb(w_kbb);
+    const int bking = get_lsb(b_kbb);
 
     const size_t w_b = static_cast<size_t>(KingBucketTable[wking]);
     const size_t b_b = static_cast<size_t>(KingBucketTable[bking ^ 56]);
@@ -447,70 +573,57 @@ public:
     while (occ) {
       const int sq = pop_lsb(occ);
       const int piece = position.board[sq];
-      if (piece >= Pieces::WPawn && piece <= Pieces::BKing) {
-        const auto [white_idx, black_idx] = feature_indices(piece, sq, w_b, b_b);
-        const size_t white_off = white_idx * LAYER1_SIZE;
-        const size_t black_off = black_idx * LAYER1_SIZE;
-        #pragma unroll 4
-        for (size_t i = 0; i < LAYER1_SIZE; ++i) {
-          m_curr->white[i] += g_nnue->feature_v[white_off + i];
-          m_curr->black[i] += g_nnue->feature_v[black_off + i];
-        }
+      const auto [white_idx, black_idx] = feature_indices(piece, sq, w_b, b_b);
+      const size_t white_off = white_idx * LAYER1_SIZE;
+      const size_t black_off = black_idx * LAYER1_SIZE;
+      #pragma unroll 4
+      for (size_t i = 0; i < LAYER1_SIZE; ++i) {
+        m_curr->white[i] += g_nnue->feature_v[white_off + i];
+        m_curr->black[i] += g_nnue->feature_v[black_off + i];
       }
     }
     add_extra_view(position, false);
     add_extra_view(position, true);
     store_extra_lists(position, 0);
+    m_initialized = true;
   }
 
   inline void refresh_white(const BoardState &position, size_t new_w_bucket) noexcept {
-    if (!g_nnue || !nnue_loaded) return;
+    if (!g_nnue || !m_initialized) std::exit(EXIT_FAILURE);
+    if (new_w_bucket >= NNUE_KING_BUCKETS) std::exit(EXIT_FAILURE);
     std::copy_n(g_nnue->feature_bias.data(), LAYER1_SIZE, m_curr->white.begin());
     uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
-    constexpr size_t color_stride = 384;
-    constexpr size_t piece_stride = 64;
     while (occ) {
       const int sq = pop_lsb(occ);
       const int piece = position.board[sq];
-      if (piece >= Pieces::WPawn && piece <= Pieces::BKing) {
-        const size_t base = static_cast<size_t>((piece >> 1) - 1);
-        const size_t color = static_cast<size_t>(piece & 1);
-        const size_t white_idx = new_w_bucket * 768 + color * color_stride + base * piece_stride + static_cast<size_t>(sq);
-        const size_t off = white_idx * LAYER1_SIZE;
-        #pragma unroll 4
-        for (size_t i = 0; i < LAYER1_SIZE; ++i) {
-          m_curr->white[i] += g_nnue->feature_v[off + i];
-        }
+      const size_t off = feature_indices(piece, sq, new_w_bucket, m_b_bucket[m_idx]).first * LAYER1_SIZE;
+      #pragma unroll 4
+      for (size_t i = 0; i < LAYER1_SIZE; ++i) {
+        m_curr->white[i] += g_nnue->feature_v[off + i];
       }
     }
     add_extra_view(position, false);
   }
 
   inline void refresh_black(const BoardState &position, size_t new_b_bucket) noexcept {
-    if (!g_nnue || !nnue_loaded) return;
+    if (!g_nnue || !m_initialized) std::exit(EXIT_FAILURE);
+    if (new_b_bucket >= NNUE_KING_BUCKETS) std::exit(EXIT_FAILURE);
     std::copy_n(g_nnue->feature_bias.data(), LAYER1_SIZE, m_curr->black.begin());
     uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
-    constexpr size_t color_stride = 384;
-    constexpr size_t piece_stride = 64;
     while (occ) {
       const int sq = pop_lsb(occ);
       const int piece = position.board[sq];
-      if (piece >= Pieces::WPawn && piece <= Pieces::BKing) {
-        const size_t base = static_cast<size_t>((piece >> 1) - 1);
-        const size_t color = static_cast<size_t>(piece & 1);
-        const size_t black_idx = new_b_bucket * 768 + (color ^ 1) * color_stride + base * piece_stride + static_cast<size_t>(sq ^ 56);
-        const size_t off = black_idx * LAYER1_SIZE;
-        #pragma unroll 4
-        for (size_t i = 0; i < LAYER1_SIZE; ++i) {
-          m_curr->black[i] += g_nnue->feature_v[off + i];
-        }
+      const size_t off = feature_indices(piece, sq, m_w_bucket[m_idx], new_b_bucket).second * LAYER1_SIZE;
+      #pragma unroll 4
+      for (size_t i = 0; i < LAYER1_SIZE; ++i) {
+        m_curr->black[i] += g_nnue->feature_v[off + i];
       }
     }
     add_extra_view(position, true);
   }
 
   inline void add_sub(int from_piece, int from, int to_piece, int to) noexcept {
-    if (m_idx >= MaxSearchDepth - 1 || !g_nnue || !nnue_loaded) return;
+    if (!g_nnue || !m_initialized || m_idx < 0 || m_idx >= MaxSearchDepth - 1) std::exit(EXIT_FAILURE);
     const size_t wb = m_w_bucket[m_idx];
     const size_t bb = m_b_bucket[m_idx];
     m_w_bucket[m_idx + 1] = static_cast<uint8_t>(wb);
@@ -535,7 +648,7 @@ public:
   }
 
   inline void add_sub_sub(int from_piece, int from, int to_piece, int to, int captured, int captured_sq) noexcept {
-    if (m_idx >= MaxSearchDepth - 1 || !g_nnue || !nnue_loaded) return;
+    if (!g_nnue || !m_initialized || m_idx < 0 || m_idx >= MaxSearchDepth - 1) std::exit(EXIT_FAILURE);
     const size_t wb = m_w_bucket[m_idx];
     const size_t bb = m_b_bucket[m_idx];
     m_w_bucket[m_idx + 1] = static_cast<uint8_t>(wb);
@@ -561,7 +674,7 @@ public:
   }
 
   inline void add_add_sub_sub(int p1, int from1, int to1, int p2, int from2, int to2) noexcept {
-    if (m_idx >= MaxSearchDepth - 1 || !g_nnue || !nnue_loaded) return;
+    if (!g_nnue || !m_initialized || m_idx < 0 || m_idx >= MaxSearchDepth - 1) std::exit(EXIT_FAILURE);
     const size_t wb = m_w_bucket[m_idx];
     const size_t bb = m_b_bucket[m_idx];
     m_w_bucket[m_idx + 1] = static_cast<uint8_t>(wb);

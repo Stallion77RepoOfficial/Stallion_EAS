@@ -289,28 +289,26 @@ inline void resize_TT(int size) {
     TT.swap(replacement);
     TT_size = TT.size();
   } catch (const std::bad_alloc &) {
-    std::cerr << "Failed to allocate " << mb << "MB for transposition table." << std::endl;
     std::exit(EXIT_FAILURE);
   }
   TT_resizing.store(false, std::memory_order_release);
 }
 
+inline uint64_t require_TT_size(const std::vector<TTBucket> &table) noexcept {
+  // UCI joins the search workers before resizing or clearing the table.
+  if (TT_resizing.load(std::memory_order_acquire) || table.empty())
+    std::exit(EXIT_FAILURE);
+  return table.size();
+}
+
 inline uint64_t safe_TT_size() noexcept {
   std::lock_guard<std::mutex> lg(thread_data.data_mutex);
-  if (TT_resizing.load(std::memory_order_acquire))
-    return 0;
-  return TT.size();
+  return require_TT_size(TT);
 }
 
 inline void safe_TT_prefetch(uint64_t hash) noexcept {
-  if (TT_resizing.load(std::memory_order_acquire))
-    return;
-  const uint64_t size = TT.size();
-  if (size == 0)
-    return;
+  const uint64_t size = require_TT_size(TT);
   const uint64_t idx = (uint128_t(hash) * uint128_t(size)) >> 64;
-  if (idx >= size)
-    return;
   __builtin_prefetch(&TT[static_cast<size_t>(idx)], 0, 1);
 }
 
@@ -323,23 +321,9 @@ inline std::array<std::mutex, 4096> tt_mutexes;
 
 inline TTEntry probe_entry(uint64_t hash, bool &hit, uint8_t searches,
                            std::vector<TTBucket> &table) {
-  static thread_local TTBucket fallback_bucket;
-  auto fallback = [&]() {
-    hit = false;
-    fallback_bucket.entries[0].age_bound =
-        (searches << 2) | fallback_bucket.entries[0].get_type();
-    return fallback_bucket.entries[0];
-  };
-
-  if (TT_resizing.load(std::memory_order_acquire))
-    return fallback();
-  const uint64_t size = table.size();
-  if (size == 0)
-    return fallback();
+  const uint64_t size = require_TT_size(table);
   const uint32_t zobrist_key = get_hash_low_bits(hash);
   const uint64_t idx = (uint128_t(hash) * uint128_t(size)) >> 64;
-  if (idx >= size)
-    return fallback();
 
   std::lock_guard<std::mutex> lock(tt_mutexes[idx % tt_mutexes.size()]);
   auto &bucket = table[idx];
@@ -384,24 +368,8 @@ inline void insert_entry(uint64_t hash, int depth, Action best_move,
     e.age_bound = (searches << 2) | bound_type;
   };
 
-  if (TT_resizing.load(std::memory_order_acquire)) {
-    static thread_local TTBucket fallback_bucket;
-    TTEntry &fe = fallback_bucket.entries[0];
-    if (best_move != MoveNone || zobrist_key != fe.position_key)
-      fe.best_move = best_move;
-    if (fe.position_key == zobrist_key && (bound_type != EntryTypes::Exact) &&
-        fe.depth > depth + 4)
-      return;
-    set_entry(fe);
-    return;
-  }
-
-  const uint64_t size = TT.size();
-  if (size == 0)
-    return;
-  uint64_t idx = (uint128_t(hash) * uint128_t(size)) >> 64;
-  if (idx >= size)
-    idx = idx % size;
+  const uint64_t size = require_TT_size(TT);
+  const uint64_t idx = (uint128_t(hash) * uint128_t(size)) >> 64;
   std::lock_guard<std::mutex> lock(tt_mutexes[idx % tt_mutexes.size()]);
   auto &bucket = TT[idx];
   auto &entries = bucket.entries;

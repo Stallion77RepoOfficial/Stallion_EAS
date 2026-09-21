@@ -157,6 +157,18 @@ class SbinDataset:
         import numpy as np
         return np.ndarray((self.count,), dtype="<i2", buffer=self._mmap, offset=24, strides=(32,))
 
+    def wdl_view(self):
+        """Read-only uint16 view of the packed WDL field (offset 26, stride 32)."""
+        import numpy as np
+        return np.ndarray((self.count,), dtype="<u2", buffer=self._mmap, offset=26, strides=(32,))
+
+    def flags_view(self):
+        """Read-only uint8 view of the packed flags field (offset 28, stride 32).
+
+        Bit 0 is the side to move (1 = black)."""
+        import numpy as np
+        return np.ndarray((self.count,), dtype=np.uint8, buffer=self._mmap, offset=28, strides=(32,))
+
     def records_ptr(self, index: int):
         """Record at index for batch native calls (shares the mmap buffer)."""
         return self._array[index]
@@ -270,7 +282,27 @@ def eval_targets(cp, wdl):
     return np.where(mate, (cp > 0).astype(float), expected)
 
 
-def calibrate_eval_records(data: bytes) -> bytes:
+def calibrate_targets(cp, wdl_u16, lambda_val: float = 0.25):
+    """White-POV WDL blended from CP and the stored WDL field.
+
+    Mirrors stallion.eval_wdl: mate scores (|cp| == 2000 with a decisive
+    stored field) stay decisive, otherwise (1-lambda) * cp_wdl + lambda *
+    stored_wdl. Used both when rewriting records and when scoring mining
+    candidates, so selection and output labels always agree.
+    """
+    import numpy as np
+    lam = float(lambda_val)
+    if not 0.0 <= lam <= 1.0:
+        raise ValueError("wdl-lambda 0 ile 1 arasında olmalı.")
+    cp = np.asarray(cp, dtype=np.float64)
+    stored = np.asarray(wdl_u16, dtype=np.float64) / 65535.0
+    expected = 1.0 / (1.0 + 10.0 ** (-np.clip(cp, -1500, 1500) / 400.0))
+    mate = (np.abs(cp) == 2000) & ((stored == 0.0) | (stored == 1.0))
+    blended = (1.0 - lam) * expected + lam * stored
+    return np.where(mate, (cp > 0).astype(float), blended)
+
+
+def calibrate_eval_records(data: bytes, lambda_val: float = 0.25) -> bytes:
     import numpy as np
     if len(data) % 32:
         raise ValueError("SBIN kayıt boyutu 32'nin katı olmalı.")
@@ -280,7 +312,7 @@ def calibrate_eval_records(data: bytes) -> bytes:
     count = len(data) // 32
     cp = np.ndarray((count,), dtype="<i2", buffer=result, offset=24, strides=(32,))
     wdl = np.ndarray((count,), dtype="<u2", buffer=result, offset=26, strides=(32,))
-    wdl[:] = np.rint(eval_targets(cp, wdl) * 65535).astype("<u2")
+    wdl[:] = np.rint(calibrate_targets(cp, wdl, lambda_val) * 65535).astype("<u2")
     return bytes(result)
 
 

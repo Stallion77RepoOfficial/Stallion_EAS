@@ -42,10 +42,10 @@ def find_chunk_boundaries(pgn_path: Path, num_workers: int) -> list[int]:
 
 def worker_convert(worker_id: int, pgn_path: str, start_offset: int, end_offset: int,
                    temp_output: str) -> tuple[int, int]:
-    try:
+    if __package__:
+        from .sbin_tool import PackedPosition, load_native_lib
+    else:
         from sbin_tool import PackedPosition, load_native_lib
-    except ImportError:
-        from training.sbin_tool import PackedPosition, load_native_lib
     lib = load_native_lib()
     buf = PackedPosition()
 
@@ -64,14 +64,8 @@ def worker_convert(worker_id: int, pgn_path: str, start_offset: int, end_offset:
                 break
             games_processed += 1
 
-            result = game.headers.get("Result")
-            if result == "1-0":
-                white_wdl = 1.0
-            elif result == "0-1":
-                white_wdl = 0.0
-            elif result == "1/2-1/2":
-                white_wdl = 0.5
-            else:
+            white_wdl = {"1-0": 1.0, "0-1": 0.0, "1/2-1/2": 0.5}.get(game.headers.get("Result"))
+            if white_wdl is None:
                 continue
 
             bply_str = game.headers.get("BrilliantPly", "")
@@ -79,30 +73,56 @@ def worker_convert(worker_id: int, pgn_path: str, start_offset: int, end_offset:
             if not plies:
                 continue
 
-            target_plies = set()
+            # Feda çevresindeki altı konumu gerçek oyun sonucuyla etiketle.
+            # BrilliantPly hangi tarafın kazandığını belirlemez.
+            target_plies: dict[int, float] = {}
             for p in plies:
-                target_plies.add(p)      # Fedadan hemen önce (Karar anı)
-                target_plies.add(p + 1)  # Feda anı (Fedanın tahtadaki hali)
-                target_plies.add(p + 2)  # Fedadan hemen sonrası (Taktik devam hamlesi)
-            max_target = max(target_plies)
+                for offset in range(6):  # p .. p+5
+                    target_plies[p + offset] = white_wdl
 
+            max_target = max(target_plies.keys())
             board = game.board()
+            seen_fens = set()
+
             for ply, move in enumerate(game.mainline_moves(), start=1):
                 if ply in target_plies:
                     fen = board.fen()
-                    ret = lib.sbin_pack_fen(
-                        fen.encode("utf-8"), ctypes.c_float(white_wdl),
-                        ctypes.c_int16(0), ctypes.byref(buf)
-                    )
-                    if ret == 0:
-                        batch_bytes.extend(bytes(buf))
-                        positions_extracted += 1
-                        if len(batch_bytes) >= 65536 * 32:
-                            out_f.write(batch_bytes)
-                            batch_bytes.clear()
-                if ply > max_target:
-                    break
+                    if fen not in seen_fens:
+                        seen_fens.add(fen)
+                        ret = lib.sbin_pack_fen(
+                            fen.encode("utf-8"), ctypes.c_float(target_plies[ply]),
+                            ctypes.c_int16(0), ctypes.byref(buf)
+                        )
+                        if ret == 0:
+                            batch_bytes.extend(bytes(buf))
+                            positions_extracted += 1
+                            if len(batch_bytes) >= 65536 * 32:
+                                out_f.write(batch_bytes)
+                                batch_bytes.clear()
+
                 board.push(move)
+
+                # Dinamik Mat Kesme Kuralı: Mat görüldüğü anda zincir o pozisyonda kesilir!
+                if board.is_checkmate():
+                    fen = board.fen()
+                    if fen not in seen_fens:
+                        seen_fens.add(fen)
+                        # Mat eden tarafın WDL skoru (Sıra siyahtaysa Beyaz mat etmiştir -> 1.0)
+                        mate_wdl = 1.0 if (board.turn == chess.BLACK) else 0.0
+                        ret = lib.sbin_pack_fen(
+                            fen.encode("utf-8"), ctypes.c_float(mate_wdl),
+                            ctypes.c_int16(0), ctypes.byref(buf)
+                        )
+                        if ret == 0:
+                            batch_bytes.extend(bytes(buf))
+                            positions_extracted += 1
+                            if len(batch_bytes) >= 65536 * 32:
+                                out_f.write(batch_bytes)
+                                batch_bytes.clear()
+                    break
+
+                if ply >= max_target:
+                    break
 
             if games_processed % 50000 == 0:
                 print(f"[Çekirdek {worker_id}] {games_processed:,} oyun tarandı ({positions_extracted:,} pozisyon)...", flush=True)
@@ -178,6 +198,7 @@ def main(argv=None):
         "output": str(output_path),
         "total_games": total_games,
         "total_positions": total_positions,
+        "label_source": "game_result",
         "file_size_bytes": output_path.stat().st_size,
         "elapsed_seconds": round(total_elapsed, 2),
         "games_per_second": round(total_games / total_elapsed, 1),

@@ -227,7 +227,7 @@ inline void ss_pop(ThreadInfo &thread_info) noexcept {
   assert(thread_info.search_ply > 0 && thread_info.game_ply > 0);
   --thread_info.search_ply;
   --thread_info.game_ply;
-  if (nnue_loaded) thread_info.nnue_state.pop();
+  thread_info.nnue_state.pop();
 }
 
 inline bool material_draw(const BoardState &position) noexcept {
@@ -385,7 +385,7 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
   }
 
   MovePicker picker;
-  init_picker(picker, position, -107, in_check, ss);
+  init_picker(picker, position, -107, in_check);
 
   if (!in_check && tt_move != MoveNone) {
     bool tt_is_cap = is_cap(position, tt_move);
@@ -393,14 +393,6 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
     if (!tt_is_cap && !tt_is_promo)
       tt_move = MoveNone;
   }
-
-  auto fallback_score = [&](int current_best) {
-    if (current_best != ScoreNone)
-      return current_best;
-    if (!in_check && stand_pat != ScoreNone)
-      return stand_pat;
-    return eval_now(position);
-  };
 
   while (Action move =
              next_move(picker, position, thread_info, tt_move, !in_check)) {
@@ -431,7 +423,6 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
 
     BoardState moved_position = position;
     make_move(moved_position, move);
-    auto *nnue_before = thread_info.nnue_state.m_curr;
     update_nnue_state(thread_info, move, position, moved_position);
 
     int score = ScoreNone;
@@ -446,13 +437,12 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
     } else {
       const int leaf_eval = eval_now(moved_position);
       score = -leaf_eval;
-      if (thread_info.nnue_state.m_curr != nnue_before) {
-        thread_info.nnue_state.pop();
-      }
+      thread_info.nnue_state.pop();
     }
 
     if (thread_data.stop) {
-      return fallback_score(best_score);
+      // The caller discards interrupted results; do not invent a new score.
+      return best_score;
     }
 
     if (best_score == ScoreNone || score > best_score) {
@@ -521,6 +511,11 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
   }
 
   if (thread_info.max_depth > 0 && ply >= thread_info.max_depth) {
+    std::array<Action, MaxActions> cap_moves{};
+    if (!legal_movegen(position, cap_moves.data())) {
+      return attacks_square(position, get_king_pos(position, position.color), position.color ^ 1)
+                 ? -MateScore + ply : 0;
+    }
     return correct_eval(position, thread_info, eval(position, thread_info));
   }
 
@@ -668,7 +663,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
         ss_pop(thread_info);
 
         if (score >= beta) {
-          if (score > MateScore) {
+          if (score >= MateThreshold) {
             score = beta;
           }
           return score;
@@ -683,7 +678,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
     int mc_moves = 0;
 
     MovePicker mc_picker;
-    init_picker(mc_picker, position, 0, in_check, ss);
+    init_picker(mc_picker, position, 0, in_check);
 
     while (Action move =
                next_move(mc_picker, position, thread_info, tt_move, false)) {
@@ -725,7 +720,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
 
     int threshold = p_beta - static_eval;
     MovePicker probcut_p;
-    init_picker(probcut_p, position, threshold, in_check, ss);
+    init_picker(probcut_p, position, threshold, in_check);
     Action p_tt_move =
         (tt_move != MoveNone && SEE(position, tt_move, threshold) ? tt_move
                                                                   : MoveNone);
@@ -772,7 +767,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
   thread_info.KillerMoves[ply + 1][1] = MoveNone;
 
   MovePicker picker;
-  init_picker(picker, position, -107, in_check, ss);
+  init_picker(picker, position, -107, in_check);
 
   int best_score = ScoreNone, moves_played = 0;
   bool is_capture = false, skip = false;
@@ -912,7 +907,9 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
       int max_child_depth = std::max(0, depth - 1 + extension);
       return std::clamp(child_depth, 0, max_child_depth);
     };
-    int newdepth = clamp_child_depth(std::min(depth - 1 + extension, 126));
+    // Nominal child depth honors the full root range; depth-indexed
+    // tables (LMRTable) are sized for MaxSearchDepth.
+    int newdepth = clamp_child_depth(std::min(depth - 1 + extension, MaxRootDepth - 1));
 
     if (newdepth > 0 && depth >= LMRMinDepth && moves_played > is_pv && thread_info.mate_search == 0) {
       int R = LMRTable[depth][moves_played];
@@ -1178,9 +1175,7 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
   thread_info.nodes.store(0);
   thread_info.time_checks = 0;
   thread_info.search_ply = 0;
-  if (nnue_loaded) {
-    thread_info.nnue_state.reset_nnue(position);
-  }
+  thread_info.nnue_state.reset_nnue(position);
   thread_info.excluded_move = MoveNone;
   thread_info.best_moves = {0};
   thread_info.best_scores.fill(ScoreNone);
@@ -1656,7 +1651,6 @@ inline void search_position(BoardState &position, ThreadInfo &thread_info,
     start_workers.notify_all();
     for (auto &worker : thread_data.threads) worker.join();
     thread_data.threads.clear();
-    std::cerr << "Failed to create search thread" << std::endl;
     std::exit(EXIT_FAILURE);
   }
   start_workers.store(true);

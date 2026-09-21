@@ -264,18 +264,16 @@ inline void diff_extra_sorted(const int16_t *pre, int n_pre, const int *post, in
 
 inline void update_nnue_state(ThreadInfo &thread_info, Action move,
                               const BoardState &position, const BoardState &new_position) noexcept {
-  if (!nnue_loaded) return;
-
   if (move == MoveNone) {
     thread_info.nnue_state.push_null();
     return;
   }
 
   int from = extract_from(move), to = extract_to(move);
-  if (!is_valid_square(from) || !is_valid_square(to)) return;
+  if (!is_valid_square(from) || !is_valid_square(to)) std::exit(EXIT_FAILURE);
 
   const int from_piece = position.board[from];
-  if (from_piece == Pieces::Blank) return;
+  if (from_piece == Pieces::Blank) std::exit(EXIT_FAILURE);
   int to_piece = from_piece;
   const int color = position.color;
 
@@ -289,9 +287,9 @@ inline void update_nnue_state(ThreadInfo &thread_info, Action move,
     captured_square = to;
   } else if (extract_type(move) == MoveTypes::EnPassant) {
     captured_square = to + (color ? Directions::North : Directions::South);
-    if (is_valid_square(captured_square)) {
-      captured_piece = position.board[captured_square];
-    }
+    if (!is_valid_square(captured_square) || position.board[captured_square] != Pieces::WPawn + (color ^ 1))
+      std::exit(EXIT_FAILURE);
+    captured_piece = position.board[captured_square];
   }
 
   const int base_idx = thread_info.nnue_state.m_idx;
@@ -311,35 +309,26 @@ inline void update_nnue_state(ThreadInfo &thread_info, Action move,
     thread_info.nnue_state.add_sub(from_piece, from, to_piece, to);
   }
 
-  if (thread_info.nnue_state.m_idx != base_idx) {
-    auto &st = thread_info.nnue_state;
-    const int nl = st.m_idx;
-    int post_w[NNUE_EXTRA_SLOTS], post_b[NNUE_EXTRA_SLOTS];
-    const int nw1 = collect_extra_features(new_position.board.data(), new_position.colors_bb.data(),
-                                           new_position.pieces_bb.data(), false, post_w, NNUE_EXTRA_SLOTS);
-    const int nb1 = collect_extra_features(new_position.board.data(), new_position.colors_bb.data(),
-                                           new_position.pieces_bb.data(), true, post_b, NNUE_EXTRA_SLOTS);
-    if (nw1 >= 0 && nb1 >= 0 && base_idx >= 0 && base_idx < MaxSearchDepth &&
-        nl >= 0 && nl < MaxSearchDepth) {
-      int rem_w[NNUE_EXTRA_SLOTS], add_w[NNUE_EXTRA_SLOTS];
-      int rem_b[NNUE_EXTRA_SLOTS], add_b[NNUE_EXTRA_SLOTS];
-      int nrw = 0, naw = 0, nrb = 0, nab = 0;
-      diff_extra_sorted(st.m_pre_w[base_idx], st.m_pre_nw[base_idx], post_w, nw1,
-                        rem_w, add_w, &nrw, &naw);
-      diff_extra_sorted(st.m_pre_b[base_idx], st.m_pre_nb[base_idx], post_b, nb1,
-                        rem_b, add_b, &nrb, &nab);
-      st.apply_extra_delta(rem_w, nrw, add_w, naw, rem_b, nrb, add_b, nab);
-      st.m_pre_nw[nl] = nw1;
-      st.m_pre_nb[nl] = nb1;
-      for (int i = 0; i < nw1; ++i) st.m_pre_w[nl][i] = static_cast<int16_t>(post_w[i]);
-      for (int i = 0; i < nb1; ++i) st.m_pre_b[nl][i] = static_cast<int16_t>(post_b[i]);
-    } else if (base_idx >= 0 && base_idx < MaxSearchDepth && nl >= 0 && nl < MaxSearchDepth) {
-      st.m_pre_nw[nl] = st.m_pre_nw[base_idx];
-      st.m_pre_nb[nl] = st.m_pre_nb[base_idx];
-      std::copy_n(st.m_pre_w[base_idx], NNUE_EXTRA_SLOTS, st.m_pre_w[nl]);
-      std::copy_n(st.m_pre_b[base_idx], NNUE_EXTRA_SLOTS, st.m_pre_b[nl]);
-    }
-  }
+  auto &st = thread_info.nnue_state;
+  const int nl = st.m_idx;
+  int post_w[NNUE_EXTRA_SLOTS], post_b[NNUE_EXTRA_SLOTS];
+  const int nw1 = collect_extra_features(new_position.board.data(), new_position.colors_bb.data(),
+                                         new_position.pieces_bb.data(), false, post_w, NNUE_EXTRA_SLOTS);
+  const int nb1 = collect_extra_features(new_position.board.data(), new_position.colors_bb.data(),
+                                         new_position.pieces_bb.data(), true, post_b, NNUE_EXTRA_SLOTS);
+  if (nw1 < 0 || nb1 < 0) std::exit(EXIT_FAILURE);
+  int rem_w[NNUE_EXTRA_SLOTS], add_w[NNUE_EXTRA_SLOTS];
+  int rem_b[NNUE_EXTRA_SLOTS], add_b[NNUE_EXTRA_SLOTS];
+  int nrw = 0, naw = 0, nrb = 0, nab = 0;
+  diff_extra_sorted(st.m_pre_w[base_idx], st.m_pre_nw[base_idx], post_w, nw1,
+                    rem_w, add_w, &nrw, &naw);
+  diff_extra_sorted(st.m_pre_b[base_idx], st.m_pre_nb[base_idx], post_b, nb1,
+                    rem_b, add_b, &nrb, &nab);
+  st.apply_extra_delta(rem_w, nrw, add_w, naw, rem_b, nrb, add_b, nab);
+  st.m_pre_nw[nl] = nw1;
+  st.m_pre_nb[nl] = nb1;
+  for (int i = 0; i < nw1; ++i) st.m_pre_w[nl][i] = static_cast<int16_t>(post_w[i]);
+  for (int i = 0; i < nb1; ++i) st.m_pre_b[nl][i] = static_cast<int16_t>(post_b[i]);
 
   if (from_piece == Pieces::WKing) {
     const size_t old_b = KingBucketTable[king_from];
@@ -681,4 +670,3 @@ inline bool is_legal(const BoardState &position, Action move) noexcept {
   if (!is_valid_square(king)) return false;
   return !(attacks_square(position, king, color ^ 1, occupied) & ~(1ULL << to));
 }
-

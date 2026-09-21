@@ -1,6 +1,7 @@
 *.DS_Store
 .DS_Store
 engine/stallion_eas_mac
+engine/stallion_eas_windows.exe
 stockfish19/
 /training/.venv
 /training/__pycache__
@@ -11,3 +12,5 @@ training/stockfish
 training/cutechess-cli
 training/statistics_EAS_ratinglist.txt
 training/patricia
+*.pt
+/training/nets/

@@ -2,12 +2,12 @@
 
 ## Mimari (motorla birebir aynı olmalı)
 
-- Girdi: `13316 = 12288 baz (16 king-bucket × 768) + 1028 ekstra`, gizli katman `1024`, çıkış `8 bucket × 2048`.
+- Girdi: `13316 = 12288 baz (16 king-bucket × 768 özellik/bucket) + 1028 ekstra`, gizli katman `1024`, çıkış `16 bucket × 2048`. Buradaki 768, `12 taş kodu × 64 kare` stride'ıdır; eski bucket sayısı değildir.
 - Ekstra bloklar: materyal `100` + şah-bölgesi taş `234` + şah-bölgesi saldırı `18` + piyon yapısı `384` + kale-hattı `256` + fil-piyon kompleksi `36`. Sadece öğrenilmiş ağırlık — insan değer biçmez (HCE yok).
 - King bucket tablosu, `feature_indices` ve `collect_extra_features` formülleri motor header'larından gelir; SBIN native kod aynı header'ları include eder, Python tarafı `parse_fen_fast` ile aynısını üretir (`sbin_tool.py verify` ikisini karşılaştırır).
-- Çıkış bucket'ı: `clamp((taş_sayısı - 1) // 4, 0, 7)` — motor ve eğitimde aynı (taş sayısı baz feature'lardan sayılır).
+- Çıkış bucket'ı: `clamp((taş_sayısı - 1) // 2, 0, 15)` — motor ve eğitimde aynı (taş sayısı baz feature'lardan sayılır).
 - Kuantizasyon: `QA=255, QB=64, QAB=16320, SCALE=400`; kayıp uzayı `400/ln(10)` ile centipawn'a bağlıdır.
-- Net dosyası: payload `27.306.000` bayt, padded `27.306.048` bayt. Motor net'i gömülü taşır (`net_embed.S`); çalışma anında net dosyası okunmaz. Eski 12288-format netler `migrate_nnue.py` ile taşınır (ekstra satırlar sıfır → bit-bit aynı oyun).
+- Net dosyası: payload `27.338.784` bayt, padded `27.338.816` bayt. Motor net'i gömülü taşır (`net_embed.S`); çalışma anında net dosyası okunmaz. Motor ve eğitim yalnızca 16 king bucket / 16 çıkış bucket biçimini kabul eder. Eski ağlar reddedilir; ağırlık kopyalama, sıfır ekleme veya otomatik ağ genişletme yapılmaz.
 
 ## Komutlar (`training/.venv/bin/python stallion.py ...`)
 
@@ -18,7 +18,7 @@
 - `train --dataset train.sbin --output candidate.nnue [--resume base.nnue] [--epochs N]` — CPU/CUDA/MPS otomatik; en iyi epoch'u `.nnue` + `.pt` olarak yazar.
 - `datagen --engine motor --games 200 --output selfplay.sbin` — WDL-etiketli self-play verisi.
 - `match --candidate a.nnue --baseline b.nnue --games 200 [--sprt]` — her net için gömülü motor derler (`runs/engine-cache`, kaynak+net hash'iyle önbellekli), cutechess ile karşılaştırır.
-- `pipeline --phase base|aggressive|all --steps extract,train,match --max-iters N` — uçtan uca döngü; taban net yoksa `stallion.nnue` kullanılır.
+- `pipeline --phase base|aggressive|all --steps extract,train,match --max-iters N` — uçtan uca döngü; taban ağ doğrudan `engine/nets/stallion.nnue` veya açıkça verilen `--baseline` dosyasıdır. Seçilen dosya yoksa işlem durur.
 - `eas` / `sacrifices` — PGN istatistik/rapor araçları (eğitim dışı).
 
 Yardımcılar:
@@ -30,12 +30,20 @@ Yardımcılar:
 
 SBIN kayıtları `wdl` (u16) ve `eval` (i16 cp) taşır. Bu hattın yazdığı dosyalar (self-play, puzzle, prepared) `eval=0` + WDL-etiketlidir. `labels=cp` istenen her yerde kaynakta gerçek cp aranır; yoksa komut `--sbin-labels wdl` önerisiyle durur (sessiz etiket yıkımına karşı koruma). Lichess dökümlerinden cp'li `evals.sbin` üretimi harici adımdır (plana bakın).
 
+`--wdl-lambda` CP dönüşümü ile kayıttaki WDL'yi karıştırır; kayıttaki WDL'nin gerçek oyun sonucu olduğunu garanti etmez. Saf CP etiketi için `--sbin-labels cp --wdl-lambda 0`, mevcut etiketleri değiştirmemek için `--sbin-labels wdl` kullanın. Karışım oranı çıkarım manifestine yazılır.
+
+`convert_brilliant.py` konumları PGN'nin gerçek `Result` değeriyle etiketler; sonucu bilinmeyen oyunları atlar. BrilliantPly tek başına galibiyet etiketi değildir. Eski, fedayı yapan tarafı kazanan sayan havuzlar PGN'den yeniden üretilmeden gerçek sonuç verisi olarak kullanılmamalıdır.
+
 ## Örnek akış
 
 ```bash
 .venv/bin/python stallion.py extract --phase base --source data/evals.sbin --output data/base.sbin --target 2000000
-.venv/bin/python stallion.py train --dataset data/base.sbin --output runs/cand.nnue --epochs 40
+.venv/bin/python stallion.py train --dataset data/base.sbin --output runs/cand.nnue --resume ../engine/nets/stallion.nnue --epochs 40
 .venv/bin/python stallion.py match --candidate runs/cand.nnue --baseline ../engine/nets/stallion.nnue --games 200 --sprt
 ```
+
+Fine-tune için `--resume model.nnue` kullanılır. Aynı veri ve ayarlarla kesilen eğitime devam etmek için `--resume checkpoint.pt` verilir; `--epochs` toplam epoch hedefidir. Checkpoint model, optimizer, scheduler, veri kimliği ve ilgili cihazın RNG durumunu içermelidir; eksik bilgiler varsayılan değerlerle tamamlanmaz. `--resume` verilmezse doğrudan `train` komutu modeli sıfırdan başlatır.
+
+Özellik önbelleği native SBIN decoder ile oluşturulur. Parquet önce SBIN'e dönüştürülür; native derleme veya dönüşüm başarısız olursa Python decoder'a geçilmez. Varsayılan motor yolu `engine/` altındadır; başka ikili için `--engine` kullanılır.
 
 Terfi sonrası eski netle derlenmiş motor ikilileri bayatlar; motoru yeniden derleyin. `data/`, `runs/`, `*.pt`, derlenen dylib ve önbellekler git'e girmez.

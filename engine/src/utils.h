@@ -122,7 +122,6 @@ struct ThreadInfoBase {
   int max_iter_depth = MaxRootDepth;
   int mate_search = 0;
   uint64_t max_nodes_searched = UINT64_MAX / 2;
-  uint64_t opt_nodes_searched = UINT64_MAX / 2;
 
   std::array<Action, MaxSearchPly * MaxSearchPly> pv;
 
@@ -227,6 +226,7 @@ inline void safe_printf(const char *fmt, ...) {
   fflush(stdout);
 }
 
+constexpr int DefaultHashMB = 256;
 inline uint64_t TT_size = (1 << 20);
 inline std::vector<TTBucket> TT(TT_size);
 

@@ -61,10 +61,11 @@ TUNE_PARAM(MultiCutMoves, 6, 2, 8);
 TUNE_PARAM(MultiCutCuts, 3, 1, 5);
 TUNE_PARAM(HistPruneDepth, 4, 2, 8);
 TUNE_PARAM(HistPruneThreshold, 1200, 800, 2000);
+TUNE_PARAM(HistExtThreshold, 7000, 3000, 15000);
+TUNE_PARAM(DeltaMarginBase, 180, 50, 400);
+TUNE_PARAM(HalfmoveScaleMax, 200, 50, 500);
+// Internal eval units per 100 printed centipawns (UCI output only).
 inline int NormalizationFactor = 195;
-inline int HALFMOVE_SCALE_MAX = 200;
-inline int DELTA_MARGIN_BASE = 180;
-inline int HistExtThreshold = 7000;
 
 inline void print_params_for_ob() {
   for (const auto &param : params) {

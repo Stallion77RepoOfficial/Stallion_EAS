@@ -412,6 +412,119 @@ inline uint64_t attackers_to(const Position &position, int sq, int color,
        (KING_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::King]));
 }
 
+// All attackers of both colors on sq for the given occupancy.
+inline uint64_t attackers_all(const Position &position, int sq, uint64_t occ) noexcept {
+
+  if (!is_valid_square(sq))
+    return 0ULL;
+
+  uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
+                     position.pieces_bb[PieceTypes::Queen];
+  uint64_t rooks = position.pieces_bb[PieceTypes::Rook] |
+                   position.pieces_bb[PieceTypes::Queen];
+
+  return (PAWN_ATK_SAFE(Colors::White, sq) & position.colors_bb[Colors::Black] &
+          position.pieces_bb[PieceTypes::Pawn]) |
+         (PAWN_ATK_SAFE(Colors::Black, sq) & position.colors_bb[Colors::White] &
+          position.pieces_bb[PieceTypes::Pawn]) |
+         (KNIGHT_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::Knight]) |
+         (get_bishop_attacks(sq, occ) & bishops) |
+         (get_rook_attacks(sq, occ) & rooks) |
+         (KING_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::King]);
+}
+
+inline bool SEE(const Position &position, Move move, int threshold) noexcept {
+
+  int stm = position.color;
+  const int from = extract_from(move), to = extract_to(move);
+
+  if (!is_valid_square(from) || !is_valid_square(to))
+    return false;
+
+  if (position.board[from] == Pieces::Blank)
+    return false;
+
+  const int from_piece = position.board[from];
+  const int from_color = get_color(from_piece);
+  if (from_color != position.color)
+    return false;
+
+  if (extract_type(move) == MoveTypes::Castling) return threshold <= 0;
+  const bool en_passant = extract_type(move) == MoveTypes::EnPassant;
+  const bool promotion = extract_type(move) == MoveTypes::Promotion;
+  const int moved_type = promotion ? extract_promo(move) + PieceTypes::Knight : get_piece_type(position.board[from]);
+  int gain = (en_passant ? SeeValues[PieceTypes::Pawn] : SeeValues[get_piece_type(position.board[to])]) - threshold;
+  if (promotion) gain += SeeValues[moved_type] - SeeValues[PieceTypes::Pawn];
+  if (gain < 0) {
+    return false;
+  }
+
+  gain -= SeeValues[moved_type];
+  if (gain >= 0) {
+    return true;
+  }
+
+  const uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
+                           position.pieces_bb[PieceTypes::Queen];
+  const uint64_t rooks = position.pieces_bb[PieceTypes::Rook] |
+                         position.pieces_bb[PieceTypes::Queen];
+
+  uint64_t occ =
+      (position.colors_bb[Colors::White] | position.colors_bb[Colors::Black]) ^
+      (1ULL << from);
+
+  if (en_passant) occ &= ~(1ULL << (to + (position.color ? Directions::North : Directions::South)));
+  uint64_t all_attackers = attackers_all(position, to, occ);
+
+  while (true) {
+    stm ^= 1;
+
+    all_attackers &= occ;
+
+    const uint64_t stm_attackers = all_attackers & position.colors_bb[stm];
+
+    if (!stm_attackers) {
+      return stm != position.color;
+    }
+
+    int attackerType = PieceTypes::PieceNone;
+
+    for (int pt = PieceTypes::Pawn; pt <= PieceTypes::King; pt++) {
+      const uint64_t match = stm_attackers & position.pieces_bb[pt];
+      if (match) {
+        const int attacker_sq = get_lsb(match);
+        if (!is_valid_square(attacker_sq))
+          return false;
+
+        occ ^= (1ULL << attacker_sq);
+        attackerType = pt;
+        break;
+      }
+    }
+
+    if (attackerType == PieceTypes::PieceNone) {
+      return false;
+    }
+
+    if (attackerType == PieceTypes::Pawn ||
+        attackerType == PieceTypes::Bishop ||
+        attackerType == PieceTypes::Queen) {
+      all_attackers |= get_bishop_attacks(to, occ) & bishops;
+    }
+    if (attackerType == PieceTypes::Rook || attackerType == PieceTypes::Queen) {
+      all_attackers |= get_rook_attacks(to, occ) & rooks;
+    }
+
+    if (attackerType == PieceTypes::King &&
+        (attackers_all(position, to, occ) & occ & position.colors_bb[stm ^ 1]))
+      return stm != position.color;
+    gain = -gain - SeeValues[attackerType] - 1;
+    if (gain >= 0) {
+      return stm == position.color;
+    }
+  }
+}
+
 inline void init_bbs() noexcept {
   for (int square = a1; square < SqNone; square++) {
     const uint64_t edges = ((Ranks[0] | Ranks[7]) & ~rank_bb(square)) |

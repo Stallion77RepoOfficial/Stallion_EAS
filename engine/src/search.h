@@ -48,10 +48,7 @@ inline int probe_wdl_tb(const BoardState &position, const ThreadInfo &thread_inf
     return ScoreNone;
 
   const int material_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
-  const int compiled_limit = TB_LARGEST ? static_cast<int>(TB_LARGEST) : 7;
-  if (!TB_LARGEST || material_count > compiled_limit)
-    return ScoreNone;
-  if (material_count > thread_info.syzygy_probe_limit)
+  if (material_count > std::min<int>(TB_LARGEST, thread_info.syzygy_probe_limit))
     return ScoreNone;
 
   unsigned castling = 0;
@@ -194,7 +191,7 @@ inline int eval(BoardState &position, ThreadInfo &thread_info) {
 inline int correct_eval(const BoardState &position, const ThreadInfo &thread_info,
                         int eval) noexcept {
 
-  eval = eval * std::max(0, HALFMOVE_SCALE_MAX - position.halfmoves) / HALFMOVE_SCALE_MAX;
+  eval = eval * std::max(0, HalfmoveScaleMax - position.halfmoves) / HalfmoveScaleMax;
 
   int corr =
       thread_info
@@ -298,19 +295,13 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
     return draw_score(position, thread_info);
   }
 
-  if (thread_info.max_depth > 0 && ply >= thread_info.max_depth) {
-    return eval_now(position);
-  }
-
   if (out_of_time(thread_info)) {
     return correct_eval(position, thread_info, eval(position, thread_info));
   }
 
-  if (thread_info.use_syzygy && tb_initialized) {
-    int tb_score = probe_wdl_tb(position, thread_info);
-    if (tb_score != ScoreNone)
-      return tb_score;
-  }
+  const int tb_score = probe_wdl_tb(position, thread_info);
+  if (tb_score != ScoreNone)
+    return tb_score;
 
   StateRecord *ss = &(thread_info.game_hist[thread_info.game_ply]);
 
@@ -416,7 +407,7 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
         promotion_gain = MaterialValues[PromoPieceTypes[extract_promo(move)]] -
                          MaterialValues[PieceTypes::Pawn];
       }
-      int delta_margin = capture_value + promotion_gain + DELTA_MARGIN_BASE;
+      int delta_margin = capture_value + promotion_gain + DeltaMarginBase;
       if (stand_pat + delta_margin < alpha)
         continue;
     }
@@ -491,6 +482,13 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
   }
 
   int ply = thread_info.search_ply, pv_index = ply * MaxSearchPly;
+  Action excluded_move = thread_info.excluded_move;
+  bool singular_search = (excluded_move != MoveNone);
+  // Leaf children return through qsearch; their PV row must not keep moves
+  // from an earlier line, or the parent copies them into its PV.
+  if (!singular_search) {
+    thread_info.pv[pv_index] = MoveNone;
+  }
 
   if (ply > thread_info.seldepth) {
     thread_info.seldepth = ply;
@@ -510,15 +508,6 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
     return draw_score(position, thread_info);
   }
 
-  if (thread_info.max_depth > 0 && ply >= thread_info.max_depth) {
-    std::array<Action, MaxActions> cap_moves{};
-    if (!legal_movegen(position, cap_moves.data())) {
-      return attacks_square(position, get_king_pos(position, position.color), position.color ^ 1)
-                 ? -MateScore + ply : 0;
-    }
-    return correct_eval(position, thread_info, eval(position, thread_info));
-  }
-
   if (depth <= 0) {
     return qsearch(alpha, beta, position, thread_info, table);
   }
@@ -527,13 +516,6 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
   bool root = !ply, color = position.color, raised_alpha = false;
 
   Action best_move = MoveNone;
-  Action excluded_move = thread_info.excluded_move;
-
-  bool singular_search = (excluded_move != MoveNone);
-
-  if (!singular_search) {
-    thread_info.pv[pv_index] = MoveNone;
-  }
 
   thread_info.excluded_move = MoveNone;
 
@@ -613,22 +595,10 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
 
   if (!is_pv && !in_check && !singular_search) {
 
-    if (thread_info.use_syzygy && tb_initialized &&
-        depth >= thread_info.syzygy_probe_depth) {
-      int material_count =
-          pop_count(position.colors_bb[0] | position.colors_bb[1]);
-      int largest = TB_LARGEST ? (int)TB_LARGEST : 7;
-      if (material_count <= std::min(thread_info.syzygy_probe_limit, largest) &&
-          !in_check && !is_pv) {
-        int tb_score = probe_wdl_tb(position, thread_info);
-        if (tb_score != ScoreNone) {
-
-          if (tb_score >= beta)
-            return tb_score;
-          if (tb_score <= alpha)
-            return tb_score;
-        }
-      }
+    if (depth >= thread_info.syzygy_probe_depth) {
+      const int tb_score = probe_wdl_tb(position, thread_info);
+      if (tb_score != ScoreNone && (tb_score >= beta || tb_score <= alpha))
+        return tb_score;
     }
 
     if (thread_info.mate_search == 0) {
@@ -1215,6 +1185,9 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
       thread_info.root_moves.push_back({raw_root_moves[i], 0});
     }
   }
+  // Reported best moves always come from this legal root move list.
+  thread_info.best_moves[0] =
+      thread_info.root_moves.empty() ? MoveNone : thread_info.root_moves[0].move;
 
   Action prev_best = MoveNone;
   int alpha = ScoreNone, beta = -ScoreNone;
@@ -1375,9 +1348,8 @@ inline void iterative_deepen(BoardState &position, ThreadInfo &thread_info,
             eval_string.c_str(), nodes, nps, search_time, thread_data.tb_hits.load(),
             format_pv(position, thread_info).c_str());
 
-        if ((!thread_info.infinite_search && !thread_data.pondering &&
-             static_cast<uint64_t>(search_time) > thread_info.opt_time) ||
-            (!thread_data.pondering && nodes > thread_info.opt_nodes_searched)) {
+        if (!thread_info.infinite_search && !thread_data.pondering &&
+            static_cast<uint64_t>(search_time) > thread_info.opt_time) {
           thread_data.stop = true;
         }
 
@@ -1453,114 +1425,31 @@ finish:
     thread_data.stop = true;
   }
 
-  auto validate_ponder_move = [&](const BoardState &root_position,
-                                  Action best_move,
-                                  Action ponder_candidate) noexcept -> Action {
-    if (ponder_candidate == MoveNone || best_move == MoveNone) {
-      return MoveNone;
-    }
-
-    std::array<Action, MaxActions> root_legal{};
-    const int root_count = legal_movegen(root_position, root_legal.data());
-    bool best_is_legal = false;
-    for (int i = 0; i < root_count; ++i) {
-      if (root_legal[i] == best_move) {
-        best_is_legal = true;
-        break;
-      }
-    }
-    if (!best_is_legal) {
-      return MoveNone;
-    }
-
-    BoardState ponder_position = root_position;
-    make_move(ponder_position, best_move);
-
-    std::array<Action, MaxActions> response_legal{};
-    const int response_count = legal_movegen(ponder_position, response_legal.data());
-    for (int i = 0; i < response_count; ++i) {
-      if (response_legal[i] == ponder_candidate) {
-        return ponder_candidate;
-      }
-    }
-
-    return MoveNone;
-  };
-
-  if (thread_info.thread_id == 0) {
-
-    if (thread_info.pv[0] != MoveNone && thread_info.pv[1] != MoveNone) {
-      thread_info.ponder_move = thread_info.pv[1];
-    } else if (thread_info.best_moves[0] != MoveNone) {
-      BoardState temp_pos = position;
-      make_move(temp_pos, thread_info.best_moves[0]);
-
-      bool tt_hit = false;
-      TTEntry tt_entry =
-          probe_entry(temp_pos.zobrist_key, tt_hit, thread_info.searches, table);
-      if (tt_hit && tt_entry.best_move != MoveNone) {
-        thread_info.ponder_move = tt_entry.best_move;
-      } else {
-        thread_info.ponder_move = MoveNone;
-      }
-    }
-  }
-
   if (thread_info.thread_id == 0 && thread_data.emit_bestmove.load() &&
       (!thread_info.infinite_search || thread_data.stop)) {
-
-    std::array<Action, MaxActions> legal_moves;
-    const int num_legal = legal_movegen(position, legal_moves.data());
-    bool is_legal = false;
-    if (thread_info.best_moves[0] != MoveNone) {
-      for (int i = 0; i < num_legal; ++i) {
-        if (legal_moves[i] == thread_info.best_moves[0]) {
-          is_legal = true;
-          break;
-        }
-      }
-    }
-
-    if (!is_legal) {
-      if (thread_info.root_moves_limited && !thread_info.root_moves.empty()) {
-        thread_info.best_moves[0] = thread_info.root_moves[0].move;
-      } else if (num_legal > 0) {
-        thread_info.best_moves[0] = legal_moves[0];
-      } else {
-        thread_info.best_moves[0] = MoveNone;
-      }
-      thread_info.best_scores[0] = 0;
-    }
-
+    // The reply comes from the last completed principal variation only.
+    thread_info.ponder_move =
+        completed_moves[0] != MoveNone && thread_info.pv[0] == thread_info.best_moves[0]
+            ? thread_info.pv[1]
+            : MoveNone;
     if (thread_info.best_moves[0] == MoveNone) {
       safe_printf("bestmove 0000\n");
     } else {
-      bool can_output = true;
-
-      if (thread_info.pondering && !thread_info.ponder_hit && !thread_data.stop) {
-        can_output = false;
-      }
-      if (can_output) {
-        Action validated_ponder = validate_ponder_move(
-            position, thread_info.best_moves[0], thread_info.ponder_move);
-        thread_info.ponder_move = validated_ponder;
-
-        std::string bm = internal_to_uci(position, thread_info.best_moves[0]);
-        if (thread_info.use_ponder && validated_ponder != MoveNone) {
-          BoardState ponder_pos = position;
-          make_move(ponder_pos, thread_info.best_moves[0]);
-          std::string pd = internal_to_uci(ponder_pos, validated_ponder);
-          safe_printf("bestmove %s ponder %s\n", bm.c_str(), pd.c_str());
-        } else {
-          safe_printf("bestmove %s\n", bm.c_str());
-        }
+      const std::string bm = internal_to_uci(position, thread_info.best_moves[0]);
+      if (thread_info.use_ponder && thread_info.ponder_move != MoveNone) {
+        BoardState ponder_pos = position;
+        make_move(ponder_pos, thread_info.best_moves[0]);
+        safe_printf("bestmove %s ponder %s\n", bm.c_str(),
+                    internal_to_uci(ponder_pos, thread_info.ponder_move).c_str());
+      } else {
+        safe_printf("bestmove %s\n", bm.c_str());
       }
     }
   }
 }
 
 inline void filter_root_tablebase(const BoardState &position, ThreadInfo &thread_info) {
-  if (!tb_initialized || !thread_info.use_syzygy || !TB_LARGEST ||
+  if (!tb_initialized || !thread_info.use_syzygy ||
       pop_count(position.colors_bb[0] | position.colors_bb[1]) >
           std::min<int>(TB_LARGEST, thread_info.syzygy_probe_limit)) return;
   for (const auto &rights : position.castling_squares)

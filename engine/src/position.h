@@ -210,26 +210,6 @@ inline uint64_t attacks_square(const BoardState &position, int sq, int color,
   return attackers_to(position, sq, color, occ) & occ;
 }
 
-inline uint64_t attacks_square(const BoardState &position, int sq, uint64_t occ) noexcept {
-
-  if (!is_valid_square(sq))
-    return 0ULL;
-
-  uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
-                     position.pieces_bb[PieceTypes::Queen];
-  uint64_t rooks = position.pieces_bb[PieceTypes::Rook] |
-                   position.pieces_bb[PieceTypes::Queen];
-
-  return (PAWN_ATK_SAFE(Colors::White, sq) & position.colors_bb[Colors::Black] &
-          position.pieces_bb[PieceTypes::Pawn]) |
-         (PAWN_ATK_SAFE(Colors::Black, sq) & position.colors_bb[Colors::White] &
-          position.pieces_bb[PieceTypes::Pawn]) |
-         (KNIGHT_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::Knight]) |
-         (get_bishop_attacks(sq, occ) & bishops) |
-         (get_rook_attacks(sq, occ) & rooks) |
-         (KING_ATK_SAFE(sq) & position.pieces_bb[PieceTypes::King]);
-}
-
 constexpr inline bool is_cap(const BoardState &position, Action move) noexcept {
   if (move == MoveNone || extract_type(move) == MoveTypes::Castling) {
     return false;
@@ -379,14 +359,11 @@ inline void make_move(BoardState &position, Action move) noexcept {
     return;
   }
 
+  // Callers pass legal moves only; anything else is a bug, not a no-op.
   const int from = extract_from(move), to = extract_to(move);
-  if (!is_valid_square(from) || !is_valid_square(to)) {
-    return;
-  }
-
   const int from_piece = position.board[from];
   if (from_piece == Pieces::Blank || get_color(from_piece) != position.color) {
-    return;
+    std::exit(EXIT_FAILURE);
   }
 
   const int color = position.color;
@@ -394,17 +371,17 @@ inline void make_move(BoardState &position, Action move) noexcept {
   const int from_type = get_piece_type(from_piece);
   if (move_type != MoveTypes::Castling &&
       (from == to || (position.board[to] && get_color(position.board[to]) == color) ||
-       position.board[to] == Pieces::WKing + (color ^ 1))) return;
-  if (move_type == MoveTypes::Castling && !can_castle(position, from, to)) return;
+       position.board[to] == Pieces::WKing + (color ^ 1))) std::exit(EXIT_FAILURE);
+  if (move_type == MoveTypes::Castling && !can_castle(position, from, to)) std::exit(EXIT_FAILURE);
   if (move_type == MoveTypes::Promotion &&
-      (from_type != PieceTypes::Pawn || get_rank(to) != (color ? 0 : 7))) return;
+      (from_type != PieceTypes::Pawn || get_rank(to) != (color ? 0 : 7))) std::exit(EXIT_FAILURE);
   if (from_type == PieceTypes::Pawn && move_type != MoveTypes::Promotion &&
-      get_rank(to) == (color ? 0 : 7)) return;
+      get_rank(to) == (color ? 0 : 7)) std::exit(EXIT_FAILURE);
   if (move_type == MoveTypes::EnPassant) {
     const int captured = to + (color ? Directions::North : Directions::South);
     if (to != position.ep_square ||
         position.board[to] != Pieces::Blank || !is_valid_square(captured) ||
-        position.board[captured] != Pieces::WPawn + (color ^ 1)) return;
+        position.board[captured] != Pieces::WPawn + (color ^ 1)) std::exit(EXIT_FAILURE);
   }
   if (position.halfmoves < UINT16_MAX) ++position.halfmoves;
   if (color && position.fullmove < UINT32_MAX) ++position.fullmove;
@@ -436,9 +413,6 @@ inline void make_move(BoardState &position, Action move) noexcept {
   int ep_square = SquareNone;
 
   const int king_pos = get_king_pos(position, color);
-  if (!is_valid_square(king_pos)) {
-    return;
-  }
   if (position.board[to]) {
     position.halfmoves = 0;
     position.material_count[position.board[to] - 2]--;

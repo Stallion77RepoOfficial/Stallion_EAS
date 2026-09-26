@@ -76,7 +76,7 @@ int main(int argc, char* argv[]) {
     auto thread_info = std::make_unique<ThreadInfo>();
     init_LMR();
     ensure_bbs_initialized();
-    resize_TT(256);
+    resize_TT(DefaultHashMB);
 
     const auto args = collect_args(argc, argv);
     if (const auto exit_code = handle_cli_mode(args, position, *thread_info)) {

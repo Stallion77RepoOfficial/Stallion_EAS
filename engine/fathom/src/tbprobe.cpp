@@ -20,7 +20,6 @@ typedef uint8_t bool;
 #endif
 #include "tbprobe.h"
 
-void safe_printf(const char *fmt, ...);
 void safe_fflush();
 
 #define TB_PIECES 7
@@ -631,11 +630,8 @@ static bool check_tb_file(const char *str, const char *suffix)
   if (fd != FD_ERR) {
     size_t size = file_size(fd);
     close_tb(fd);
-    if ((size & 63) != 16) {
-  fprintf(stderr, "Incomplete tablebase file %s.%s\n", str, suffix);
-  safe_printf("info string Incomplete tablebase file %s.%s\n", str, suffix);
-      fd = FD_ERR;
-    }
+    if ((size & 63) != 16)
+      exit(EXIT_FAILURE);
   }
   return fd != FD_ERR;
 }
@@ -647,10 +643,8 @@ static void *map_tb(const char *name, const char *suffix, map_t *mapping)
     return NULL;
 
   void *data = map_file(fd, mapping);
-  if (data == NULL) {
-    fprintf(stderr, "Could not map %s%s into memory.\n", name, suffix);
+  if (data == NULL)
     exit(EXIT_FAILURE);
-  }
 
   close_tb(fd);
 
@@ -830,10 +824,8 @@ bool tb_init(const char *path)
   if (!pieceEntry) {
     pieceEntry = (struct PieceEntry*)malloc(TB_MAX_PIECE * sizeof(*pieceEntry));
     pawnEntry = (struct PawnEntry*)malloc(TB_MAX_PAWN * sizeof(*pawnEntry));
-    if (!pieceEntry || !pawnEntry) {
-      fprintf(stderr, "Out of memory.\n");
+    if (!pieceEntry || !pawnEntry)
       exit(EXIT_FAILURE);
-    }
   }
 
   for (int i = 0; i < (1 << TB_HASHBITS); i++) {
@@ -1430,11 +1422,8 @@ static bool init_table(struct BaseEntry *be, const char *str, int type)
   uint8_t *data = (uint8_t*)map_tb(str, tbSuffix[type], &be->mapping[type]);
   if (!data) return false;
 
-  if (read_le_u32(data) != tbMagic[type]) {
-    fprintf(stderr, "Corrupted table.\n");
-    unmap_file((void*)data, be->mapping[type]);
-    return false;
-  }
+  if (read_le_u32(data) != tbMagic[type])
+    exit(EXIT_FAILURE);
 
   be->data[type] = data;
 

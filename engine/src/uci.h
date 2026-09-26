@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
+#include <functional>
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
@@ -134,12 +136,8 @@ inline void bench(BoardState &position, ThreadInfo &thread_info,
       "2rr2k1/1p4bp/p1q1p1p1/4Pp1n/2PB4/1PN3P1/P3Q2P/2RR2K1 w - f6 0 20",
       "2r2b2/5p2/5k2/p1r1pP2/P2pB3/1P3P2/K1P3R1/7R w - - 23 93"};
 
-  thread_info.max_time = thread_info.opt_time = UINT64_MAX / 2;
   thread_info.max_iter_depth = std::clamp(depth, 1, MaxRootDepth);
-  thread_info.time_manager.hard_limit = thread_info.max_time;
-  thread_info.time_manager.soft_limit = thread_info.opt_time;
-  thread_info.max_nodes_searched = thread_info.opt_nodes_searched =
-      UINT64_MAX / 2;
+  thread_info.max_nodes_searched = UINT64_MAX / 2;
   thread_info.is_movetime = false;
   thread_info.pondering = false;
   thread_data.pondering = false;
@@ -150,6 +148,11 @@ inline void bench(BoardState &position, ThreadInfo &thread_info,
   for (const std::string &fen : fens) {
     new_game(thread_info, TT);
     set_board(position, thread_info, fen);
+    // Depth-only search: time limits restart per position, so the node count
+    // does not depend on how fast earlier positions were searched.
+    thread_info.max_time = thread_info.opt_time = UINT64_MAX / 2;
+    thread_info.time_manager.hard_limit = thread_info.max_time;
+    thread_info.time_manager.soft_limit = thread_info.opt_time;
     thread_info.start_time = std::chrono::steady_clock::now();
     thread_info.infinite_search = false;
     thread_info.root_moves_limited = false;
@@ -163,6 +166,61 @@ inline void bench(BoardState &position, ThreadInfo &thread_info,
 
   safe_printf("Bench: %" PRIu64 " nodes %" PRIi64 " nps\n", total_nodes,
               static_cast<int64_t>(total_nodes * 1000 / safe_elapsed(start)));
+}
+
+inline bool parse_int64(const std::string &text, int64_t &out) noexcept {
+  const char *first = text.data(), *last = text.data() + text.size();
+  const auto [end, error] = std::from_chars(first, last, out);
+  return !text.empty() && error == std::errc() && end == last;
+}
+
+inline bool parse_check(std::string text, bool &out) {
+  std::transform(text.begin(), text.end(), text.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (text == "true" || text == "1" || text == "yes" || text == "on") out = true;
+  else if (text == "false" || text == "0" || text == "no" || text == "off") out = false;
+  else return false;
+  return true;
+}
+
+// One UCI option: printed by "uci" and applied by "setoption" from the same entry.
+struct UciOption {
+  enum class Kind { Check, Spin, String };
+  std::string name;
+  Kind kind;
+  int64_t min = 0, max = 0;
+  std::string default_value;
+  std::function<void(int64_t)> set_spin;
+  std::function<void(bool)> set_check;
+  std::function<void(const std::string &)> set_string;
+
+  std::string describe() const {
+    switch (kind) {
+    case Kind::Check:
+      return "option name " + name + " type check default " + default_value;
+    case Kind::Spin:
+      return "option name " + name + " type spin default " + default_value +
+             " min " + std::to_string(min) + " max " + std::to_string(max);
+    case Kind::String:
+      return "option name " + name + " type string default " +
+             (default_value.empty() ? "<empty>" : default_value);
+    }
+    return {};
+  }
+};
+
+inline UciOption spin_option(std::string name, int64_t min, int64_t max, int64_t value,
+                             std::function<void(int64_t)> set) {
+  return {std::move(name), UciOption::Kind::Spin, min, max, std::to_string(value), std::move(set), {}, {}};
+}
+
+inline UciOption check_option(std::string name, bool value, std::function<void(bool)> set) {
+  return {std::move(name), UciOption::Kind::Check, 0, 0, value ? "true" : "false", {}, std::move(set), {}};
+}
+
+inline UciOption string_option(std::string name, std::string value,
+                               std::function<void(const std::string &)> set) {
+  return {std::move(name), UciOption::Kind::String, 0, 0, std::move(value), {}, {}, std::move(set)};
 }
 
 inline void uci(ThreadInfo &thread_info, BoardState &position,
@@ -221,6 +279,74 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       std::exit(EXIT_FAILURE);
   };
 
+  auto &ti = thread_info;
+  std::vector<UciOption> options = {
+      spin_option("Hash", 1, 131072, DefaultHashMB, [](int64_t v) { resize_TT(static_cast<int>(v)); }),
+      spin_option("Threads", 1, 1024, 1, [](int64_t v) {
+        try {
+          std::vector<ThreadInfo> workers(static_cast<size_t>(v - 1));
+          thread_data.threads.reserve(static_cast<size_t>(v - 1));
+          thread_data.thread_infos.swap(workers);
+        } catch (const std::bad_alloc &) {
+          std::exit(EXIT_FAILURE);
+        }
+      }),
+      spin_option("MultiPV", 1, 256, ti.multipv, [&ti](int64_t v) { ti.multipv = static_cast<uint16_t>(v); }),
+      check_option("UCI_Chess960", thread_data.is_frc, [](bool v) { thread_data.is_frc = v; }),
+      spin_option("MaxMoveTime", 0, 10000, static_cast<int64_t>(ti.max_move_time),
+                  [&ti](int64_t v) { ti.max_move_time = static_cast<uint64_t>(v); }),
+      spin_option("MoveOverhead", 0, 1000, static_cast<int64_t>(ti.move_overhead),
+                  [&ti](int64_t v) { ti.move_overhead = static_cast<uint64_t>(v); }),
+      check_option("Ponder", ti.use_ponder, [&ti](bool v) {
+        ti.use_ponder = v;
+        if (!v) {
+          ti.pondering = false;
+          ti.ponder_hit = false;
+          ti.ponder_move = MoveNone;
+        }
+      }),
+      spin_option("MaxDepth", 0, MaxRootDepth, ti.max_depth,
+                  [&ti](int64_t v) { ti.max_depth = static_cast<uint16_t>(v); }),
+      spin_option("MaxNodes", 0, INT32_MAX, static_cast<int64_t>(ti.max_nodes),
+                  [&ti](int64_t v) { ti.max_nodes = static_cast<uint64_t>(v); }),
+      check_option("UseSyzygy", ti.use_syzygy, [&](bool v) {
+        ti.use_syzygy = v;
+        init_tablebases();
+      }),
+      string_option("SyzygyPath", ti.syzygy_path, [&](const std::string &v) {
+        ti.syzygy_path = v;
+        init_tablebases();
+      }),
+      spin_option("SyzygyProbeDepth", 1, 64, ti.syzygy_probe_depth,
+                  [&ti](int64_t v) { ti.syzygy_probe_depth = static_cast<int>(v); }),
+      spin_option("SyzygyProbeLimit", 1, 7, ti.syzygy_probe_limit,
+                  [&ti](int64_t v) { ti.syzygy_probe_limit = static_cast<int>(v); }),
+      check_option("Syzygy50MoveRule", ti.syzygy_50_move_rule, [&ti](bool v) { ti.syzygy_50_move_rule = v; }),
+      check_option("UseOpeningBook", ti.use_opening_book, [&](bool v) {
+        ti.use_opening_book = v;
+        init_book();
+      }),
+      string_option("BookPath", ti.book_path, [&](const std::string &v) {
+        ti.book_path = v;
+        init_book();
+      }),
+      spin_option("BookDepthLimit", 0, 50, ti.book_depth_limit,
+                  [&ti](int64_t v) { ti.book_depth_limit = static_cast<int>(v); }),
+      spin_option("BookMinWeight", 0, 1000, ti.book_min_weight,
+                  [&ti](int64_t v) { ti.book_min_weight = static_cast<int>(v); }),
+      spin_option("PonderTimeFactor", 0, 200, ti.ponder_time_factor,
+                  [&ti](int64_t v) { ti.ponder_time_factor = static_cast<int>(v); }),
+      spin_option("NormalizationFactor", 50, 500, NormalizationFactor,
+                  [](int64_t v) { NormalizationFactor = static_cast<int>(v); }),
+  };
+  for (auto &param : params) {
+    options.push_back(spin_option(param.name, param.min, param.max, param.value, [&param](int64_t v) {
+      param.value = static_cast<int>(v);
+      if (param.name == "LMRBase" || param.name == "LMRRatio")
+        init_LMR();
+    }));
+  }
+
   while (getline(in_stream, input)) {
 
     if (input.empty()) {
@@ -251,58 +377,10 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     }
 
     else if (command == "uci") {
-      safe_printf(
-          "id name Stallion EAS NNUE\n"
-          "id author LegendOfCompiling\n"
-
-          "option name Hash type spin default 256 min 1 max 131072\n"
-          "option name Threads type spin default 1 min 1 max 1024\n"
-          "option name MultiPV type spin default 1 min 1 max 256\n"
-          "option name UCI_Chess960 type check default false\n"
-          "option name MaxMoveTime type spin default 0 min 0 max 10000\n"
-          "option name MoveOverhead type spin default 30 min 0 max 1000\n"
-          "option name Ponder type check default true\n"
-          "option name UseSyzygy type check default false\n"
-          "option name SyzygyPath type string default <empty>\n"
-          "option name MaxNodes type spin default 0 min 0 max 500000\n"
-
-          "option name UseOpeningBook type check default false\n"
-          "option name BookPath type string default <empty>\n"
-          "option name BookDepthLimit type spin default 0 min 0 max 50\n"
-          "option name SyzygyProbeDepth type spin default 6 min 1 max 64\n"
-          "option name SyzygyProbeLimit type spin default 6 min 1 max 7\n"
-          "option name Syzygy50MoveRule type check default true\n"
-          "option name BookMinWeight type spin default 0 min 0 max 1000\n"
-          "option name PonderTimeFactor type spin default 200 min 0 max 200\n"
-
-          "option name RazorMargin type spin default 140 min 100 max 500\n"
-          "option name HistPruneDepth type spin default 4 min 2 max 8\n"
-          "option name HistPruneThreshold type spin default 1200 min 800 max "
-          "2000\n"
-          "option name ProbCutMargin type spin default 191 min 100 max 500\n"
-          "option name MultiCutDepth type spin default 4 min 3 max 10\n"
-          "option name MultiCutMoves type spin default 6 min 2 max 8\n"
-          "option name MultiCutCuts type spin default 3 min 1 max 5\n"
-          "option name HistExtThreshold type spin default 7000 min 3000 max "
-          "15000\n"
-          "option name DeltaMarginBase type spin default 180 min 50 max 400\n"
-          "option name NormalizationFactor type spin default 195 min 50 max "
-          "500\n"
-          "option name HalfmoveScaleMax type spin default 200 min 50 max "
-          "500\n");
-
-      safe_printf("option name MaxDepth type spin default 0 min 0 max %d\n",
-                  MaxRootDepth);
-      for (const auto &param : params) {
-        if (param.name == "RazorMargin" || param.name == "ProbCutMargin" ||
-            param.name == "MultiCutDepth" || param.name == "MultiCutMoves" ||
-            param.name == "MultiCutCuts" || param.name == "HistPruneDepth" ||
-            param.name == "HistPruneThreshold")
-          continue;
-        safe_printf("option name %s type spin default %d min %d max %d\n",
-                    param.name.c_str(), param.value, param.min, param.max);
-      }
-      safe_printf("uciok\n");
+      std::string reply = "id name Stallion EAS NNUE\nid author LegendOfCompiling\n";
+      for (const auto &option : options)
+        reply += option.describe() + "\n";
+      safe_printf("%suciok\n", reply.c_str());
     }
 
     else if (command == "printparams") {
@@ -314,208 +392,48 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
     }
 
     else if (command == "setoption") {
-
-      std::string word;
-      std::string optName;
-      std::string valueStr;
+      std::string word, name, value;
       bool in_name = false;
-
       while (input_stream >> word) {
         if (word == "name") {
           in_name = true;
-          continue;
-        }
-        if (word == "value") {
-          std::getline(input_stream, valueStr);
+        } else if (word == "value") {
+          std::getline(input_stream, value);
           break;
-        }
-        if (in_name) {
-          if (!optName.empty())
-            optName += " ";
-          optName += word;
+        } else if (in_name) {
+          name += (name.empty() ? "" : " ") + word;
         }
       }
-
-      const auto first = valueStr.find_first_not_of(" \t\r");
-      valueStr =
-          first == std::string::npos
-              ? ""
-              : valueStr.substr(first,
-                                valueStr.find_last_not_of(" \t\r") - first + 1);
-      if (valueStr == "<empty>" || valueStr == "\"\"")
-        valueStr.clear();
-
-      auto parse_int = [](const std::string &s, bool &ok) {
-        try {
-          size_t end = 0;
-          int v = std::stoi(s, &end);
-          ok = end == s.size();
-          return v;
-        } catch (...) {
-          ok = false;
-          return 0;
-        }
+      const auto first = value.find_first_not_of(" \t\r");
+      value = first == std::string::npos
+                  ? ""
+                  : value.substr(first, value.find_last_not_of(" \t\r") - first + 1);
+      if (value == "<empty>")
+        value.clear();
+      auto lowercase = [](std::string text) {
+        std::transform(text.begin(), text.end(), text.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return text;
       };
-      auto parse_uint64 = [](const std::string &s, bool &ok) -> uint64_t {
-        try {
-          size_t end = 0;
-          unsigned long long tmp = std::stoull(s, &end);
-          ok = !s.empty() && s[0] != '-' && end == s.size();
-          return static_cast<uint64_t>(tmp);
-        } catch (...) {
-          ok = false;
-          return static_cast<uint64_t>(0);
-        }
-      };
-      auto to_bool = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
-          return static_cast<char>(std::tolower(c));
-        });
-        return s == "true" || s == "1" || s == "yes" || s == "on";
-      };
-      auto set_spin = [&](int lo, int hi, int &out) {
-        bool ok = false;
-        int v = parse_int(valueStr, ok);
-        if (ok)
-          out = std::clamp(v, lo, hi);
-      };
-      auto set_spin_req = [&](int lo, int hi, int &out) -> bool {
-        bool ok = false;
-        int v = parse_int(valueStr, ok);
-        if (!ok)
-          return false;
-        out = std::clamp(v, lo, hi);
-        return true;
-      };
-
-      auto lowercase = [](std::string value) {
-        std::transform(
-            value.begin(), value.end(), value.begin(),
-            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return value;
-      };
-      optName = lowercase(optName);
-      if (optName.empty()) {
+      const auto option = std::find_if(options.begin(), options.end(), [&](const UciOption &o) {
+        return lowercase(o.name) == lowercase(name);
+      });
+      if (option == options.end())
         continue;
-      }
-
-      if (optName == "uci_chess960" || optName == "ponder" ||
-          optName == "usesyzygy" || optName == "syzygy50moverule" ||
-          optName == "useopeningbook") {
-        const auto value = lowercase(valueStr);
-        if (value != "true" && value != "false" && value != "1" &&
-            value != "0" && value != "yes" && value != "no" && value != "on" &&
-            value != "off") {
-          continue;
-        }
-      }
-
-      if (optName == "hash") {
-        bool ok = false;
-        int mb = parse_int(valueStr, ok);
-        if (!ok)
-          continue;
-        resize_TT(std::clamp(mb, 1, 131072));
-      } else if (optName == "threads") {
-        bool ok = false;
-        int thr = parse_int(valueStr, ok);
-        if (!ok)
-          continue;
-        thr = std::clamp(thr, 1, 1024);
-        try {
-          std::vector<ThreadInfo> workers(thr - 1);
-          thread_data.threads.reserve(thr - 1);
-          thread_data.thread_infos.swap(workers);
-        } catch (const std::bad_alloc &) {
-          std::exit(EXIT_FAILURE);
-        }
-      } else if (optName == "multipv") {
-        int mv;
-        if (!set_spin_req(1, 256, mv))
-          continue;
-        thread_info.multipv = static_cast<uint16_t>(mv);
-      } else if (optName == "uci_chess960") {
-        bool b = to_bool(valueStr);
-        thread_data.is_frc = b;
-      } else if (optName == "maxmovetime") {
-        int v;
-        if (!set_spin_req(0, 10000, v))
-          continue;
-        thread_info.max_move_time = static_cast<uint64_t>(v);
-      } else if (optName == "moveoverhead") {
-        int v;
-        if (!set_spin_req(0, 1000, v))
-          continue;
-        thread_info.move_overhead = static_cast<uint64_t>(v);
-      } else if (optName == "ponder") {
-        thread_info.use_ponder = to_bool(valueStr);
-        if (!thread_info.use_ponder) {
-          thread_info.pondering = false;
-          thread_info.ponder_hit = false;
-          thread_info.ponder_move = MoveNone;
-        }
-      } else if (optName == "maxdepth") {
-        int v;
-        if (!set_spin_req(0, MaxRootDepth, v))
-          continue;
-        thread_info.max_depth = static_cast<uint16_t>(v);
-      } else if (optName == "maxnodes") {
-        bool ok = false;
-        uint64_t v = parse_uint64(valueStr, ok);
-        if (!ok)
-          continue;
-        thread_info.max_nodes = std::min(v, uint64_t{500000});
-      } else if (optName == "usesyzygy") {
-        thread_info.use_syzygy = to_bool(valueStr);
-        init_tablebases();
-      } else if (optName == "syzygypath") {
-        thread_info.syzygy_path = valueStr;
-        init_tablebases();
-      } else if (optName == "syzygyprobedepth") {
-        if (!set_spin_req(1, 64, thread_info.syzygy_probe_depth))
-          continue;
-      } else if (optName == "syzygyprobelimit") {
-        if (!set_spin_req(1, 7, thread_info.syzygy_probe_limit))
-          continue;
-      } else if (optName == "syzygy50moverule") {
-        thread_info.syzygy_50_move_rule = to_bool(valueStr);
-      } else if (optName == "useopeningbook") {
-        thread_info.use_opening_book = to_bool(valueStr);
-        init_book();
-      } else if (optName == "bookpath") {
-        thread_info.book_path = valueStr;
-        init_book();
-      } else if (optName == "bookdepthlimit") {
-        if (!set_spin_req(0, 50, thread_info.book_depth_limit))
-          continue;
-      } else if (optName == "bookminweight") {
-        if (!set_spin_req(0, 1000, thread_info.book_min_weight))
-          continue;
-      } else if (optName == "pondertimefactor") {
-        if (!set_spin_req(0, 200, thread_info.ponder_time_factor))
-          continue;
-      } else if (optName == "histextthreshold")
-        set_spin(3000, 15000, HistExtThreshold);
-      else if (optName == "deltamarginbase")
-        set_spin(50, 400, DELTA_MARGIN_BASE);
-      else if (optName == "normalizationfactor")
-        set_spin(50, 500, NormalizationFactor);
-      else if (optName == "halfmovescalemax")
-        set_spin(50, 500, HALFMOVE_SCALE_MAX);
-      else {
-        for (auto &param : params) {
-          if (optName == lowercase(param.name)) {
-            bool ok = false;
-            int v = parse_int(valueStr, ok);
-            if (!ok)
-              break;
-            v = std::clamp(v, param.min, param.max);
-            param.value = v;
-            if (optName == "lmrbase" || optName == "lmrratio")
-              init_LMR();
-            break;
-          }
-        }
+      int64_t number = 0;
+      bool flag = false;
+      switch (option->kind) {
+      case UciOption::Kind::Spin:
+        if (parse_int64(value, number))
+          option->set_spin(std::clamp(number, option->min, option->max));
+        break;
+      case UciOption::Kind::Check:
+        if (parse_check(value, flag))
+          option->set_check(flag);
+        break;
+      case UciOption::Kind::String:
+        option->set_string(value);
+        break;
       }
     }
 
@@ -631,7 +549,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       thread_info.stability_counter = 0;
       thread_info.time_checks = 0;
       thread_info.max_nodes_searched = UINT64_MAX / 2;
-      thread_info.opt_nodes_searched = UINT64_MAX / 2;
       thread_info.max_iter_depth = MaxRootDepth;
       thread_info.mate_search = 0;
 
@@ -641,29 +558,8 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       int movestogo = 0;
       std::vector<Action> searchmoves;
       bool searchmoves_specified = false;
-      auto parse_int_token = [](const std::string &s, int &out) -> bool {
-        try {
-          size_t consumed = 0;
-          int v = std::stoi(s, &consumed);
-          if (s.empty() || s[0] == '-' || consumed != s.size())
-            return false;
-          out = v;
-          return true;
-        } catch (...) {
-          return false;
-        }
-      };
-      auto parse_u64_token = [](const std::string &s, uint64_t &out) -> bool {
-        try {
-          size_t consumed = 0;
-          uint64_t v = std::stoull(s, &consumed);
-          if (s.empty() || s[0] == '-' || consumed != s.size())
-            return false;
-          out = v;
-          return true;
-        } catch (...) {
-          return false;
-        }
+      auto parse_count = [](const std::string &s, int64_t &out) {
+        return parse_int64(s, out) && out >= 0;
       };
       auto is_uci_move_token = [](const std::string &s) -> bool {
         auto valid_file = [](char c) { return c >= 'a' && c <= 'h'; };
@@ -705,11 +601,12 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
           if (i + 1 >= go_tokens.size())
             continue;
 
-          int value = 0;
-          if (!parse_int_token(go_tokens[i + 1], value)) {
+          int64_t parsed = 0;
+          if (!parse_count(go_tokens[i + 1], parsed)) {
             ++i;
             continue;
           }
+          const int value = static_cast<int>(std::min<int64_t>(parsed, INT32_MAX));
 
           if (token == "wtime") {
             if (color == Colors::White)
@@ -737,14 +634,9 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
         } else if (token == "nodes") {
           if (i + 1 >= go_tokens.size())
             continue;
-          uint64_t nodes = 0;
-          if (parse_u64_token(go_tokens[i + 1], nodes)) {
-
-            nodes = std::max<uint64_t>(1, nodes);
-            thread_info.max_nodes_searched = nodes;
-            thread_info.opt_nodes_searched =
-                std::max<uint64_t>(1, nodes / 10 * 8);
-          }
+          int64_t nodes = 0;
+          if (parse_count(go_tokens[i + 1], nodes))
+            thread_info.max_nodes_searched = std::max<uint64_t>(1, static_cast<uint64_t>(nodes));
           ++i;
         } else if (token == "searchmoves") {
           searchmoves_specified = true;
@@ -860,9 +752,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       if (thread_info.max_nodes > 0) {
         thread_info.max_nodes_searched =
             std::min(thread_info.max_nodes_searched, thread_info.max_nodes);
-        thread_info.opt_nodes_searched = std::min(
-            thread_info.opt_nodes_searched,
-            std::max<uint64_t>(1, thread_info.max_nodes_searched * 8 / 10));
       }
 
       if (searchmoves_specified) {

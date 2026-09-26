@@ -1,41 +1,52 @@
 #!/usr/bin/env python3
-"""Stallion SBIN: 32-byte ultra-compact binary chess dataset tool.
+"""Stallion SBIN: 32-byte binary chess positions and their native codec.
 
-Features:
-- Fixed 32 bytes per position (zero index overhead, O(1) random access).
-- Direct zero-copy mmap streaming from SSD.
-- Native C++ feature decoder matching Stallion NNUE architecture.
+- Fixed 32 bytes per position, O(1) random access, zero-copy mmap reads.
+- Native C++ library (sbin.cpp) built from the engine headers: validation,
+  NNUE feature batches, selection and label calibration.
+- A pure Python feature oracle to cross-check the native decoder.
 """
 
 from __future__ import annotations
 
 import argparse
 import ctypes
-from ctypes import c_char_p, c_float, c_int16, c_int, c_size_t, POINTER, Structure
+from ctypes import POINTER, Structure, c_char_p, c_double, c_float, c_int, c_int16, c_longlong, c_size_t, c_uint32, c_uint64, c_void_p
 import math
-import json
 import operator
 from pathlib import Path
-import subprocess
 import sys
 import time
 import uuid
 from functools import lru_cache
+
+import numpy as np
 
 if __package__:
     from . import stallion as workflow
 else:
     import stallion as workflow
 
-source_identity = workflow.file_identity
-
 ROOT = Path(__file__).resolve().parent
 FORMAT_VERSION = 2
-WRITER_VERSION = 3
-NNUE_SLOTS = 256
 DYLIB_PATH = ROOT / ("libstallion_sbin.dylib" if sys.platform == "darwin" else "libstallion_sbin.so")
 
-# 32-byte PackedPosition struct in Python ctypes
+# Mirrors of the enums in sbin.h.
+SBIN_MISSING_FULLMOVE = 1
+SBIN_NONZERO_PADDING = 2
+SBIN_INVALID_POSITION = 4
+SBIN_STATUS_FLAGS = ((SBIN_MISSING_FULLMOVE, "missing_fullmove"),
+                     (SBIN_NONZERO_PADDING, "nonzero_padding"),
+                     (SBIN_INVALID_POSITION, "invalid_position"))
+FILTERS = {"mate": 1, "check": 2, "tactical": 4}
+RECORD = np.dtype((np.void, 32))
+STAT_NAMES = (
+    "selected", "invalid", "duplicate", "mate", "check", "tactical", "scanned", "next_offset",
+    "endgame", "late_middle", "midgame", "opening", "puzzles", "sacrifices", "sharp", "mirrored",
+    "sac1", "sac2", "sac3", "sac4", "sac5", "sac9",
+)
+
+
 class PackedPosition(Structure):
     _pack_ = 1
     _fields_ = [
@@ -48,15 +59,8 @@ class PackedPosition(Structure):
         ("reserved", ctypes.c_uint8 * 2),
     ]
 
-assert ctypes.sizeof(PackedPosition) == 32, "PackedPosition must be exactly 32 bytes"
 
-# Mirror of SbinValidationStatus in sbin.h.
-SBIN_MISSING_FULLMOVE = 1
-SBIN_NONZERO_PADDING = 2
-SBIN_INVALID_POSITION = 4
-SBIN_STATUS_FLAGS = ((SBIN_MISSING_FULLMOVE, "missing_fullmove"),
-                     (SBIN_NONZERO_PADDING, "nonzero_padding"),
-                     (SBIN_INVALID_POSITION, "invalid_position"))
+assert ctypes.sizeof(PackedPosition) == 32, "PackedPosition must be exactly 32 bytes"
 
 
 @lru_cache(maxsize=1)
@@ -64,83 +68,87 @@ def load_native_lib():
     sources = [ROOT / name for name in ("sbin.cpp", "sbin.h", "Makefile")]
     sources += [ROOT.parent / "engine" / "src" / name for name in ("bitboard.h", "nnue.h", "defs.h")]
     if not DYLIB_PATH.is_file() or any(p.stat().st_mtime_ns > DYLIB_PATH.stat().st_mtime_ns for p in sources):
-        subprocess.run(["make", "-C", str(ROOT)], check=True, capture_output=True, text=True)
+        workflow.run_checked(["make", "-C", str(ROOT)])
     lib = ctypes.CDLL(str(DYLIB_PATH))
-    lib.sbin_format_version.restype = c_int
+    signatures = {
+        "sbin_format_version": (c_int, []),
+        "sbin_nnue_slots": (c_int, []),
+        "sbin_nnue_features": (c_int, []),
+        "sbin_stat_count": (c_int, []),
+        "sbin_pack_fen": (c_int, [c_char_p, c_float, c_int16, POINTER(PackedPosition)]),
+        "sbin_unpack_fen": (c_int, [POINTER(PackedPosition), c_char_p, c_size_t, POINTER(c_float), POINTER(c_int16)]),
+        "sbin_extract_nnue": (c_int, [POINTER(PackedPosition), POINTER(c_int16), POINTER(c_int16), POINTER(c_int)]),
+        "sbin_validate_batch": (c_size_t, [c_void_p, c_size_t, c_void_p]),
+        "sbin_screen_batch": (None, [c_void_p, c_size_t, c_uint32, c_void_p]),
+        "sbin_group_keys": (None, [c_void_p, c_size_t, c_void_p]),
+        "sbin_calibrate_labels": (None, [c_void_p, c_size_t, c_double]),
+        "sbin_build_batch": (c_longlong, [c_void_p, c_size_t, c_void_p, c_size_t, c_float, c_uint64,
+                                          c_void_p, c_void_p, c_void_p, c_void_p, c_void_p, c_void_p]),
+        "sbin_select_base": (c_longlong, [c_void_p, c_size_t, c_size_t, c_void_p, c_uint32, c_int,
+                                          c_double, c_void_p, c_void_p]),
+        "sbin_select_aggressive": (c_longlong, [c_void_p, c_void_p, c_size_t, c_void_p, c_size_t, c_size_t,
+                                                c_uint64, c_double, c_int, c_uint32, c_int, c_double,
+                                                c_void_p, c_void_p]),
+    }
+    for name, (restype, argtypes) in signatures.items():
+        function = getattr(lib, name)
+        function.restype = restype
+        function.argtypes = argtypes
     if lib.sbin_format_version() != FORMAT_VERSION:
         raise RuntimeError("SBIN kütüphane sürümü uyuşmuyor; make -C training çalıştırın.")
-
-    lib.sbin_pack_fen.argtypes = [c_char_p, c_float, c_int16, POINTER(PackedPosition)]
-    lib.sbin_pack_fen.restype = c_int
-
-    lib.sbin_unpack_fen.argtypes = [POINTER(PackedPosition), c_char_p, c_size_t, POINTER(c_float), POINTER(c_int16)]
-    lib.sbin_unpack_fen.restype = c_int
-
-    lib.sbin_extract_nnue.argtypes = [POINTER(PackedPosition), POINTER(c_int16), POINTER(c_int16), POINTER(c_int)]
-    lib.sbin_extract_nnue.restype = c_int
-
-    lib.sbin_batch_decode.argtypes = [POINTER(PackedPosition), c_size_t, POINTER(c_int16), POINTER(c_float)]
-    lib.sbin_batch_decode.restype = c_size_t
-
-    lib.sbin_batch_decode_indexed.argtypes = [POINTER(PackedPosition), c_size_t, POINTER(c_int16), POINTER(c_float), POINTER(ctypes.c_uint32)]
-    lib.sbin_batch_decode_indexed.restype = c_size_t
-
-    lib.sbin_validate_batch.argtypes = [POINTER(PackedPosition), c_size_t, POINTER(ctypes.c_uint8)]
-    lib.sbin_validate_batch.restype = c_size_t
-
-    lib.sbin_classify_phase.argtypes = [POINTER(PackedPosition)]
-    lib.sbin_classify_phase.restype = c_int
-
-    lib.sbin_classify_phases_batch.argtypes = [POINTER(PackedPosition), c_size_t, POINTER(ctypes.c_uint8)]
-    lib.sbin_classify_phases_batch.restype = None
-
+    if lib.sbin_nnue_features() != workflow.NNUE_FEATURES or lib.sbin_stat_count() != len(STAT_NAMES):
+        raise RuntimeError("SBIN kütüphanesi ile stallion.py NNUE/istatistik düzeni uyuşmuyor.")
     return lib
 
 
-def sbin_is_current(parquet_path: Path, sbin_path: Path) -> bool:
-    try:
-        saved = json.loads(sbin_path.with_suffix(".sbin.json").read_text())
-        return (saved["version"] == FORMAT_VERSION and
-                saved.get("writer_version") == WRITER_VERSION and
-                saved["source"] == source_identity(parquet_path) and
-                saved["output"] == source_identity(sbin_path))
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
+def nnue_slots() -> int:
+    return load_native_lib().sbin_nnue_slots()
+
+
+def pointer(array) -> int:
+    """Address of a C-contiguous numpy array for the native calls."""
+    if not array.flags["C_CONTIGUOUS"]:
+        raise ValueError("Native çağrı için C-bitişik dizi gerekli.")
+    return array.ctypes.data
+
+
+def filter_mask(names) -> int:
+    mask = 0
+    for name in names:
+        if name not in FILTERS:
+            raise ValueError(f"Bilinmeyen filtre: {name}; geçerli: {', '.join(FILTERS)}")
+        mask |= FILTERS[name]
+    return mask
+
+
+def stats_dict(stats) -> dict[str, int]:
+    return {name: int(value) for name, value in zip(STAT_NAMES, stats)}
 
 
 class SbinDataset:
-    """Zero-copy memory-mapped Stallion SBIN dataset."""
+    """Read-only memory-mapped SBIN dataset; views stay valid after close()."""
+
     def __init__(self, sbin_path: Path):
         self.path = Path(sbin_path).resolve()
-        self.file_size = self.path.stat().st_size
-        if not self.file_size or self.file_size % 32 != 0:
-            raise ValueError(f"Geçersiz SBIN dosya boyutu: {self.file_size} (32'nin katı olmalı)")
-        self.count = self.file_size // 32
+        file_size = self.path.stat().st_size
+        if not file_size or file_size % 32 != 0:
+            raise ValueError(f"Geçersiz SBIN dosya boyutu: {file_size} (32'nin katı olmalı)")
+        self.count = file_size // 32
         self.lib = load_native_lib()
-
-        # mmap the binary file directly
-        import mmap
-        self._f = open(self.path, "rb")
-        try:
-            self._mmap = mmap.mmap(self._f.fileno(), 0, access=mmap.ACCESS_COPY)
-            # Create ctypes array over mmap buffer (ZERO COPY!)
-            self._array = (PackedPosition * self.count).from_buffer(self._mmap)
-        except Exception:
-            if getattr(self, "_mmap", None) is not None:
-                self._mmap.close()
-            self._f.close()
-            raise
+        self._records = np.memmap(self.path, dtype=RECORD, mode="r")
 
     def __len__(self) -> int:
         return self.count
 
+    def records(self):
+        """One 32-byte void record per row."""
+        return self._records
+
     def _position(self, index: int) -> PackedPosition:
-        if self._mmap is None:
-            raise ValueError("SBIN veri seti kapalı.")
         index = operator.index(index)
         if index < 0 or index >= self.count:
             raise IndexError(f"SBIN indeks aralık dışında: {index}")
-        return PackedPosition.from_buffer_copy(self._mmap[index * 32:(index + 1) * 32])
+        return PackedPosition.from_buffer_copy(self._records[index].tobytes())
 
     def get_fen(self, index: int) -> tuple[str, float, int]:
         pos = self._position(index)
@@ -149,54 +157,26 @@ class SbinDataset:
         eval_cp = c_int16()
         ret = self.lib.sbin_unpack_fen(ctypes.byref(pos), buf, 128, ctypes.byref(wdl), ctypes.byref(eval_cp))
         if ret != 0:
-            raise RuntimeError(f"Unpack hatası (code {ret})")
+            raise RuntimeError(f"Unpack hatası (code {ret}); kayıt={index}")
         return buf.value.decode("utf-8"), wdl.value, eval_cp.value
 
     def eval_view(self):
-        """Read-only int16 view of the packed cp-eval field (offset 24, stride 32)."""
-        import numpy as np
-        return np.ndarray((self.count,), dtype="<i2", buffer=self._mmap, offset=24, strides=(32,))
-
-    def wdl_view(self):
-        """Read-only uint16 view of the packed WDL field (offset 26, stride 32)."""
-        import numpy as np
-        return np.ndarray((self.count,), dtype="<u2", buffer=self._mmap, offset=26, strides=(32,))
-
-    def flags_view(self):
-        """Read-only uint8 view of the packed flags field (offset 28, stride 32).
-
-        Bit 0 is the side to move (1 = black)."""
-        import numpy as np
-        return np.ndarray((self.count,), dtype=np.uint8, buffer=self._mmap, offset=28, strides=(32,))
-
-    def records_ptr(self, index: int):
-        """Record at index for batch native calls (shares the mmap buffer)."""
-        return self._array[index]
-
-    def record_bytes(self, index: int) -> bytes:
-        """Raw 32 bytes of the record at index."""
-        return self._mmap[index * 32:(index + 1) * 32]
+        """int16 view of the packed white-POV cp field (offset 24, stride 32)."""
+        return np.ndarray((self.count,), dtype="<i2", buffer=self._records, offset=24, strides=(32,))
 
     def get_nnue_features(self, index: int) -> tuple[list[int], list[int], bool]:
         pos = self._position(index)
-        us = (c_int16 * NNUE_SLOTS)()
-        them = (c_int16 * NNUE_SLOTS)()
+        slots = self.lib.sbin_nnue_slots()
+        us = (c_int16 * slots)()
+        them = (c_int16 * slots)()
         white_turn = c_int()
         total = self.lib.sbin_extract_nnue(ctypes.byref(pos), us, them, ctypes.byref(white_turn))
         if total < 0:
-            raise RuntimeError("NNUE extract hatası")
-        return ([x for x in us[:total] if x >= 0], [x for x in them[:total] if x >= 0],
-                bool(white_turn.value))
+            raise RuntimeError(f"NNUE extract hatası; kayıt={index}")
+        return ([x for x in us if x >= 0], [x for x in them if x >= 0], bool(white_turn.value))
 
     def close(self):
-        if getattr(self, "_array", None) is not None:
-            self._array = None
-        if getattr(self, "_mmap", None) is not None:
-            self._mmap.close()
-            self._mmap = None
-        if getattr(self, "_f", None) is not None:
-            self._f.close()
-            self._f = None
+        self._records = None
 
     def __enter__(self):
         return self
@@ -205,271 +185,343 @@ class SbinDataset:
         self.close()
 
 
-def convert_parquet_to_sbin(parquet_path: Path, sbin_path: Path) -> None:
+def convert_parquet_to_sbin(parquet_path: Path, sbin_path: Path) -> dict:
+    """Pack a (fen, wdl) Parquet table; any invalid row stops the conversion."""
     import pyarrow.parquet as pq
     lib = load_native_lib()
     parquet_path = Path(parquet_path).resolve()
     sbin_path = Path(sbin_path).resolve()
     if parquet_path == sbin_path:
         raise ValueError("Parquet ve SBIN çıktı yolları farklı olmalı.")
-    if sbin_is_current(parquet_path, sbin_path):
-        return
+    started = time.perf_counter()
+    source_before = workflow.file_identity(parquet_path)
+    packed = PackedPosition()
+    rows = 0
     sbin_path.parent.mkdir(parents=True, exist_ok=True)
-
-    print(f"Dönüştürülüyor: {parquet_path} -> {sbin_path}")
-    t0 = time.time()
-    source_before = source_identity(parquet_path)
-    pf = pq.ParquetFile(parquet_path)
-    total_rows = pf.metadata.num_rows
-
-    packed_buf = PackedPosition()
-    success = 0
-    skipped = 0
-
     temporary = sbin_path.with_name(f".{sbin_path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with open(temporary, "wb") as out_f:
-            for batch in pf.iter_batches(batch_size=65536, columns=["fen", "wdl"]):
-                fens = batch.column(0).to_pylist()
-                wdls = batch.column(1).to_pylist()
-                batch_bytes = bytearray()
-                for fen, wdl in zip(fens, wdls):
-                    try:
-                        w_val = float(wdl)
-                        if not math.isfinite(w_val) or not 0 <= w_val <= 1:
-                            raise ValueError("invalid target")
-                        fen = workflow.normalize_engine_fen(fen)
-                        ret = lib.sbin_pack_fen(
-                            fen.encode("utf-8"), c_float(w_val), c_int16(0),
-                            ctypes.byref(packed_buf),
-                        )
-                    except (TypeError, ValueError, OverflowError, UnicodeError):
-                        ret = -1
-                    if ret == 0:
-                        batch_bytes.extend(bytes(packed_buf))
-                        success += 1
-                    else:
-                        skipped += 1
-                out_f.write(batch_bytes)
-                print(f"\rİşlenen: {success:,} / {total_rows:,} (Atlanan: {skipped})", end="", flush=True)
-
-        if not success:
-            raise ValueError("Geçerli SBIN kaydı bulunamadı.")
-        if source_identity(parquet_path) != source_before:
+            for batch in pq.ParquetFile(parquet_path).iter_batches(batch_size=65536, columns=["fen", "wdl"]):
+                data = bytearray()
+                for fen, wdl in zip(batch.column(0).to_pylist(), batch.column(1).to_pylist()):
+                    value = float(wdl)
+                    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                        raise ValueError(f"Geçersiz WDL; satır={rows}")
+                    fen = workflow.normalize_engine_fen(fen)
+                    status = lib.sbin_pack_fen(fen.encode("utf-8"), c_float(value), c_int16(0), ctypes.byref(packed))
+                    if status:
+                        raise ValueError(f"Paketlenemeyen FEN (kod {status}); satır={rows}: {fen}")
+                    data.extend(bytes(packed))
+                    rows += 1
+                out_f.write(data)
+        if not rows:
+            raise ValueError("Parquet dosyasında satır yok.")
+        if workflow.file_identity(parquet_path) != source_before:
             raise RuntimeError("Parquet dönüşüm sırasında değişti; çıktı yayımlanmadı.")
         temporary.replace(sbin_path)
-    except Exception:
+    finally:
         temporary.unlink(missing_ok=True)
-        raise
-    workflow.atomic_json(sbin_path.with_suffix(".sbin.json"), {
-        "version": FORMAT_VERSION, "writer_version": WRITER_VERSION, "source": source_before,
-        "output": source_identity(sbin_path), "rows": success, "invalid_rows": skipped,
-    })
-
-    elapsed = time.time() - t0
-    out_size = sbin_path.stat().st_size
-    ratio = (out_size / parquet_path.stat().st_size) * 100
-    print(f"\n[BAŞARILI] {success:,} pozisyon {elapsed:.2f} saniyede dönüştürüldü ({success/elapsed:,.0f} pos/sn).")
-    print(f"Parquet boyutu: {parquet_path.stat().st_size / 1024 / 1024:.2f} MB")
-    print(f"SBIN boyutu   : {out_size / 1024 / 1024:.2f} MB (Sıkıştırma oranı: %{ratio:.1f})")
+    report = {"version": FORMAT_VERSION, "source": source_before,
+              "output": workflow.file_identity(sbin_path), "rows": rows,
+              "seconds": round(time.perf_counter() - started, 3)}
+    workflow.atomic_json(sbin_path.with_suffix(".sbin.json"), report)
+    return report
 
 
-def eval_targets(cp, wdl):
-    import numpy as np
-    cp = np.asarray(cp, dtype=np.float64)
-    expected = 1.0 / (1.0 + 10.0 ** (-np.clip(cp, -1500, 1500) / 400.0))
-    mate = (np.abs(cp) == 2000) & ((wdl == 0) | (wdl == 65535))
-    return np.where(mate, (cp > 0).astype(float), expected)
+# ---- Pure Python feature oracle (independent of the native decoder) ----
+
+KING_BUCKET_TABLE = [
+    0, 1, 2, 3, 3, 2, 1, 0,
+    0, 1, 2, 3, 3, 2, 1, 0,
+    4, 5, 6, 7, 7, 6, 5, 4,
+    4, 5, 6, 7, 7, 6, 5, 4,
+    8, 9, 10, 11, 11, 10, 9, 8,
+    8, 9, 10, 11, 11, 10, 9, 8,
+    12, 13, 14, 15, 15, 14, 13, 12,
+    12, 13, 14, 15, 15, 14, 13, 12,
+]
+PIECE_CODES = {"P": 2, "p": 3, "N": 4, "n": 5, "B": 6, "b": 7,
+               "R": 8, "r": 9, "Q": 10, "q": 11, "K": 12, "k": 13}
+FEATURES_PER_KING_BUCKET = 12 * 64
+FEATURES_PER_COLOR = 6 * 64
+OFF_MATERIAL = 16 * FEATURES_PER_KING_BUCKET
+OFF_ZONE_OCC = OFF_MATERIAL + 100
+OFF_ZONE_ATK = OFF_ZONE_OCC + 234
+OFF_PAWN = OFF_ZONE_ATK + 18
+OFF_ROOKFILE = OFF_PAWN + 384
+OFF_COMPLEX = OFF_ROOKFILE + 256
 
 
-def calibrate_targets(cp, wdl_u16, lambda_val: float = 0.0):
-    """White-POV WDL blended from CP and the stored WDL field.
-
-    Mirrors stallion.eval_wdl: mate scores (|cp| == 2000 with a decisive
-    stored field) stay decisive, otherwise (1-lambda) * cp_wdl + lambda *
-    stored_wdl. Used both when rewriting records and when scoring mining
-    candidates, so selection and output labels always agree.
-    """
-    import numpy as np
-    lam = float(lambda_val)
-    if not 0.0 <= lam <= 1.0:
-        raise ValueError("wdl-lambda 0 ile 1 arasında olmalı.")
-    cp = np.asarray(cp, dtype=np.float64)
-    stored = np.asarray(wdl_u16, dtype=np.float64) / 65535.0
-    expected = 1.0 / (1.0 + 10.0 ** (-np.clip(cp, -1500, 1500) / 400.0))
-    mate = (np.abs(cp) == 2000) & ((stored == 0.0) | (stored == 1.0))
-    blended = (1.0 - lam) * expected + lam * stored
-    return np.where(mate, (cp > 0).astype(float), blended)
+def _step_table(steps) -> list[int]:
+    table = [0] * 64
+    for sq in range(64):
+        f, r = sq & 7, sq >> 3
+        for df, dr in steps:
+            tf, tr = f + df, r + dr
+            if 0 <= tf < 8 and 0 <= tr < 8:
+                table[sq] |= 1 << (tr * 8 + tf)
+    return table
 
 
-def calibrate_eval_records(data: bytes, lambda_val: float = 0.0) -> bytes:
-    import numpy as np
-    if len(data) % 32:
-        raise ValueError("SBIN kayıt boyutu 32'nin katı olmalı.")
-    if not data:
-        return data
-    result = bytearray(data)
-    count = len(data) // 32
-    cp = np.ndarray((count,), dtype="<i2", buffer=result, offset=24, strides=(32,))
-    wdl = np.ndarray((count,), dtype="<u2", buffer=result, offset=26, strides=(32,))
-    wdl[:] = np.rint(calibrate_targets(cp, wdl, lambda_val) * 65535).astype("<u2")
-    return bytes(result)
+_PAWN_ATK = [_step_table(((-1, 1), (1, 1))), _step_table(((-1, -1), (1, -1)))]
+_KNIGHT_ATK = _step_table(((-2, -1), (-2, 1), (-1, 2), (1, 2), (2, 1), (2, -1), (1, -2), (-1, -2)))
+_KING_ATK = _step_table([(df, dr) for df in (-1, 0, 1) for dr in (-1, 0, 1) if df or dr])
+
+
+def _slider_attacked(sq: int, occ: int, pieces: list[int], colors: list[int],
+                     color: int, diagonal: bool) -> bool:
+    f, r = sq & 7, sq >> 3
+    if diagonal:
+        dirs = ((1, 1), (-1, 1), (1, -1), (-1, -1))
+        want = (pieces[3] | pieces[5]) & colors[color]
+    else:
+        dirs = ((1, 0), (-1, 0), (0, 1), (0, -1))
+        want = (pieces[4] | pieces[5]) & colors[color]
+    for df, dr in dirs:
+        tf, tr = f + df, r + dr
+        while 0 <= tf < 8 and 0 <= tr < 8:
+            t = tr * 8 + tf
+            if (occ >> t) & 1:
+                if (want >> t) & 1:
+                    return True
+                break
+            tf += df
+            tr += dr
+    return False
+
+
+def _attacked_by(sq: int, color: int, occ: int, colors: list[int], pieces: list[int]) -> bool:
+    return bool(_PAWN_ATK[color ^ 1][sq] & pieces[1] & colors[color] or
+                _KNIGHT_ATK[sq] & pieces[2] & colors[color] or
+                _slider_attacked(sq, occ, pieces, colors, color, True) or
+                _slider_attacked(sq, occ, pieces, colors, color, False) or
+                _KING_ATK[sq] & pieces[6] & colors[color])
+
+
+def _collect_extra_view(board: list[int], colors: list[int], pieces: list[int],
+                        wking: int, bking: int, flip: bool) -> list[int]:
+    """Python rendering of engine collect_extra_features()."""
+    out: list[int] = []
+    kings = (wking, bking)
+    mat_count = [[0] * 5 for _ in range(2)]
+    complex_count = [[0] * 2 for _ in range(2)]
+    for sq in range(64):
+        piece = board[sq]
+        if piece < 2 or piece > 13:
+            continue
+        color = piece & 1
+        base = (piece >> 1) - 1
+        if base <= 4:
+            mat_count[color][base] += 1
+        if base == 0:
+            complex_count[color][((sq & 7) + (sq >> 3)) & 1] += 1
+    for slot_side in range(2):
+        real_side = slot_side ^ 1 if flip else slot_side
+        for typ in range(5):
+            out.append(OFF_MATERIAL + slot_side * 50 + typ * 10 + min(mat_count[real_side][typ], 9))
+    for slot_king in range(2):
+        real_king = slot_king ^ 1 if flip else slot_king
+        king_view = kings[real_king] ^ 56 if flip else kings[real_king]
+        kf, kr = king_view & 7, king_view >> 3
+        for off in range(9):
+            tf, tr = kf + (off % 3) - 1, kr + (off // 3) - 1
+            if tf < 0 or tf > 7 or tr < 0 or tr > 7:
+                continue
+            target_real = ((tr * 8 + tf) ^ 56) if flip else (tr * 8 + tf)
+            piece = board[target_real]
+            occ = 0 if piece < 2 or piece > 13 else (piece ^ 1 if flip else piece) - 1
+            out.append(OFF_ZONE_OCC + slot_king * 117 + off * 13 + occ)
+    occ_bb = colors[0] | colors[1]
+    for slot_king in range(2):
+        real_king = slot_king ^ 1 if flip else slot_king
+        king_view = kings[real_king] ^ 56 if flip else kings[real_king]
+        kf, kr = king_view & 7, king_view >> 3
+        enemy_real = slot_king if flip else slot_king ^ 1
+        for off in range(9):
+            tf, tr = kf + (off % 3) - 1, kr + (off // 3) - 1
+            if tf < 0 or tf > 7 or tr < 0 or tr > 7:
+                continue
+            target_real = ((tr * 8 + tf) ^ 56) if flip else (tr * 8 + tf)
+            if _attacked_by(target_real, enemy_real, occ_bb, colors, pieces):
+                out.append(OFF_ZONE_ATK + slot_king * 9 + off)
+    for slot_color in range(2):
+        real_color = slot_color ^ 1 if flip else slot_color
+        pawn_code = 2 + real_color
+        enemy_pawn = 3 - real_color
+        for state in range(3):
+            for sq in range(64):
+                real = sq ^ 56 if flip else sq
+                if board[real] != pawn_code:
+                    continue
+                f, r = real & 7, real >> 3
+                if state == 0:
+                    has = not any(board[rr * 8 + ff] == enemy_pawn
+                                  for ff in (f - 1, f, f + 1) if 0 <= ff < 8
+                                  for rr in range(8) if (rr > r if real_color == 0 else rr < r))
+                elif state == 1:
+                    has = not any(board[rr * 8 + ff] == pawn_code
+                                  for ff in (f - 1, f + 1) if 0 <= ff < 8 for rr in range(8))
+                else:
+                    has = any(rr * 8 + f != real and board[rr * 8 + f] == pawn_code for rr in range(8))
+                if has:
+                    out.append(OFF_PAWN + slot_color * 192 + state * 64 + sq)
+    for slot_color in range(2):
+        real_color = slot_color ^ 1 if flip else slot_color
+        rook_code = 8 + real_color
+        for kind in range(2):
+            for sq in range(64):
+                real = sq ^ 56 if flip else sq
+                if board[real] != rook_code:
+                    continue
+                f = real & 7
+                file_pawns = [board[rr * 8 + f] for rr in range(8) if board[rr * 8 + f] in (2, 3)]
+                ok = not file_pawns if kind == 0 else all((p & 1) != real_color for p in file_pawns)
+                if ok:
+                    out.append(OFF_ROOKFILE + slot_color * 128 + kind * 64 + sq)
+    for slot_side in range(2):
+        for sc in range(2):
+            real_side = slot_side ^ 1 if flip else slot_side
+            real_sc = sc ^ 1 if flip else sc
+            out.append(OFF_COMPLEX + slot_side * 18 + sc * 9 + min(complex_count[real_side][real_sc], 8))
+    return out
+
+
+def oracle_features(fen: str) -> tuple[list[int], list[int], bool]:
+    """Feature lists of a FEN computed without the native library."""
+    placement, turn = fen.split()[:2]
+    board = [0] * 64
+    colors = [0, 0]
+    pieces = [0] * 7
+    for row, rank_text in enumerate(placement.split("/")):
+        file_index = 0
+        for ch in rank_text:
+            if ch.isdigit():
+                file_index += int(ch)
+                continue
+            square = (7 - row) * 8 + file_index
+            code = PIECE_CODES[ch]
+            board[square] = code
+            colors[code & 1] |= 1 << square
+            pieces[code // 2] |= 1 << square
+            file_index += 1
+    wking = (colors[0] & pieces[6]).bit_length() - 1
+    bking = (colors[1] & pieces[6]).bit_length() - 1
+    w_bucket = KING_BUCKET_TABLE[wking]
+    b_bucket = KING_BUCKET_TABLE[bking ^ 56]
+    white: list[int] = []
+    black: list[int] = []
+    for square, code in enumerate(board):
+        if not code:
+            continue
+        color, base = code & 1, code // 2 - 1
+        white.append(w_bucket * FEATURES_PER_KING_BUCKET + color * FEATURES_PER_COLOR + base * 64 + square)
+        black.append(b_bucket * FEATURES_PER_KING_BUCKET + (color ^ 1) * FEATURES_PER_COLOR + base * 64 + (square ^ 56))
+    white += _collect_extra_view(board, colors, pieces, wking, bking, False)
+    black += _collect_extra_view(board, colors, pieces, wking, bking, True)
+    return (white, black, True) if turn == "w" else (black, white, False)
 
 
 def verify_sbin(sbin_path: Path, samples: int = 10000, *, full: bool = False,
                 check_eval_labels: bool = False) -> dict:
+    import chess
     samples = int(samples)
     if samples < 1:
         raise ValueError("samples pozitif olmalı.")
-    import random
-    import numpy as np
-    import chess
-    before = source_identity(Path(sbin_path))
+    before = workflow.file_identity(Path(sbin_path))
     report = {"file": before, "scope": "all" if full else "sample", "checked": 0,
               "invalid_records": 0, "missing_fullmove": 0, "nonzero_padding": 0,
               "invalid_position": 0, "first_invalid_indices": [],
               "oracle_checked": 0, "oracle_failures": 0}
+    started = time.perf_counter()
     with SbinDataset(sbin_path) as ds:
-        print(f"Doğrulanıyor: {sbin_path} ({ds.count:,} kayıt, kapsam={report['scope']})", flush=True)
-        rng = random.Random(42)
-        test_indices = rng.sample(range(ds.count), min(samples, ds.count))
-        t0 = time.time()
-        last_progress = t0
-        if full:
-            for begin in range(0, ds.count, 262144):
-                count = min(262144, ds.count - begin)
-                status = np.zeros(count, dtype=np.uint8)
-                ptr = ctypes.byref(ds._array[begin])
-                valid = ds.lib.sbin_validate_batch(ptr, count, status.ctypes.data_as(POINTER(ctypes.c_uint8)))
-                del ptr
-                report["checked"] += count
-                report["invalid_records"] += count - valid
-                for flag, name in SBIN_STATUS_FLAGS:
-                    report[name] += int(np.count_nonzero(status & flag))
-                room = 20 - len(report["first_invalid_indices"])
-                if room > 0:
-                    report["first_invalid_indices"].extend((begin + np.flatnonzero(status)[:room]).tolist())
-                if time.time() - last_progress >= 10:
-                    print(f"Taranan={report['checked']:,}/{ds.count:,} geçersiz={report['invalid_records']:,}", flush=True)
-                    last_progress = time.time()
-
+        records = ds.records()
+        rng = np.random.default_rng(42)
+        test_indices = np.sort(rng.choice(ds.count, size=min(samples, ds.count), replace=False))
+        scope = [np.arange(begin, min(begin + 262144, ds.count)) for begin in range(0, ds.count, 262144)] \
+            if full else [test_indices]
+        labels = {"checked": 0, "expected_encoding": "elo400_white", "elo400_mismatches": 0}
+        for rows in scope:
+            chunk = np.ascontiguousarray(records[rows])
+            status = np.zeros(len(rows), dtype=np.uint8)
+            valid = ds.lib.sbin_validate_batch(pointer(chunk), len(rows), pointer(status))
+            report["checked"] += len(rows)
+            report["invalid_records"] += len(rows) - valid
+            for flag, name in SBIN_STATUS_FLAGS:
+                report[name] += int(np.count_nonzero(status & flag))
+            room = 20 - len(report["first_invalid_indices"])
+            if room > 0:
+                report["first_invalid_indices"].extend(rows[np.flatnonzero(status)[:room]].tolist())
+            if check_eval_labels:
+                stored = chunk.view(np.uint16).reshape(-1, 16)[:, 13].astype(np.int64)
+                ds.lib.sbin_calibrate_labels(pointer(chunk), len(chunk), 0.0)
+                expected = chunk.view(np.uint16).reshape(-1, 16)[:, 13]
+                labels["checked"] += len(chunk)
+                labels["elo400_mismatches"] += int(np.count_nonzero(np.abs(stored - expected) > 2))
         if check_eval_labels:
-            label_counts = {"checked": 0, "elo400_mismatches": 0,
-                            "expected_encoding": "elo400_white", "quantization_tolerance": 2 / 65535}
-            record_dtype = np.dtype([
-                ("board", "V24"), ("cp", "<i2"), ("wdl", "<u2"), ("flags", "V4")])
-            all_records = np.frombuffer(ds._mmap, dtype=record_dtype, count=ds.count)
-            def check_labels(raw):
-                cp = raw["cp"].astype(np.float64)
-                target = raw["wdl"].astype(np.float64) / 65535.0
-                expected = eval_targets(cp, raw["wdl"])
-                label_counts["checked"] += len(cp)
-                label_counts["elo400_mismatches"] += int(np.count_nonzero(np.abs(target - expected) > 2 / 65535))
-            if full:
-                for begin in range(0, ds.count, 1048576):
-                    check_labels(all_records[begin:begin + 1048576])
-            else:
-                check_labels(all_records[np.asarray(test_indices, dtype=np.int64)])
-            report["eval_label_calibration"] = label_counts
-            del all_records
-
-        for idx in test_indices:
-            packed = ds._position(idx)
-            status = ctypes.c_uint8()
-            ds.lib.sbin_validate_batch(ctypes.byref(packed), 1, ctypes.byref(status))
-            if not full:
-                report["checked"] += 1
-                report["invalid_records"] += bool(status.value)
-                for flag, name in SBIN_STATUS_FLAGS:
-                    report[name] += bool(status.value & flag)
-                if status.value and len(report["first_invalid_indices"]) < 20:
-                    report["first_invalid_indices"].append(idx)
-            if status.value:
-                continue
-            fen, wdl, _ = ds.get_fen(idx)
-            us, them, white = ds.get_nnue_features(idx)
-            board = chess.Board(fen)
-            expected_us, expected_them, expected_white = workflow.parse_fen_fast(fen)
+            report["eval_label_calibration"] = labels
+        test_records = np.ascontiguousarray(records[test_indices])
+        test_status = np.zeros(len(test_indices), dtype=np.uint8)
+        ds.lib.sbin_validate_batch(pointer(test_records), len(test_indices), pointer(test_status))
+        for index in test_indices[test_status == 0].tolist():
+            fen, wdl, _ = ds.get_fen(index)
+            us, them, white = ds.get_nnue_features(index)
+            expected_us, expected_them, expected_white = oracle_features(fen)
             report["oracle_checked"] += 1
-            if (not board.is_valid() or not 0.0 <= wdl <= 1.0 or
+            if (not chess.Board(fen).is_valid() or not 0.0 <= wdl <= 1.0 or
                     sorted(us) != sorted(expected_us) or sorted(them) != sorted(expected_them) or
                     white != expected_white):
                 report["oracle_failures"] += 1
-        elapsed = time.time() - t0
-    if source_identity(Path(sbin_path)) != before:
+    if workflow.file_identity(Path(sbin_path)) != before:
         raise RuntimeError("SBIN doğrulama sırasında değişti; sonuç geçersiz.")
-    report["seconds"] = round(elapsed, 3)
+    report["seconds"] = round(time.perf_counter() - started, 3)
     report["passed"] = report["invalid_records"] == 0 and report["oracle_failures"] == 0
     if check_eval_labels:
         report["passed"] = report["passed"] and report["eval_label_calibration"]["elo400_mismatches"] == 0
-    labels_text = (f" etiket_uyumsuzluğu={report['eval_label_calibration']['elo400_mismatches']:,}/"
-                   f"{report['eval_label_calibration']['checked']:,}") if check_eval_labels else ""
-    print(f"Kontrol={report['checked']:,} geçersiz={report['invalid_records']:,} "
-          f"oracle_hatası={report['oracle_failures']:,}{labels_text} süre={elapsed:.1f} sn", flush=True)
     return report
 
 
-def benchmark_read_speed(sbin_path: Path, batch_size: int = 1024) -> None:
-    batch_size = int(batch_size)
+def benchmark_batches(sbin_path: Path, batch_size: int) -> dict:
     if batch_size < 1:
         raise ValueError("batch-size pozitif olmalı.")
     lib = load_native_lib()
     with SbinDataset(sbin_path) as ds:
-        print("\n=== BENCHMARK: C++ NATIVE BATCH DECODE ===")
-        print(f"Veri Seti: {sbin_path} ({ds.count:,} pozisyon)")
-        print(f"Batch Boyutu: {batch_size}")
-
-        out_features = (c_int16 * (batch_size * NNUE_SLOTS * 2))()
-        out_targets = (c_float * batch_size)()
-
-        t0 = time.perf_counter()
-        total_decoded = 0
-        for begin in range(0, ds.count, batch_size):
-            count = min(batch_size, ds.count - begin)
-            ptr = ctypes.byref(ds._array[begin])
-            n = lib.sbin_batch_decode(ptr, count, out_features, out_targets)
-            del ptr
-            total_decoded += n
-
-        elapsed = time.perf_counter() - t0
-        speed = total_decoded / max(elapsed, 1e-9)
-        print(f"Çözülen Pozisyon : {total_decoded:,}")
-        print(f"Toplam Süre      : {elapsed:.3f} saniye")
-        print(f"Saf Okuma Hızı   : {speed:,.0f} pozisyon/saniye")
+        records = np.ascontiguousarray(ds.records()[:min(ds.count, 4_000_000)])
+    rows = np.random.default_rng(0).permutation(len(records)).astype(np.int64)
+    buffers = workflow.BatchBuffers(batch_size, lib.sbin_nnue_slots())
+    started = time.perf_counter()
+    for begin in range(0, len(rows) - batch_size + 1, batch_size):
+        buffers.build(lib, records, rows[begin:begin + batch_size], 0.0, 0)
+    positions = (len(rows) // batch_size) * batch_size
+    seconds = time.perf_counter() - started
+    return {"positions": positions, "seconds": round(seconds, 3),
+            "positions_per_second": round(positions / max(seconds, 1e-9))}
 
 
 def main():
     parser = argparse.ArgumentParser(description="Stallion SBIN 32-byte binary format aracı")
     parser.add_argument("command", choices=["convert", "verify", "benchmark"])
-    parser.add_argument("--parquet", default=None)
-    parser.add_argument("--sbin", default=None)
+    parser.add_argument("--parquet", type=Path)
+    parser.add_argument("--sbin", type=Path, required=True)
     parser.add_argument("--samples", type=int, default=10000)
-    parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument("--batch-size", type=int, default=16384)
     parser.add_argument("--all", dest="full", action="store_true", help="Tüm kayıtları native doğrulayıcıyla tara")
     parser.add_argument("--check-eval-labels", action="store_true", help="CP etiketli eval verisinde WDL ölçeğini karşılaştır")
-    parser.add_argument("--report", type=Path, help="JSON doğrulama raporu")
+    parser.add_argument("--report", type=Path, help="JSON rapor çıktısı")
     args = parser.parse_args()
-
     if args.command == "convert":
-        if not args.parquet or not args.sbin:
-            print("Hata: --parquet ve --sbin gerekli.")
-            sys.exit(1)
-        convert_parquet_to_sbin(Path(args.parquet), Path(args.sbin))
+        if args.parquet is None:
+            parser.error("convert için --parquet gerekli.")
+        report = convert_parquet_to_sbin(args.parquet, args.sbin)
     elif args.command == "verify":
-        if not args.sbin:
-            print("Hata: --sbin gerekli.")
-            sys.exit(1)
-        report = verify_sbin(Path(args.sbin), args.samples, full=args.full,
-                             check_eval_labels=args.check_eval_labels)
-        if args.report:
-            workflow.atomic_json(args.report, report)
-        if not report["passed"]:
-            sys.exit(2)
-    elif args.command == "benchmark":
-        if not args.sbin:
-            print("Hata: --sbin gerekli.")
-            sys.exit(1)
-        benchmark_read_speed(Path(args.sbin), args.batch_size)
+        report = verify_sbin(args.sbin, args.samples, full=args.full, check_eval_labels=args.check_eval_labels)
+    else:
+        report = benchmark_batches(args.sbin, args.batch_size)
+    if args.report:
+        workflow.atomic_json(args.report, report)
+    summary = {key: value for key, value in report.items() if key not in ("file", "first_invalid_indices", "output", "source")}
+    print(" ".join(f"{key}={value}" for key, value in summary.items()), flush=True)
+    if args.command == "verify" and not report["passed"]:
+        sys.exit(2)
 
 
 if __name__ == "__main__":

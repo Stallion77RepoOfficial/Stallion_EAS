@@ -4,7 +4,9 @@
 static_assert(SBIN_NNUE_SLOTS == NNUE_EXTRA_SLOTS);
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <sstream>
+#include <vector>
 
 static inline uint8_t char_to_piece_code(char c) {
     switch (c) {
@@ -147,6 +149,298 @@ static bool decode_position(const PackedPosition* in, uint8_t board[64], int& co
         }
     }
     return true;
+}
+
+// ---- Shared record helpers (everything below builds on decode_position) ----
+
+// Unpack a record that already passed decode_position into engine bitboards.
+static void unpack_board(const PackedPosition& in, uint8_t board[64], uint64_t colors_bb[2],
+                         uint64_t pieces_bb[7]) {
+    std::memset(board, 0, 64);
+    colors_bb[0] = colors_bb[1] = 0;
+    std::fill_n(pieces_bb, 7, 0);
+    uint64_t occ = in.occupied;
+    for (int k = 0; occ; ++k) {
+        const int sq = __builtin_ctzll(occ);
+        occ &= occ - 1;
+        const uint8_t code = (k % 2 == 0) ? (in.pieces[k / 2] & 0x0f) : (in.pieces[k / 2] >> 4);
+        board[sq] = code;
+        colors_bb[code & 1] |= uint64_t(1) << sq;
+        pieces_bb[code / 2] |= uint64_t(1) << sq;
+    }
+}
+
+static int ep_file_of(const PackedPosition& in) {
+    const uint16_t metadata = in.reserved[0] | (uint16_t(in.reserved[1]) << 8);
+    return (metadata & 0x8000) ? 8 : ((in.flags >> 5) & 0x07);
+}
+
+static Position engine_position(const PackedPosition& in) {
+    Position pos{};
+    unpack_board(in, pos.board.data(), pos.colors_bb.data(), pos.pieces_bb.data());
+    pos.color = in.flags & 1;
+    const int ep_file = ep_file_of(in);
+    pos.ep_square = ep_file ? uint8_t((pos.color ? 2 : 5) * 8 + ep_file - 1) : uint8_t(SquareNone);
+    return pos;
+}
+
+static inline uint64_t mix64(uint64_t x) {
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+static uint64_t group_key(const PackedPosition& in) {
+    const int stm = in.flags & 1;
+    uint64_t occ = in.occupied, h = 0;
+    for (int k = 0; occ; ++k) {
+        const int sq = __builtin_ctzll(occ);
+        occ &= occ - 1;
+        const int code = (k % 2 == 0) ? (in.pieces[k / 2] & 0x0f) : (in.pieces[k / 2] >> 4);
+        const int view_sq = stm ? (sq ^ 56) : sq;
+        const int view_code = stm ? (code ^ 1) : code;
+        h ^= mix64(uint64_t(view_sq) * 16 + uint64_t(view_code) + 1);
+    }
+    const uint64_t key = mix64(h ^ uint64_t(__builtin_popcountll(in.occupied)));
+    return key ? key : 1;
+}
+
+// Side-to-move and opponent feature lists; the same indices the engine uses.
+static void position_features(const PackedPosition& in, int32_t* us, int& n_us,
+                              int32_t* them, int& n_them) {
+    uint8_t board[64];
+    uint64_t colors_bb[2], pieces_bb[7];
+    unpack_board(in, board, colors_bb, pieces_bb);
+    const bool white_turn = (in.flags & 1) == 0;
+    const int wking = __builtin_ctzll(colors_bb[0] & pieces_bb[PieceTypes::King]);
+    const int bking = __builtin_ctzll(colors_bb[1] & pieces_bb[PieceTypes::King]);
+    const size_t w_bucket = static_cast<size_t>(KingBucketTable[wking]);
+    const size_t b_bucket = static_cast<size_t>(KingBucketTable[bking ^ 56]);
+    int32_t* white = white_turn ? us : them;
+    int32_t* black = white_turn ? them : us;
+    int n = 0;
+    uint64_t occ = in.occupied;
+    while (occ) {
+        const int sq = __builtin_ctzll(occ);
+        occ &= occ - 1;
+        const auto [white_idx, black_idx] = feature_indices(board[sq], sq, w_bucket, b_bucket);
+        white[n] = static_cast<int32_t>(white_idx);
+        black[n] = static_cast<int32_t>(black_idx);
+        ++n;
+    }
+    int extra_w[SBIN_NNUE_SLOTS], extra_b[SBIN_NNUE_SLOTS];
+    const int nw = collect_extra_features(board, colors_bb, pieces_bb, false, extra_w, SBIN_NNUE_SLOTS);
+    const int nb = mirror_extra_features(extra_w, nw, extra_b, SBIN_NNUE_SLOTS);
+    if (nw < 0 || nb < 0 || n + nw > SBIN_NNUE_SLOTS || n + nb > SBIN_NNUE_SLOTS) std::abort();
+    for (int i = 0; i < nw; ++i) white[n + i] = extra_w[i];
+    for (int i = 0; i < nb; ++i) black[n + i] = extra_b[i];
+    n_us = n + (white_turn ? nw : nb);
+    n_them = n + (white_turn ? nb : nw);
+}
+
+static bool is_mate_record(const PackedPosition& in) {
+    return (in.eval == 2000 || in.eval == -2000) && (in.wdl == 0 || in.wdl == 65535);
+}
+
+static uint16_t calibrated_wdl(const PackedPosition& in, double lambda) {
+    if (is_mate_record(in)) return in.eval > 0 ? 65535 : 0;
+    const double cp = std::clamp(static_cast<double>(in.eval), -1500.0, 1500.0);
+    const double cp_wdl = 1.0 / (1.0 + std::pow(10.0, -cp / 400.0));
+    const double value = (1.0 - lambda) * cp_wdl + lambda * (in.wdl / 65535.0);
+    return static_cast<uint16_t>(std::lrint(value * 65535.0));
+}
+
+static bool in_check(const Position& pos) {
+    const int king = __builtin_ctzll(pos.colors_bb[pos.color] & pos.pieces_bb[PieceTypes::King]);
+    return attackers_to(pos, king, pos.color ^ 1, pos.colors_bb[0] | pos.colors_bb[1]) != 0;
+}
+
+// A capture or promotion that wins material by static exchange.
+static bool has_winning_tactic(const Position& pos) {
+    const int stm = pos.color;
+    const uint64_t own = pos.colors_bb[stm];
+    const uint64_t occ = pos.colors_bb[0] | pos.colors_bb[1];
+    const uint64_t targets = pos.colors_bb[stm ^ 1] & ~pos.pieces_bb[PieceTypes::King];
+    const uint64_t promo_rank = Ranks[stm ? 0 : 7];
+    uint64_t pieces = own;
+    while (pieces) {
+        const int from = pop_lsb(pieces);
+        const int type = get_piece_type(pos.board[from]);
+        uint64_t attacks = 0;
+        switch (type) {
+            case PieceTypes::Pawn: attacks = PAWN_ATK_SAFE(stm, from); break;
+            case PieceTypes::Knight: attacks = KNIGHT_ATK_SAFE(from); break;
+            case PieceTypes::Bishop: attacks = get_bishop_attacks(from, occ); break;
+            case PieceTypes::Rook: attacks = get_rook_attacks(from, occ); break;
+            case PieceTypes::Queen: attacks = get_bishop_attacks(from, occ) | get_rook_attacks(from, occ); break;
+            default: attacks = KING_ATK_SAFE(from); break;
+        }
+        uint64_t captures = attacks & targets;
+        while (captures) {
+            const int to = pop_lsb(captures);
+            const Move move = (type == PieceTypes::Pawn && ((uint64_t(1) << to) & promo_rank))
+                                  ? pack_move_promo(from, to, Promos::Queen)
+                                  : pack_move(from, to, MoveTypes::Normal);
+            if (SEE(pos, move, 1)) return true;
+        }
+        if (type == PieceTypes::Pawn) {
+            const int to = from + (stm ? Directions::South : Directions::North);
+            if (((uint64_t(1) << to) & promo_rank) && !((uint64_t(1) << to) & occ) &&
+                SEE(pos, pack_move_promo(from, to, Promos::Queen), 1))
+                return true;
+        }
+    }
+    if (pos.ep_square != SquareNone) {
+        uint64_t pawns = PAWN_ATK_SAFE(stm ^ 1, pos.ep_square) & own & pos.pieces_bb[PieceTypes::Pawn];
+        while (pawns) {
+            if (SEE(pos, pack_move(pop_lsb(pawns), pos.ep_square, MoveTypes::EnPassant), 1)) return true;
+        }
+    }
+    return false;
+}
+
+// Phase: 0 endgame, 1 late middlegame, 2 middlegame, 3 opening.
+static int position_phase(const PackedPosition& in, const uint8_t board[64]) {
+    int total = 0, white_home = 0, black_home = 0;
+    for (int sq = 0; sq < 64; ++sq) {
+        const uint8_t code = board[sq];
+        if (!code) continue;
+        if (code < 12) total += MaterialValues[code / 2];
+        if (sq < 8 && (code == 4 || code == 6 || code == 8 || code == 10 || code == 12)) ++white_home;
+        else if (sq >= 56 && (code == 5 || code == 7 || code == 9 || code == 11 || code == 13)) ++black_home;
+    }
+    if (total <= 3000) return 0;
+    if (total <= 4200) return 1;
+    const int fullmove = (in.reserved[0] | (int(in.reserved[1]) << 8)) & 0x7fff;
+    if (fullmove > 1) return 2 * (fullmove - 1) + (in.flags & 1) < 20 ? 3 : 2;
+    return white_home >= 6 && black_home >= 6 ? 3 : 2;
+}
+
+// Material sacrifice class seen from the side to move (0 = none).
+static int sacrifice_type(const uint8_t board[64], int stm, int side_cp) {
+    int queens[2] = {}, rooks[2] = {}, minors[2] = {}, pawns[2] = {};
+    for (int sq = 0; sq < 64; ++sq) {
+        const uint8_t code = board[sq];
+        if (!code) continue;
+        const int color = code & 1;
+        switch (code / 2) {
+            case PieceTypes::Pawn: ++pawns[color]; break;
+            case PieceTypes::Knight:
+            case PieceTypes::Bishop: ++minors[color]; break;
+            case PieceTypes::Rook: ++rooks[color]; break;
+            case PieceTypes::Queen: ++queens[color]; break;
+            default: break;
+        }
+    }
+    auto material = [&](int c) {
+        return queens[c] * MaterialValues[PieceTypes::Queen] + rooks[c] * MaterialValues[PieceTypes::Rook] +
+               minors[c] * MaterialValues[PieceTypes::Knight] + pawns[c] * MaterialValues[PieceTypes::Pawn];
+    };
+    const int me = stm, opp = stm ^ 1;
+    const int down = material(opp) - material(me);
+    if (down < 80 || side_cp < -30) return 0;
+    if (queens[me] < queens[opp]) return 9;
+    if (rooks[me] < rooks[opp]) return 5;
+    if (minors[me] < minors[opp]) return down >= 350 ? 4 : 3;
+    if (pawns[me] < pawns[opp]) return down >= 180 ? 2 : 1;
+    return down >= 100 ? 1 : 0;
+}
+
+// Horizontal (a<->h) mirror; only defined without castling rights.
+static PackedPosition mirrored_record(const PackedPosition& in) {
+    uint8_t board[64];
+    uint64_t colors_bb[2], pieces_bb[7];
+    unpack_board(in, board, colors_bb, pieces_bb);
+    PackedPosition out = in;
+    std::memset(out.pieces, 0, sizeof(out.pieces));
+    out.occupied = 0;
+    uint8_t mirrored[64];
+    for (int sq = 0; sq < 64; ++sq) mirrored[sq ^ 7] = board[sq];
+    int k = 0;
+    for (int sq = 0; sq < 64; ++sq) {
+        if (!mirrored[sq]) continue;
+        out.occupied |= uint64_t(1) << sq;
+        out.pieces[k / 2] |= (k % 2 == 0) ? mirrored[sq] : uint8_t(mirrored[sq] << 4);
+        ++k;
+    }
+    uint16_t metadata = in.reserved[0] | (uint16_t(in.reserved[1]) << 8);
+    const int ep_file = ep_file_of(in);
+    metadata &= 0x7fff;
+    out.flags &= 0x1f;
+    if (ep_file) {
+        const int mirrored_file = 9 - ep_file;
+        if (mirrored_file == 8) metadata |= 0x8000;
+        else out.flags |= uint8_t(mirrored_file << 5);
+    }
+    out.reserved[0] = metadata & 255;
+    out.reserved[1] = metadata >> 8;
+    return out;
+}
+
+// Open-addressing set of non-zero 64-bit keys.
+class KeySet {
+public:
+    explicit KeySet(size_t expected) {
+        size_t capacity = 16;
+        while (capacity < expected * 2 + 16) capacity <<= 1;
+        slots_.assign(capacity, 0);
+        mask_ = capacity - 1;
+    }
+    bool insert(uint64_t key) {
+        for (size_t i = key & mask_;; i = (i + 1) & mask_) {
+            if (slots_[i] == key) return false;
+            if (!slots_[i]) {
+                slots_[i] = key;
+                return true;
+            }
+        }
+    }
+private:
+    std::vector<uint64_t> slots_;
+    size_t mask_;
+};
+
+// Values are part of the sbin_screen_batch API.
+enum class Verdict : uint8_t { Accept = 0, Invalid = 1, Mate = 2, Check = 3, Tactical = 4 };
+
+// Filters of a record that already passed decode_position.
+static Verdict filter_verdict(const PackedPosition& in, uint32_t filters) {
+    if ((filters & SBIN_SKIP_MATE) && is_mate_record(in)) return Verdict::Mate;
+    if (filters & (SBIN_SKIP_CHECK | SBIN_SKIP_TACTICAL)) {
+        const Position pos = engine_position(in);
+        if ((filters & SBIN_SKIP_CHECK) && in_check(pos)) return Verdict::Check;
+        if ((filters & SBIN_SKIP_TACTICAL) && has_winning_tactic(pos)) return Verdict::Tactical;
+    }
+    return Verdict::Accept;
+}
+
+static Verdict screen(const PackedPosition& in, uint32_t filters, uint8_t board[64]) {
+    int count = 0;
+    if (!decode_position(&in, board, count)) return Verdict::Invalid;
+    return filter_verdict(in, filters);
+}
+
+static void count_rejection(Verdict verdict, uint64_t* stats) {
+    switch (verdict) {
+        case Verdict::Invalid: ++stats[SBIN_STAT_INVALID]; break;
+        case Verdict::Mate: ++stats[SBIN_STAT_MATE]; break;
+        case Verdict::Check: ++stats[SBIN_STAT_CHECK]; break;
+        case Verdict::Tactical: ++stats[SBIN_STAT_TACTICAL]; break;
+        case Verdict::Accept: break;
+    }
+}
+
+// Visit [start, count) then [0, start) until visit() returns false.
+template <typename Visit>
+static void scan_wrapped(size_t count, size_t start, uint64_t* stats, Visit visit) {
+    for (size_t step = 0; step < count; ++step) {
+        const size_t row = (start + step) % count;
+        ++stats[SBIN_STAT_SCANNED];
+        stats[SBIN_STAT_NEXT_OFFSET] = (row + 1) % count;
+        if (!visit(row)) return;
+    }
 }
 
 extern "C" {
@@ -305,73 +599,26 @@ int sbin_unpack_fen(const PackedPosition* in, char* fen_buf, size_t buf_len, flo
     return 0;
 }
 
-// King buckets and feature indices come straight from the engine (nnue.h),
-// so the native decoder cannot drift out of sync with training or search.
+int sbin_nnue_slots() { return SBIN_NNUE_SLOTS; }
+
+int sbin_nnue_features() { return static_cast<int>(NNUE_INPUT_SIZE); }
+
+int sbin_stat_count() { return SBIN_STAT_COUNT; }
+
 int sbin_extract_nnue(const PackedPosition* in, int16_t* us, int16_t* them, int* out_white_turn) {
     if (!in || !us || !them) return -1;
     uint8_t board[64];
-    int occupied_count = 0;
-    if (!decode_position(in, board, occupied_count)) return -1;
-    uint64_t occ = in->occupied;
     int count = 0;
-    bool white_turn = ((in->flags & 1) == 0);
-    if (out_white_turn) *out_white_turn = white_turn ? 1 : 0;
-
+    if (!decode_position(in, board, count)) return -1;
+    int32_t us_buf[SBIN_NNUE_SLOTS], them_buf[SBIN_NNUE_SLOTS];
+    int n_us = 0, n_them = 0;
+    position_features(*in, us_buf, n_us, them_buf, n_them);
     std::fill_n(us, SBIN_NNUE_SLOTS, -1);
     std::fill_n(them, SBIN_NNUE_SLOTS, -1);
-
-    int wking_sq = -1, bking_sq = -1;
-    uint64_t occ_scan = occ;
-    while (occ_scan) {
-        int sq = __builtin_ctzll(occ_scan);
-        occ_scan &= occ_scan - 1;
-        uint8_t code = board[sq];
-        if (code == 12) wking_sq = sq;
-        else if (code == 13) bking_sq = sq;
-    }
-    if (wking_sq < 0 || bking_sq < 0) return -1;
-
-    size_t w_bucket = static_cast<size_t>(KingBucketTable[wking_sq]);
-    size_t b_bucket = static_cast<size_t>(KingBucketTable[bking_sq ^ 56]);
-
-    while (occ) {
-        int sq = __builtin_ctzll(occ);
-        occ &= occ - 1;
-        const uint8_t code = board[sq];
-
-        const auto [white_idx, black_idx] =
-            feature_indices(code, sq, static_cast<int>(w_bucket), static_cast<int>(b_bucket));
-
-        if (white_turn) {
-            us[count] = static_cast<int16_t>(white_idx);
-            them[count] = static_cast<int16_t>(black_idx);
-        } else {
-            us[count] = static_cast<int16_t>(black_idx);
-            them[count] = static_cast<int16_t>(white_idx);
-        }
-        count++;
-    }
-
-    uint64_t colors_bb[2] = {0, 0};
-    uint64_t pieces_bb[7] = {0, 0, 0, 0, 0, 0, 0};
-    for (int sq = 0; sq < 64; ++sq) {
-        const uint8_t code = board[sq];
-        if (code < 2 || code > 13) continue;
-        colors_bb[code & 1] |= (1ULL << sq);
-        pieces_bb[code / 2] |= (1ULL << sq);
-    }
-    int extra_w[SBIN_NNUE_SLOTS], extra_b[SBIN_NNUE_SLOTS];
-    const int nw = collect_extra_features(board, colors_bb, pieces_bb, false, extra_w, SBIN_NNUE_SLOTS);
-    const int nb = mirror_extra_features(extra_w, nw, extra_b, SBIN_NNUE_SLOTS);
-    if (nw < 0 || nb < 0) return -1;
-    if (count + nw > SBIN_NNUE_SLOTS || count + nb > SBIN_NNUE_SLOTS) return -1;
-    const int* first = white_turn ? extra_w : extra_b;
-    const int* second = white_turn ? extra_b : extra_w;
-    const int n_first = white_turn ? nw : nb;
-    const int n_second = white_turn ? nb : nw;
-    for (int i = 0; i < n_first; ++i) us[count + i] = static_cast<int16_t>(first[i]);
-    for (int i = 0; i < n_second; ++i) them[count + i] = static_cast<int16_t>(second[i]);
-    return count + (n_first > n_second ? n_first : n_second);
+    for (int i = 0; i < n_us; ++i) us[i] = static_cast<int16_t>(us_buf[i]);
+    for (int i = 0; i < n_them; ++i) them[i] = static_cast<int16_t>(them_buf[i]);
+    if (out_white_turn) *out_white_turn = (in->flags & 1) == 0;
+    return std::max(n_us, n_them);
 }
 
 size_t sbin_validate_batch(const PackedPosition* positions, size_t count, uint8_t* status) {
@@ -406,73 +653,193 @@ size_t sbin_validate_batch(const PackedPosition* positions, size_t count, uint8_
     return valid;
 }
 
-size_t sbin_batch_decode_indexed(
-    const PackedPosition* in_positions,
-    size_t count,
-    int16_t* out_features,
-    float* out_targets,
-    uint32_t* out_indices
-) {
-    if (!in_positions || !out_features || !out_targets) return 0;
-
-    size_t decoded = 0;
-    for (size_t i = 0; i < count; ++i) {
-        const PackedPosition& pos = in_positions[i];
-        int16_t* feat_us = out_features + (decoded * SBIN_NNUE_SLOTS * 2);
-        int16_t* feat_them = feat_us + SBIN_NNUE_SLOTS;
-
-        int white_turn = 1;
-        int pieces = sbin_extract_nnue(&pos, feat_us, feat_them, &white_turn);
-        if (pieces < 2) continue;
-
-        float wdl_val = static_cast<float>(pos.wdl) / 65535.0f;
-        out_targets[decoded] = white_turn ? wdl_val : (1.0f - wdl_val);
-        if (out_indices) out_indices[decoded] = static_cast<uint32_t>(i);
-        decoded++;
-    }
-    return decoded;
-}
-
-size_t sbin_batch_decode(
-    const PackedPosition* in_positions,
-    size_t count,
-    int16_t* out_features,
-    float* out_targets
-) {
-    return sbin_batch_decode_indexed(in_positions, count, out_features, out_targets, nullptr);
-}
-
-int sbin_classify_phase(const PackedPosition* pos) {
+void sbin_screen_batch(const PackedPosition* positions, size_t count, uint32_t filters, uint8_t* verdicts) {
     uint8_t board[64];
-    int piece_count = 0;
-    if (!decode_position(pos, board, piece_count)) return -1;
-    int total_mat = 0;
-    int white_home = 0;
-    int black_home = 0;
-    uint64_t occ = pos->occupied;
-    while (occ) {
-        int sq = __builtin_ctzll(occ);
-        occ &= occ - 1;
-        uint8_t code = board[sq];
-        if (code < 12) total_mat += MaterialValues[code / 2];
-        if (sq < 8 && (code == 4 || code == 6 || code == 8 || code == 10 || code == 12)) {
-            white_home++;
-        } else if (sq >= 56 && (code == 5 || code == 7 || code == 9 || code == 11 || code == 13)) {
-            black_home++;
-        }
-    }
-    if (total_mat <= 3000) return 0;
-    if (total_mat <= 4200) return 1;
-    const int fullmove = (pos->reserved[0] | (int(pos->reserved[1]) << 8)) & 0x7fff;
-    if (fullmove > 1) return 2 * (fullmove - 1) + (pos->flags & 1) < 20 ? 3 : 2;
-    return white_home >= 6 && black_home >= 6 ? 3 : 2;
+    for (size_t i = 0; i < count; ++i) verdicts[i] = static_cast<uint8_t>(screen(positions[i], filters, board));
 }
 
-void sbin_classify_phases_batch(const PackedPosition* positions, size_t count, uint8_t* out_phases) {
-    if (!positions || !out_phases) return;
+void sbin_group_keys(const PackedPosition* positions, size_t count, uint64_t* keys) {
+    for (size_t i = 0; i < count; ++i) keys[i] = group_key(positions[i]);
+}
+
+void sbin_calibrate_labels(PackedPosition* positions, size_t count, double lambda) {
+    for (size_t i = 0; i < count; ++i) positions[i].wdl = calibrated_wdl(positions[i], lambda);
+}
+
+long long sbin_build_batch(const PackedPosition* records, size_t record_count,
+                           const int64_t* rows, size_t count, float dropout, uint64_t seed,
+                           int32_t* indices, int32_t* offsets,
+                           int32_t* t_bags, int32_t* t_offsets,
+                           int64_t* buckets, float* targets) {
+    std::vector<int32_t> them(count * SBIN_NNUE_SLOTS);
+    std::vector<int> them_count(count);
+    const uint64_t keep = dropout > 0.0f ? uint64_t((1.0 - double(dropout)) * 18446744073709551615.0) : 0;
+    size_t nnz = 0;
+    auto keep_feature = [&](uint64_t& state) {
+        state += 0x9e3779b97f4a7c15ULL;
+        return mix64(state) <= keep;
+    };
     for (size_t i = 0; i < count; ++i) {
-        out_phases[i] = static_cast<uint8_t>(sbin_classify_phase(&positions[i]));
+        const int64_t row = rows[i];
+        if (row < 0 || static_cast<size_t>(row) >= record_count) return -1;
+        const PackedPosition& record = records[row];
+        int32_t us[SBIN_NNUE_SLOTS];
+        int n_us = 0, n_them = 0;
+        position_features(record, us, n_us, them.data() + i * SBIN_NNUE_SLOTS, n_them);
+        offsets[i] = static_cast<int32_t>(nnz);
+        uint64_t state = mix64(seed ^ (uint64_t(row) * 0x9e3779b97f4a7c15ULL));
+        for (int k = 0; k < n_us; ++k)
+            if (!keep || keep_feature(state)) indices[nnz++] = us[k];
+        int kept = 0;
+        int32_t* other = them.data() + i * SBIN_NNUE_SLOTS;
+        for (int k = 0; k < n_them; ++k)
+            if (!keep || keep_feature(state)) other[kept++] = other[k];
+        them_count[i] = kept;
+        const int pieces = __builtin_popcountll(record.occupied);
+        buckets[i] = std::clamp((pieces - 1) / 2, 0, static_cast<int>(OUTPUT_BUCKETS) - 1);
+        const float wdl = record.wdl / 65535.0f;
+        targets[i] = (record.flags & 1) ? 1.0f - wdl : wdl;
     }
+    for (size_t i = 0; i < count; ++i) {
+        offsets[count + i] = static_cast<int32_t>(nnz);
+        std::copy_n(them.data() + i * SBIN_NNUE_SLOTS, them_count[i], indices + nnz);
+        nnz += them_count[i];
+    }
+    offsets[2 * count] = static_cast<int32_t>(nnz);
+    std::fill_n(t_offsets, NNUE_INPUT_SIZE + 1, 0);
+    for (size_t e = 0; e < nnz; ++e) ++t_offsets[indices[e] + 1];
+    for (size_t f = 0; f < NNUE_INPUT_SIZE; ++f) t_offsets[f + 1] += t_offsets[f];
+    std::vector<int32_t> cursor(t_offsets, t_offsets + NNUE_INPUT_SIZE);
+    for (size_t bag = 0; bag < 2 * count; ++bag)
+        for (int32_t e = offsets[bag]; e < offsets[bag + 1]; ++e)
+            t_bags[cursor[indices[e]]++] = static_cast<int32_t>(bag);
+    return static_cast<long long>(nnz);
+}
+
+long long sbin_select_base(const PackedPosition* source, size_t count, size_t start,
+                           const uint64_t quotas[4], uint32_t filters, int labels_cp,
+                           double lambda, PackedPosition* out, uint64_t* stats) {
+    std::fill_n(stats, SBIN_STAT_COUNT, 0);
+    const uint64_t target = quotas[0] + quotas[1] + quotas[2] + quotas[3];
+    if (!count || start >= count) return -1;
+    KeySet seen(target);
+    uint64_t taken[4] = {};
+    uint64_t selected = 0;
+    scan_wrapped(count, start, stats, [&](size_t row) {
+        const PackedPosition& record = source[row];
+        uint8_t board[64];
+        int pieces = 0;
+        if (!decode_position(&record, board, pieces)) {
+            ++stats[SBIN_STAT_INVALID];
+            return true;
+        }
+        const int phase = position_phase(record, board);
+        if (taken[phase] >= quotas[phase]) return true;
+        const Verdict verdict = filter_verdict(record, filters);
+        if (verdict != Verdict::Accept) {
+            count_rejection(verdict, stats);
+            return true;
+        }
+        if (!seen.insert(group_key(record))) {
+            ++stats[SBIN_STAT_DUPLICATE];
+            return true;
+        }
+        out[selected] = record;
+        if (labels_cp) out[selected].wdl = calibrated_wdl(record, lambda);
+        ++selected;
+        ++taken[phase];
+        return selected < target;
+    });
+    stats[SBIN_STAT_SELECTED] = selected;
+    for (int p = 0; p < 4; ++p) stats[SBIN_STAT_ENDGAME + p] = taken[p];
+    return static_cast<long long>(selected);
+}
+
+long long sbin_select_aggressive(const PackedPosition* puzzles, const int64_t* puzzle_rows,
+                                 size_t puzzle_count, const PackedPosition* source, size_t count,
+                                 size_t start, uint64_t target, double sac_ratio,
+                                 int augment_mirror, uint32_t filters, int labels_cp,
+                                 double lambda, PackedPosition* out, uint64_t* stats) {
+    std::fill_n(stats, SBIN_STAT_COUNT, 0);
+    if (!target || (count && start >= count)) return -1;
+    KeySet seen(target);
+    uint64_t selected = 0;
+    auto add = [&](const PackedPosition& record) {
+        if (selected >= target || !seen.insert(group_key(record))) return false;
+        out[selected++] = record;
+        return true;
+    };
+    for (size_t i = 0; i < puzzle_count && selected < target; ++i) {
+        const PackedPosition& record = puzzles[puzzle_rows[i]];
+        uint8_t board[64];
+        const Verdict verdict = screen(record, filters, board);
+        if (verdict != Verdict::Accept) {
+            count_rejection(verdict, stats);
+            continue;
+        }
+        if (add(record)) ++stats[SBIN_STAT_PUZZLES];
+        else ++stats[SBIN_STAT_DUPLICATE];
+    }
+    const uint64_t puzzles_added = stats[SBIN_STAT_PUZZLES];
+    const uint64_t target_sacs = std::min<uint64_t>(
+        target, std::max<uint64_t>(uint64_t(double(target) * sac_ratio), puzzles_added));
+    const uint64_t target_sharp = target - target_sacs;
+    uint64_t sacs = puzzles_added, sharp = 0;
+    const int sac_slot[10] = {-1, SBIN_STAT_SAC1, SBIN_STAT_SAC2, SBIN_STAT_SAC3, SBIN_STAT_SAC4,
+                              SBIN_STAT_SAC5, -1, -1, -1, SBIN_STAT_SAC9};
+    if (count && selected < target) {
+        scan_wrapped(count, start, stats, [&](size_t row) {
+            PackedPosition record = source[row];
+            uint8_t board[64];
+            int pieces = 0;
+            if (!decode_position(&record, board, pieces)) {
+                ++stats[SBIN_STAT_INVALID];
+                return true;
+            }
+            const int stm = record.flags & 1;
+            const int side_cp = stm ? -record.eval : record.eval;
+            const int type = sacrifice_type(board, stm, side_cp);
+            const bool is_sharp = position_phase(record, board) != 0 && std::abs(side_cp) > 50;
+            uint64_t* bucket = nullptr;
+            uint64_t limit = 0;
+            if (type && sacs < target_sacs) {
+                bucket = &sacs;
+                limit = target_sacs;
+            } else if (is_sharp && sharp < target_sharp) {
+                bucket = &sharp;
+                limit = target_sharp;
+            } else {
+                return true;
+            }
+            const Verdict verdict = filter_verdict(record, filters);
+            if (verdict != Verdict::Accept) {
+                count_rejection(verdict, stats);
+                return true;
+            }
+            if (labels_cp) record.wdl = calibrated_wdl(record, lambda);
+            if (!add(record)) {
+                ++stats[SBIN_STAT_DUPLICATE];
+                return true;
+            }
+            ++*bucket;
+            if (bucket == &sacs) ++stats[sac_slot[type]];
+            if (augment_mirror && *bucket < limit && !(record.flags & 0x1e)) {
+                const PackedPosition mirror = mirrored_record(record);
+                uint8_t mirror_board[64];
+                int mirror_count = 0;
+                if (!decode_position(&mirror, mirror_board, mirror_count)) std::abort();
+                if (add(mirror)) {
+                    ++*bucket;
+                    ++stats[SBIN_STAT_MIRRORED];
+                }
+            }
+            return selected < target;
+        });
+    }
+    stats[SBIN_STAT_SELECTED] = selected;
+    stats[SBIN_STAT_SACRIFICES] = sacs;
+    stats[SBIN_STAT_SHARP] = sharp;
+    return static_cast<long long>(selected);
 }
 
 }

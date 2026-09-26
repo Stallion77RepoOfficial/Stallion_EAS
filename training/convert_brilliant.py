@@ -40,8 +40,8 @@ def find_chunk_boundaries(pgn_path: Path, num_workers: int) -> list[int]:
     return offsets
 
 
-def worker_convert(worker_id: int, pgn_path: str, start_offset: int, end_offset: int,
-                   temp_output: str) -> tuple[int, int]:
+def worker_convert(pgn_path: str, start_offset: int, end_offset: int,
+                   temp_output: str) -> tuple[int, int, int]:
     if __package__:
         from .sbin_tool import PackedPosition, load_native_lib
     else:
@@ -50,8 +50,17 @@ def worker_convert(worker_id: int, pgn_path: str, start_offset: int, end_offset:
     buf = PackedPosition()
 
     games_processed = 0
+    games_without_result = 0
     positions_extracted = 0
     batch_bytes = bytearray()
+
+    def pack(fen: str, wdl: float) -> None:
+        nonlocal positions_extracted
+        ret = lib.sbin_pack_fen(fen.encode("utf-8"), ctypes.c_float(wdl), ctypes.c_int16(0), ctypes.byref(buf))
+        if ret != 0:
+            raise ValueError(f"Paketlenemeyen konum (kod {ret}): {fen}")
+        batch_bytes.extend(bytes(buf))
+        positions_extracted += 1
 
     with open(temp_output, "wb") as out_f, open(pgn_path, "r", encoding="utf-8", errors="replace") as pgn_f:
         pgn_f.seek(start_offset)
@@ -66,6 +75,7 @@ def worker_convert(worker_id: int, pgn_path: str, start_offset: int, end_offset:
 
             white_wdl = {"1-0": 1.0, "0-1": 0.0, "1/2-1/2": 0.5}.get(game.headers.get("Result"))
             if white_wdl is None:
+                games_without_result += 1
                 continue
 
             bply_str = game.headers.get("BrilliantPly", "")
@@ -89,16 +99,7 @@ def worker_convert(worker_id: int, pgn_path: str, start_offset: int, end_offset:
                     fen = board.fen()
                     if fen not in seen_fens:
                         seen_fens.add(fen)
-                        ret = lib.sbin_pack_fen(
-                            fen.encode("utf-8"), ctypes.c_float(target_plies[ply]),
-                            ctypes.c_int16(0), ctypes.byref(buf)
-                        )
-                        if ret == 0:
-                            batch_bytes.extend(bytes(buf))
-                            positions_extracted += 1
-                            if len(batch_bytes) >= 65536 * 32:
-                                out_f.write(batch_bytes)
-                                batch_bytes.clear()
+                        pack(fen, target_plies[ply])
 
                 board.push(move)
 
@@ -108,30 +109,18 @@ def worker_convert(worker_id: int, pgn_path: str, start_offset: int, end_offset:
                     if fen not in seen_fens:
                         seen_fens.add(fen)
                         # Mat eden tarafın WDL skoru (Sıra siyahtaysa Beyaz mat etmiştir -> 1.0)
-                        mate_wdl = 1.0 if (board.turn == chess.BLACK) else 0.0
-                        ret = lib.sbin_pack_fen(
-                            fen.encode("utf-8"), ctypes.c_float(mate_wdl),
-                            ctypes.c_int16(0), ctypes.byref(buf)
-                        )
-                        if ret == 0:
-                            batch_bytes.extend(bytes(buf))
-                            positions_extracted += 1
-                            if len(batch_bytes) >= 65536 * 32:
-                                out_f.write(batch_bytes)
-                                batch_bytes.clear()
+                        pack(fen, 1.0 if board.turn == chess.BLACK else 0.0)
                     break
 
                 if ply >= max_target:
                     break
+            if len(batch_bytes) >= 65536 * 32:
+                out_f.write(batch_bytes)
+                batch_bytes.clear()
 
-            if games_processed % 50000 == 0:
-                print(f"[Çekirdek {worker_id}] {games_processed:,} oyun tarandı ({positions_extracted:,} pozisyon)...", flush=True)
+        out_f.write(batch_bytes)
 
-        if batch_bytes:
-            out_f.write(batch_bytes)
-            batch_bytes.clear()
-
-    return games_processed, positions_extracted
+    return games_processed, games_without_result, positions_extracted
 
 
 def main(argv=None):
@@ -148,55 +137,37 @@ def main(argv=None):
         print(f"[HATA] PGN dosyası bulunamadı: {pgn_path}", file=sys.stderr)
         return 1
 
-    num_workers = min(max(1, args.workers), os.cpu_count() or 4)
-    file_size_mb = pgn_path.stat().st_size / (1024 * 1024)
-    print(f"=== Brilliant PGN -> SBIN Dönüştürme Başlatılıyor ===")
-    print(f"Kaynak: {pgn_path} ({file_size_mb:,.1f} MB)")
-    print(f"Hedef: {output_path}")
-    print(f"İş Parçacığı: {num_workers} çekirdek paralel")
-
+    num_workers = min(max(1, args.workers), os.cpu_count())
     started = time.perf_counter()
     boundaries = find_chunk_boundaries(pgn_path, num_workers)
     temp_files = [data_dir / f".brilliant_part_{i}.sbin" for i in range(num_workers)]
 
     tasks = [
-        (i, str(pgn_path), boundaries[i], boundaries[i + 1], str(temp_files[i]))
+        (str(pgn_path), boundaries[i], boundaries[i + 1], str(temp_files[i]))
         for i in range(num_workers)
     ]
-
-    print("İş parçacıkları başlatılıyor...")
     with mp.Pool(processes=num_workers) as pool:
         results = pool.starmap(worker_convert, tasks)
 
     total_games = sum(r[0] for r in results)
-    total_positions = sum(r[1] for r in results)
-    parse_elapsed = time.perf_counter() - started
-
-    print(f"\nTüm çekirdekler tamamlandı ({parse_elapsed:.1f} sn).")
-    print(f"Toplam İşlenen Oyun: {total_games:,} ({total_games / parse_elapsed:,.0f} oyun/s)")
-    print(f"Toplam Çıkarılan Pozisyon: {total_positions:,} ({total_positions / parse_elapsed:,.0f} pos/s)")
-
-    print(f"\nParçalar birleştiriliyor -> {output_path}...")
+    games_without_result = sum(r[1] for r in results)
+    total_positions = sum(r[2] for r in results)
     temp_target = output_path.with_suffix(".tmp")
     with open(temp_target, "wb") as out_f:
         for temp_file in temp_files:
-            if temp_file.is_file():
-                with open(temp_file, "rb") as in_f:
-                    while True:
-                        buf = in_f.read(1024 * 1024 * 16)
-                        if not buf:
-                            break
-                        out_f.write(buf)
-                temp_file.unlink(missing_ok=True)
+            with open(temp_file, "rb") as in_f:
+                while buf := in_f.read(1024 * 1024 * 16):
+                    out_f.write(buf)
+            temp_file.unlink()
 
     temp_target.replace(output_path)
-    final_size_mb = output_path.stat().st_size / (1024 * 1024)
     total_elapsed = time.perf_counter() - started
 
     metadata = {
         "source": str(pgn_path),
         "output": str(output_path),
         "total_games": total_games,
+        "games_without_result": games_without_result,
         "total_positions": total_positions,
         "label_source": "game_result",
         "file_size_bytes": output_path.stat().st_size,
@@ -208,7 +179,7 @@ def main(argv=None):
     with open(output_path.with_suffix(".extract.json"), "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
-    print(f"[BAŞARILI] {total_positions:,} pozisyonluk {output_path.name} oluşturuldu ({final_size_mb:,.1f} MB, {total_elapsed:.1f} sn)!")
+    print(f"[BAŞARILI] {output_path}: {total_positions:,} pozisyon, {total_games:,} oyun ({total_elapsed:.1f} sn)", flush=True)
     return 0
 
 

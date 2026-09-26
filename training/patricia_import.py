@@ -16,14 +16,15 @@ import sbin_tool
 
 def convert(inputs: list[Path], output: Path, target: int, cp_weight: float,
             cp_scale: float) -> dict:
+    """Every line must parse; repeated positions (same first four FEN fields) are skipped."""
     if (target < 1 or not math.isfinite(cp_weight) or
             not 0.0 <= cp_weight <= 1.0 or
             not math.isfinite(cp_scale) or cp_scale <= 0):
         raise ValueError("target pozitif, cp-weight 0..1 ve cp-scale pozitif olmalı")
     lib = sbin_tool.load_native_lib()
     packed = sbin_tool.PackedPosition()
-    seen: set[tuple[str, str, str, str]] = set()
-    skipped = 0
+    seen: set[tuple[str, ...]] = set()
+    duplicates = 0
     written = 0
     results = {"0": 0, "0.5": 0, "1": 0}
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -31,40 +32,29 @@ def convert(inputs: list[Path], output: Path, target: int, cp_weight: float,
     try:
         with temporary.open("wb") as dst:
             for source in inputs:
-                with source.open("r", encoding="utf-8", errors="replace") as src:
-                    for line in src:
+                with source.open("r", encoding="utf-8") as src:
+                    for number, line in enumerate(src, 1):
                         fields = line.rstrip("\r\n").split(" | ")
-                        if len(fields) != 3:
-                            skipped += 1
-                            continue
+                        if len(fields) != 3 or len(fields[0].split()) != 6:
+                            raise ValueError(f"{source}:{number}: 'FEN | cp | sonuç' satırı bekleniyordu")
                         fen, cp_text, result_text = fields
-                        fen_fields = fen.split()
-                        if len(fen_fields) != 6:
-                            skipped += 1
-                            continue
-                        key = tuple(fen_fields[:4])
+                        cp = int(cp_text)
+                        result = float(result_text)
+                        if result not in (0.0, 0.5, 1.0):
+                            raise ValueError(f"{source}:{number}: sonuç 0, 0.5 veya 1 olmalı")
+                        key = tuple(fen.split()[:4])
                         if key in seen:
-                            skipped += 1
+                            duplicates += 1
                             continue
-                        try:
-                            cp = int(cp_text)
-                            result = float(result_text)
-                            if result not in (0.0, 0.5, 1.0) or not math.isfinite(result):
-                                raise ValueError
-                            clipped_cp = max(-1500, min(1500, cp))
-                            cp_wdl = 1.0 / (1.0 + 10.0 ** (-clipped_cp / cp_scale))
-                            label = cp_weight * cp_wdl + (1.0 - cp_weight) * result
-                        except (ValueError, OverflowError):
-                            skipped += 1
-                            continue
+                        clipped_cp = max(-1500, min(1500, cp))
+                        cp_wdl = 1.0 / (1.0 + 10.0 ** (-clipped_cp / cp_scale))
+                        label = cp_weight * cp_wdl + (1.0 - cp_weight) * result
                         status = lib.sbin_pack_fen(
                             fen.encode("utf-8"), ctypes.c_float(label),
-                            ctypes.c_int16(max(-32000, min(32000, cp))),
-                            ctypes.byref(packed),
+                            ctypes.c_int16(max(-32000, min(32000, cp))), ctypes.byref(packed),
                         )
                         if status:
-                            skipped += 1
-                            continue
+                            raise ValueError(f"{source}:{number}: paketlenemeyen konum (kod {status})")
                         dst.write(bytes(packed))
                         seen.add(key)
                         results[str(result).removesuffix(".0")] += 1
@@ -80,7 +70,7 @@ def convert(inputs: list[Path], output: Path, target: int, cp_weight: float,
         temporary.unlink(missing_ok=True)
     metadata = {
         "sources": [str(path.resolve()) for path in inputs],
-        "output": str(output.resolve()), "positions": written, "skipped": skipped,
+        "output": str(output.resolve()), "positions": written, "duplicates": duplicates,
         "cp_weight": cp_weight, "result_weight": 1.0 - cp_weight,
         "cp_scale": cp_scale, "results": results,
     }

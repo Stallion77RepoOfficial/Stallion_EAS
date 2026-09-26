@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
 """Single entry point for all Stallion EAS training workflows.
 
-Commands:
-  extract      phase-balanced or aggressive SBIN extraction
-  prepare      validated aggressive puzzle-position preparation
-  datagen      labelled self-play data generation through one UCI session/game
-  train        engine-compatible NNUE training and export
-  match        candidate/baseline cutechess comparison
-  gauntlet     quick foreign-anchor gate vs Stockfish UCI_Elo
-  eas          local aggressiveness report from a PGN
-  sacrifices   SGS sacrifice scan from a PGN
-  iwins        IWS interesting-wins filter from a PGN
-  pipeline     run a selected subset with --steps
-
-All Python workflow code is intentionally kept in this file. Native assets
-(the engine, Stockfish, cutechess and pgn-extract pattern files) remain files.
+Commands (each accepts only its own flags; see `stallion.py <command> -h`):
+  extract, prepare, mine   native SBIN data selection
+  train                    engine-compatible NNUE training and export
+  datagen, label           self-play data and external-engine labels
+  match, gauntlet          cutechess comparisons with embedded-net engines
+  eas, sacrifices, iwins   PGN reports
+  pipeline                 selected steps in order
 """
 
 from __future__ import annotations
@@ -257,120 +250,111 @@ def _read_offsets(path: Path | None) -> dict[str, Any]:
     return state
 
 
-def _label_settings(args: argparse.Namespace) -> tuple[bool, float]:
-    labels_cp = args.sbin_labels == "cp"
+def _wdl_lambda(args: argparse.Namespace) -> float:
     lam = float(args.wdl_lambda)
     if not 0.0 <= lam <= 1.0:
         raise ValueError("wdl-lambda 0 ile 1 arasında olmalı.")
-    return labels_cp, lam
+    return lam
 
 
-def extract_dataset(args: argparse.Namespace, phase: str | None = None,
-                    output: Path | None = None) -> Path:
-    """Native selection from eval/puzzle SBIN sources into one shuffled SBIN."""
-    np = dependency("numpy")
+def _publish_selection(output: Path, out: Any, written: int, stats: Any, manifest: dict[str, Any],
+                       rng: Any, allow_short: bool, offsets: dict[str, Any] | None = None,
+                       offset_file: Path | None = None) -> Path:
+    """Shared tail of every native selection: offsets, shuffled records, manifest, summary."""
     sbin = _sbin()
-    lib = sbin.load_native_lib()
-    phase = phase or args.phase
-    if phase not in ("base", "aggressive"):
-        raise ValueError("extract için phase base veya aggressive olmalı.")
-    output = (output or args.output or ROOT / "data" / f"{phase}.sbin").resolve()
-    if output.suffix.lower() != ".sbin":
-        raise ValueError("Dataset çıktı uzantısı .sbin olmalı.")
-    labels_cp, lam = _label_settings(args)
-    filter_names = args.base_filters if phase == "base" else args.aggressive_filters
-    filters = sbin.filter_mask(filter_names)
-    rng = np.random.default_rng(args.seed)
-    stats = np.zeros(len(sbin.STAT_NAMES), dtype=np.uint64)
-    manifest: dict[str, Any] = {"phase": phase, "filters": list(filter_names), "seed": args.seed}
-
-    if phase == "aggressive" and args.aggressive_source == "puzzles":
-        puzzles = require_file(args.puzzles, "Feda bulmaca havuzu")
-        if output == puzzles:
-            raise ValueError("Puzzle havuzu ve çıktı aynı dosya olamaz.")
-        with sbin.SbinDataset(puzzles) as p_ds:
-            target = int(args.target if args.target is not None else p_ds.count)
-            if target < 2:
-                raise ValueError("target en az 2 olmalı.")
-            rows = rng.permutation(p_ds.count).astype(np.int64)
-            out = np.empty(target, dtype=sbin.RECORD)
-            written = lib.sbin_select_aggressive(
-                sbin.pointer(p_ds.records()), sbin.pointer(rows), len(rows), None, 0, 0,
-                target, 1.0, 0, filters, 0, 0.0, sbin.pointer(out), sbin.pointer(stats))
-        manifest.update({"source": file_identity(puzzles), "target": target, "label_source": "wdl"})
-    else:
-        source = require_file(args.source, "Eval SBIN kaynağı")
-        if source.suffix.lower() != ".sbin":
-            raise ValueError(f"Yalnızca .sbin eval arşivleri desteklenir: {source}")
-        if source == output:
-            raise ValueError("Eval kaynağı ve çıktı aynı dosya olamaz.")
-        target = int(args.target if args.target is not None else
-                     (args.base_target if phase == "base" else args.aggressive_target))
-        if target < 2:
-            raise ValueError("target en az 2 olmalı.")
-        if labels_cp:
-            _require_cp_labels(source)
-        state = _read_offsets(args.offset_file)
-        source_identity = file_identity(source)
-        with sbin.SbinDataset(source) as ds:
-            if args.no_offset:
-                start = int(rng.integers(0, ds.count))
-            elif args.reset_offset:
-                start = 0
-            else:
-                if args.skip_lines is None and state.get("source") not in (None, source_identity):
-                    raise ValueError("Eval kaynağı değişti; --reset-offset veya açık --skip-lines kullanın.")
-                start = int(args.skip_lines if args.skip_lines is not None else state.get(f"{phase}_offset", 0))
-            if not 0 <= start < ds.count:
-                raise ValueError(f"Başlangıç satırı kaynak dışında: {start:,}/{ds.count:,}")
-            out = np.empty(target, dtype=sbin.RECORD)
-            if phase == "base":
-                distribution = phase_distribution(args, target, rng)
-                quotas = np.array([distribution[name] for name in PHASES], dtype=np.uint64)
-                written = lib.sbin_select_base(
-                    sbin.pointer(ds.records()), ds.count, start, sbin.pointer(quotas), filters,
-                    int(labels_cp), lam, sbin.pointer(out), sbin.pointer(stats))
-                manifest["phase_dist"] = distribution
-            else:
-                puzzle_ratio, sac_ratio = float(args.puzzle_ratio), float(args.sac_ratio)
-                if not 0.0 <= puzzle_ratio <= 1.0 or not 0.0 <= sac_ratio <= 1.0:
-                    raise ValueError("puzzle-ratio ve sac-ratio 0 ile 1 arasında olmalı.")
-                puzzle_records = np.empty(0, dtype=sbin.RECORD)
-                puzzle_rows = np.empty(0, dtype=np.int64)
-                if puzzle_ratio:
-                    puzzles = require_file(args.puzzles, "Feda bulmaca havuzu")
-                    with sbin.SbinDataset(puzzles) as p_ds:
-                        puzzle_records = np.array(p_ds.records())
-                    puzzle_rows = rng.choice(len(puzzle_records), size=min(int(target * puzzle_ratio), len(puzzle_records)),
-                                             replace=False).astype(np.int64)
-                    manifest["puzzles"] = file_identity(puzzles)
-                written = lib.sbin_select_aggressive(
-                    sbin.pointer(puzzle_records), sbin.pointer(puzzle_rows), len(puzzle_rows),
-                    sbin.pointer(ds.records()), ds.count, start, target, sac_ratio,
-                    int(args.augment_mirror), filters, int(labels_cp), lam,
-                    sbin.pointer(out), sbin.pointer(stats))
-        if file_identity(source) != source_identity:
-            raise RuntimeError("Eval kaynağı çıkarma sırasında değişti; çıktı yayımlanmadı.")
-        manifest.update({"source": source_identity, "target": target, "start_after": start,
-                         "label_source": args.sbin_labels, "wdl_lambda": lam if labels_cp else None})
     if written < 0:
         raise RuntimeError("Native seçim geçersiz argüman aldı.")
     if not written:
         raise RuntimeError("Uygun pozisyon bulunamadı.")
     summary = sbin.stats_dict(stats)
-    if "start_after" in manifest and not args.no_offset and args.offset_file:
-        state[f"{phase}_offset"] = summary["next_offset"]
-        state["source"] = manifest["source"]
-        atomic_json(args.offset_file, state)
+    if offsets is not None:
+        offsets[f"{manifest['phase']}_offset"] = summary["next_offset"]
+        offsets["source"] = manifest["source"]
+        atomic_json(offset_file, offsets)
     atomic_records(output, out[:written][rng.permutation(written)])
     atomic_json(output.with_suffix(".extract.json"), {**manifest, "output": file_identity(output), **summary})
-    if written < manifest["target"] and not args.allow_short_dataset:
+    if written < manifest["target"] and not allow_short:
         raise RuntimeError(f"Hedef tamamlanmadı: {written:,}/{manifest['target']:,}; kısmi veri {output} içinde; "
                            "kullanmak için --allow-short-dataset gerekli.")
     skipped = ", ".join(f"{name}={summary[name]:,}" for name in ("invalid", "duplicate", "mate", "check", "tactical")
                         if summary[name])
     print(f"[BAŞARILI] {output}: {written:,} kayıt{'; atlanan ' + skipped if skipped else ''}", flush=True)
     return output
+
+
+def extract_dataset(args: argparse.Namespace, phase: str, output: Path) -> Path:
+    """Native selection from the eval SBIN (plus puzzles for aggressive) into one shuffled SBIN."""
+    np = dependency("numpy")
+    sbin = _sbin()
+    lib = sbin.load_native_lib()
+    if phase not in ("base", "aggressive"):
+        raise ValueError("extract için phase base veya aggressive olmalı.")
+    output = output.resolve()
+    if output.suffix.lower() != ".sbin":
+        raise ValueError("Dataset çıktı uzantısı .sbin olmalı.")
+    if args.target is None or args.target < 2:
+        raise ValueError("extract için --target (en az 2) gerekli.")
+    labels_cp = args.sbin_labels == "cp"
+    lam = _wdl_lambda(args)
+    filter_names = args.base_filters if phase == "base" else args.aggressive_filters
+    filters = sbin.filter_mask(filter_names)
+    rng = np.random.default_rng(args.seed)
+    stats = np.zeros(len(sbin.STAT_NAMES), dtype=np.uint64)
+    source = require_file(args.source, "Eval SBIN kaynağı")
+    if source.suffix.lower() != ".sbin":
+        raise ValueError(f"Yalnızca .sbin eval arşivleri desteklenir: {source}")
+    if source == output:
+        raise ValueError("Eval kaynağı ve çıktı aynı dosya olamaz.")
+    if labels_cp:
+        _require_cp_labels(source)
+    offsets = _read_offsets(args.offset_file)
+    source_identity = file_identity(source)
+    target = int(args.target)
+    manifest: dict[str, Any] = {"phase": phase, "filters": list(filter_names), "seed": args.seed,
+                                "source": source_identity, "target": target, "label_source": args.sbin_labels,
+                                "wdl_lambda": lam if labels_cp else None}
+    with sbin.SbinDataset(source) as ds:
+        if args.no_offset:
+            start = int(rng.integers(0, ds.count))
+        elif args.reset_offset:
+            start = 0
+        else:
+            if args.skip_lines is None and offsets.get("source") not in (None, source_identity):
+                raise ValueError("Eval kaynağı değişti; --reset-offset veya açık --skip-lines kullanın.")
+            start = int(args.skip_lines if args.skip_lines is not None else offsets.get(f"{phase}_offset", 0))
+        if not 0 <= start < ds.count:
+            raise ValueError(f"Başlangıç satırı kaynak dışında: {start:,}/{ds.count:,}")
+        manifest["start_after"] = start
+        out = np.empty(target, dtype=sbin.RECORD)
+        if phase == "base":
+            distribution = phase_distribution(args, target, rng)
+            quotas = np.array([distribution[name] for name in PHASES], dtype=np.uint64)
+            written = lib.sbin_select_base(
+                sbin.pointer(ds.records()), ds.count, start, sbin.pointer(quotas), filters,
+                int(labels_cp), lam, sbin.pointer(out), sbin.pointer(stats))
+            manifest["phase_dist"] = distribution
+        else:
+            puzzle_ratio, sac_ratio = float(args.puzzle_ratio), float(args.sac_ratio)
+            if not 0.0 <= puzzle_ratio <= 1.0 or not 0.0 <= sac_ratio <= 1.0:
+                raise ValueError("puzzle-ratio ve sac-ratio 0 ile 1 arasında olmalı.")
+            puzzle_records = np.empty(0, dtype=sbin.RECORD)
+            puzzle_rows = np.empty(0, dtype=np.int64)
+            if puzzle_ratio:
+                puzzles = require_file(args.puzzles, "Feda bulmaca havuzu")
+                with sbin.SbinDataset(puzzles) as p_ds:
+                    puzzle_records = np.array(p_ds.records())
+                puzzle_rows = rng.choice(len(puzzle_records), size=min(int(target * puzzle_ratio), len(puzzle_records)),
+                                         replace=False).astype(np.int64)
+                manifest["puzzles"] = file_identity(puzzles)
+            written = lib.sbin_select_aggressive(
+                sbin.pointer(puzzle_records), sbin.pointer(puzzle_rows), len(puzzle_rows),
+                sbin.pointer(ds.records()), ds.count, start, target, sac_ratio,
+                int(args.augment_mirror), filters, int(labels_cp), lam,
+                sbin.pointer(out), sbin.pointer(stats))
+    if file_identity(source) != source_identity:
+        raise RuntimeError("Eval kaynağı çıkarma sırasında değişti; çıktı yayımlanmadı.")
+    return _publish_selection(output, out, written, stats, manifest, rng, args.allow_short_dataset,
+                              None if args.no_offset else offsets, args.offset_file)
 
 
 def mine_hard_dataset(args: argparse.Namespace) -> Path:
@@ -383,16 +367,16 @@ def mine_hard_dataset(args: argparse.Namespace) -> Path:
     output = (args.output or ROOT / "data" / "base_hard.sbin").resolve()
     if output == source:
         raise ValueError("Madencilik kaynağı ve çıktı aynı dosya olamaz.")
-    target = int(args.target if args.target is not None else 5_000_000)
+    if args.target is None:
+        raise ValueError("mine için --target gerekli.")
+    target = int(args.target)
     pool_size = int(args.pool_size)
     if target < 2 or pool_size < target:
         raise ValueError("target en az 2, pool-size en az target kadar olmalı.")
-    labels_cp, lam = _label_settings(args)
-    if not labels_cp:
-        raise ValueError("mine cp etiketleriyle çalışır; --sbin-labels cp kullanın.")
+    lam = _wdl_lambda(args)
     _require_cp_labels(source)
     filters = sbin.filter_mask(args.base_filters)
-    model_path = require_network(args.model or NETS / "stallion.nnue", "Madencilik Modeli")
+    model_path = require_network(args.model, "Madencilik Modeli")
     device = _torch_device(torch, args.device)
     model = _make_nnue_model().to(device)
     load_nnue(model, model_path)
@@ -615,11 +599,31 @@ def run_label(args: argparse.Namespace) -> Path:
     return output
 
 
-def prepare_dataset(args: argparse.Namespace) -> Path:
-    """Aggressive puzzle pool through the same native selection."""
-    output = (args.output or ROOT / "data" / "aggressive-prepared.sbin").resolve()
-    prepared_args = _namespace_copy(args, phase="aggressive", aggressive_source="puzzles", output=output)
-    return extract_dataset(prepared_args, "aggressive", output)
+def prepare_dataset(args: argparse.Namespace, output: Path) -> Path:
+    """Aggressive data from the sacrifice puzzle pool only (stored WDL labels)."""
+    np = dependency("numpy")
+    sbin = _sbin()
+    lib = sbin.load_native_lib()
+    output = output.resolve()
+    if output.suffix.lower() != ".sbin":
+        raise ValueError("Dataset çıktı uzantısı .sbin olmalı.")
+    puzzles = require_file(args.puzzles, "Feda bulmaca havuzu")
+    if output == puzzles:
+        raise ValueError("Puzzle havuzu ve çıktı aynı dosya olamaz.")
+    rng = np.random.default_rng(args.seed)
+    stats = np.zeros(len(sbin.STAT_NAMES), dtype=np.uint64)
+    with sbin.SbinDataset(puzzles) as p_ds:
+        target = int(args.target if args.target is not None else p_ds.count)
+        if target < 2:
+            raise ValueError("target en az 2 olmalı.")
+        rows = rng.permutation(p_ds.count).astype(np.int64)
+        out = np.empty(target, dtype=sbin.RECORD)
+        written = lib.sbin_select_aggressive(
+            sbin.pointer(p_ds.records()), sbin.pointer(rows), len(rows), None, 0, 0, target, 1.0, 0,
+            sbin.filter_mask(args.aggressive_filters), 0, 0.0, sbin.pointer(out), sbin.pointer(stats))
+    manifest = {"phase": "aggressive", "filters": list(args.aggressive_filters), "seed": args.seed,
+                "source": file_identity(puzzles), "target": target, "label_source": "wdl"}
+    return _publish_selection(output, out, written, stats, manifest, rng, args.allow_short_dataset)
 
 
 @contextmanager
@@ -1235,10 +1239,8 @@ def _build_embedded_engine(engine_src: Path, network: Path, cache_dir: Path) -> 
         if not (engine_src / needed).is_file():
             raise RuntimeError(f"Motor kaynağı eksik: {engine_src / needed}")
     key = f"{_engine_source_fingerprint(engine_src)}_{file_sha256(network)[:16]}"
-    binary_name = {"darwin": "stallion_eas_mac", "win32": "stallion_eas_windows.exe"}.get(
-        sys.platform, "stallion_eas_linux")
     build_dir = (cache_dir / key).resolve()
-    binary = build_dir / binary_name
+    binary = build_dir / ENGINE_BINARY
     marker = build_dir / "complete.json"
     if binary.is_file() and marker.is_file():
         return binary
@@ -1892,7 +1894,7 @@ def maybe_promote(args: argparse.Namespace, phase: str, result: MatchResult,
     stats = (eas_report or {}).get("stats", {})
     cand_eas, base_eas = stats.get("Candidate"), stats.get("Baseline")
     eas_gain = cand_eas - base_eas if cand_eas is not None and base_eas is not None else None
-    eas_ok = phase in ("base", "nnue") or (eas_gain is not None and eas_gain >= args.min_eas_gain)
+    eas_ok = phase == "base" or (eas_gain is not None and eas_gain >= args.min_eas_gain)
     if result.status != "PASSED" or not result.is_winner or not eas_ok:
         print(f"[TERFİ YOK] SPRT={result.status}; EAS farkı={eas_gain}; aday={candidate}", flush=True)
         return False
@@ -1902,45 +1904,17 @@ def maybe_promote(args: argparse.Namespace, phase: str, result: MatchResult,
     return True
 
 
-def parse_steps(value: str | None) -> list[str]:
-    aliases = {
-        "data": "extract",
-        "dataset": "extract",
-        "extraction": "extract",
-        "data-extract": "extract",
-        "training": "train",
-        "build": "prepare",
-        "merge": "prepare",
-        "comparison": "match",
-        "match-compare": "match",
-        "eas-compare": "eas",
-        "eas-comparison": "eas",
-        "sacrifice": "sacrifices",
-        "sgs": "sacrifices",
-        "iws": "iwins",
-        "interesting": "iwins",
-        "selfplay": "datagen",
-        "datagen": "datagen",
-        "everything": "all",
-    }
-    order = ["prepare", "extract", "datagen", "train", "match", "eas", "sacrifices", "iwins", "promote"]
-    tokens = [
-        aliases.get(token.lower(), token.lower())
-        for token in re.split(r"[,\s]+", value or "all") if token
-    ]
-    unknown = [token for token in tokens if token not in order and token != "all"]
-    if unknown:
-        raise ValueError(
-            f"Bilinmeyen pipeline adımı: {', '.join(unknown)}; "
-            f"geçerli adımlar: {', '.join(order)}"
-        )
-    if not tokens or "all" in tokens:
-        tokens = [token for token in tokens if token != "all"] + ["extract", "train", "match", "eas"]
+def parse_steps(value: str) -> list[str]:
+    tokens = [token for token in re.split(r"[,\s]+", value.lower()) if token]
+    unknown = [token for token in tokens if token not in PIPELINE_STEPS]
+    if unknown or not tokens:
+        raise ValueError(f"Geçersiz pipeline adımı: {', '.join(unknown) or '(boş)'}; "
+                         f"geçerli adımlar: {', '.join(PIPELINE_STEPS)}")
     if "datagen" in tokens and any(step in tokens for step in ("extract", "prepare")):
         raise ValueError("datagen ile extract/prepare aynı fazda birlikte seçilemez.")
     if "prepare" in tokens and "extract" in tokens:
         raise ValueError("prepare ile extract aynı fazda birlikte seçilemez; tek bir veri kaynağı seçin.")
-    return [step for step in order if step in tokens]
+    return [step for step in PIPELINE_STEPS if step in tokens]
 
 
 def _namespace_copy(args: argparse.Namespace, **changes: Any) -> argparse.Namespace:
@@ -1959,14 +1933,14 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     phases = ["base", "aggressive"] if args.phase == "all" else [args.phase]
     if args.promote and "aggressive" in phases and "eas" not in steps:
         raise ValueError("Aggressive terfisi için --steps içinde eas da gerekli.")
-    if "prepare" in steps and "aggressive" not in phases:
-        raise ValueError("prepare yalnızca aggressive fazında kullanılabilir.")
+    if "prepare" in steps and args.phase != "aggressive":
+        raise ValueError("prepare yalnızca --phase aggressive ile kullanılabilir.")
     if args.max_iters < 0:
         raise ValueError("max-iters negatif olamaz.")
     run_dir = args.run_dir or ROOT / "runs" / datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
+    baseline = args.baseline
     for phase in phases:
-        baseline = args.baseline if args.baseline else NETS / "stallion.nnue"
         if any(step in steps for step in ("train", "match", "promote")):
             require_network(baseline, f"{phase} taban NNUE")
         iteration = 0
@@ -1996,13 +1970,9 @@ def run_pipeline(args: argparse.Namespace) -> Path:
                 print(f"[{phase.upper()} {iteration}] adımlar={','.join(steps)}", flush=True)
             for step in steps:
                 if step == "prepare":
-                    dataset_path = prepare_dataset(_namespace_copy(
-                        args, phase=phase, output=dataset_path,
-                    ))
+                    dataset_path = prepare_dataset(args, dataset_path)
                 elif step == "datagen":
-                    dataset_path = run_datagen(_namespace_copy(
-                        args, phase=phase, output=dataset_path,
-                    ))
+                    dataset_path = run_datagen(_namespace_copy(args, output=dataset_path))
                 elif step == "extract":
                     if not dataset:
                         dataset_path = extract_dataset(
@@ -2033,7 +2003,6 @@ def run_pipeline(args: argparse.Namespace) -> Path:
                     match_args = _namespace_copy(
                         args, phase=phase, candidate=candidate, baseline=baseline,
                         pgnout=pgnout, json_out=match_json,
-                        games=args.games_base if phase == "base" else args.games_aggressive,
                     )
                     match_result = run_match(match_args, phase)
                 elif step == "eas":
@@ -2071,127 +2040,12 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     return run_dir
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Stallion EAS eğitim araçlarının tek giriş noktası. "
-            "pipeline --phase base|aggressive|all --steps extract,train,match,eas"
-        )
-    )
-    parser.add_argument(
-        "command", nargs="?", default="pipeline",
-        choices=["pipeline", "extract", "prepare", "datagen", "train", "match", "gauntlet", "eas", "sacrifices", "mine", "label", "iwins"],
-    )
-    parser.add_argument("--phase", "--mode", "--net-type", dest="phase",
-                        choices=["nnue", "all", "base", "aggressive"], default="nnue",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--steps", default="all",
-                        help="pipeline adımları: extract,train,match,eas,sacrifices,iwins,promote,all")
-    parser.add_argument("--run-dir", default=None)
-    parser.add_argument("--output", default=None)
-    parser.add_argument("--dataset", default=None)
-    parser.add_argument("--aggressive-dataset", default=None)
+def _path_arg(value: str) -> Path:
+    return Path(value).expanduser().resolve()
 
-    parser.add_argument("--source", "--sbin", dest="source", default=str(DEFAULT_EVAL),
-                        help="Eval SBIN veri kaynağı (varsayılan: training/data/evals.sbin)")
-    parser.add_argument("--puzzles", default=str(DEFAULT_PUZZLES),
-                        help="Feda bulmaca SBIN kaynağı (varsayılan: training/data/puzzle_sacrifices.sbin)")
-    parser.add_argument("--target", type=int, default=None)
-    parser.add_argument("--base-target", "--base-positions", dest="base_target",
-                        type=int, default=500_000)
-    parser.add_argument("--aggressive-target", "--agg-positions", dest="aggressive_target",
-                        type=int, default=500_000)
-    parser.add_argument("--sbin-labels", choices=["cp", "wdl"], default="cp",
-                        help="Eval SBIN etiket kaynağı: cp WDL'yi yeniden hesaplar; wdl mevcut etiketleri korur")
-    parser.add_argument("--skip-lines", type=int, default=None)
-    parser.add_argument("--allow-short-dataset", action="store_true",
-                        help="Hedefin altında kalan kısmi veriyle devam et")
-    parser.add_argument("--offset-file", default=str(ROOT / "data" / "stream_offset.json"))
-    parser.add_argument("--reset-offset", "--reset-offsets", dest="reset_offset",
-                        action="store_true")
-    parser.add_argument("--no-offset", "--random", dest="no_offset", action="store_true",
-                        help="Ofset dosyası kullanma, her seferinde rastgele konumdan başla")
-    parser.add_argument("--phase-dist", type=str, default="35,35,20,10",
-                        help="Base faz dağılım oranları: endgame,late_middle,midgame,opening (örn: 35,35,20,10)")
-    parser.add_argument("--random-dist", action="store_true",
-                        help="Faz oranlarını her iterasyonda tamamen rastgele belirle")
-    parser.add_argument("--puzzle-ratio", type=float, default=0.20)
-    parser.add_argument("--sac-ratio", type=float, default=0.50,
-                        help="Aggressive fazında feda pozisyonu oranı (varsayılan: 0.50)")
-    parser.add_argument("--wdl-lambda", type=float, default=0.0,
-                        help="WDL hedef karışım oranı (0.0: saf CP dönüşümü, 1.0: kayıttaki WDL; varsayılan: 0.0). Kayıttaki WDL oyun sonucu veya yumuşak eval etiketi olabilir.")
-    parser.add_argument("--base-filters", type=_filter_list, default="mate,check,tactical",
-                        help="base extract/mine atlanacak konumlar: mate,check,tactical (virgülle; boş: filtre yok)")
-    parser.add_argument("--aggressive-filters", type=_filter_list, default="",
-                        help="aggressive extract/prepare atlanacak konumlar (varsayılan: yok; bulmacalar taktiktir)")
-    parser.add_argument("--augment-mirror", action="store_true",
-                        help="Rok hakkı kalmamış pozisyonlar için yatay ayna (a-h flip) artırımı uygula")
-    parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--epochs", type=int, default=12)
-    parser.add_argument("--batch-size", type=int, default=1024)
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--resume", "--resume-net", dest="resume", default=None)
-    parser.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="auto")
-    parser.add_argument("--patience", type=int, default=8)
-    parser.add_argument("--validation", type=float, default=0.05)
-    parser.add_argument("--swa", action="store_true", default=True,
-                        help="Son epoch'larda Stokastik Ağırlık Ortalaması (SWA) modeli üret (varsayılan: True)")
-    parser.add_argument("--no-swa", dest="swa", action="store_false",
-                        help="SWA model üretimini devre dışı bırak")
-    parser.add_argument("--feature-dropout", type=float, default=0.0,
-                        help="Eğitim sırasında rastgele özellik maskeleme oranı (varsayılan: 0.0)")
-    parser.add_argument("--model", default=None,
-                        help="Madencilik (mine) için referans şampiyon NNUE modeli")
-    parser.add_argument("--pool-size", type=int, default=15_000_000,
-                        help="Madencilikte taranacak pozisyon havuzu boyutu (varsayılan: 15,000,000)")
-
-    parser.add_argument("--engine", default=None, help="Self-play/datagen motor binary")
-    parser.add_argument("--engine-src", default=None, help="Match için motor kaynak dizini (gömülü derleme)")
-    parser.add_argument("--assets", default=str(DEFAULT_ASSETS),
-                        help="pgn-extract ve pattern dosyalarının bulunduğu klasör")
-    parser.add_argument("--cutechess", default=str(ROOT / "cutechess-cli"))
-    parser.add_argument("--book", default=str(DEFAULT_BOOK),
-                        help="EPD açılış kitabı; none: kitap yok (datagen rastgele açılış oynar)")
-    parser.add_argument("--candidate", default=None)
-    parser.add_argument("--baseline", default=None)
-    parser.add_argument("--games", type=int, default=100)
-    parser.add_argument("--games-base", type=int, default=None)
-    parser.add_argument("--games-aggressive", "--games-agg", dest="games_aggressive",
-                        type=int, default=None)
-    parser.add_argument("--concurrency", type=int, default=4)
-    parser.add_argument("--tc", default="5+0.05")
-    parser.add_argument("--stockfish", default=str(ROOT / "stockfish"),
-                        help="Gauntlet rakibi Stockfish binary")
-    parser.add_argument("--anchor-elo", dest="anchor_elo", type=int, default=2400,
-                        help="Gauntlet Stockfish UCI_Elo çapası (varsayılan: 2400)")
-    parser.add_argument("--min-score", dest="min_score", type=float, default=0.25,
-                        help="Gauntlet geçme skoru (varsayılan: 0.25)")
-    parser.add_argument("--aggressive-source", choices=["simple", "puzzles"], default="simple",
-                        help="aggressive extract kaynağı (puzzles yalnızca puzzle havuzunu kullanır)")
-    parser.add_argument("--depth", type=int, default=None,
-                        help="datagen/label arama derinliği sınırı")
-    parser.add_argument("--nodes", type=int, default=None,
-                        help="datagen/label hamle başına düğüm sınırı")
-    parser.add_argument("--random-chance", type=float, default=0.05,
-                        help="datagen rastgele hamle olasılığı")
-    parser.add_argument("--opening-moves", default="4-8",
-                        help="datagen rastgele açılış uzunluğu, örn. 4-8")
-    parser.add_argument("--sprt", action="store_true")
-    parser.add_argument("--promote", "--auto-filter", dest="promote", action="store_true")
-    parser.add_argument("--min-eas-gain", type=int, default=0)
-    parser.add_argument("--pgn", default=None)
-    parser.add_argument("--pgnout", default=None)
-    parser.add_argument("--json-out", "--json", dest="json_out", default=None)
-    parser.add_argument("--player", default=None,
-                        help="iwins için yalnızca bu motor/oyuncunun galibiyetleri")
-    parser.add_argument("--sac-type", type=int, choices=[0, 1, 2, 3, 4, 5, 9], default=0)
-    parser.add_argument("--max-moves", type=int, default=80)
-    parser.add_argument("--max-iters", type=int, default=1)
-    parser.add_argument("--verbose", action="store_true",
-                        help="Ayrıntılı eğitim ve maç çıktısı")
-    parser.add_argument("--version", action="version", version="stallion-training 1.0")
-    return parser
+def _book_arg(value: str) -> Path | None:
+    return None if value == "none" else _path_arg(value)
 
 
 def _filter_list(value: str) -> list[str]:
@@ -2200,32 +2054,160 @@ def _filter_list(value: str) -> list[str]:
     return names
 
 
+COMMAND_HELP = {
+    "extract": "eval SBIN'den faz kotalı (base) veya feda/keskin (aggressive) veri seti çıkarır",
+    "prepare": "yalnızca feda bulmaca havuzundan aggressive veri seti hazırlar",
+    "mine": "referans ağın en çok yanıldığı konumları seçer",
+    "train": "motorla uyumlu NNUE eğitir; en iyi ağı .nnue, durumu .pt olarak yazar",
+    "datagen": "self-play oyunlarındaki konumları oyun sonucuyla etiketler",
+    "label": "WDL etiketli SBIN'e dış motordan cp değerlendirmesi ekler",
+    "match": "aday ve taban ağı gömülü motorlarla cutechess'te oynatır",
+    "gauntlet": "adayı sabit UCI_Elo'lu Stockfish'e karşı hızlıca sınar",
+    "eas": "PGN'den yerel agresiflik (EAS) raporu üretir",
+    "sacrifices": "PGN'den feda içeren galibiyetleri ayıklar",
+    "iwins": "PGN'den ilginç galibiyetleri (IWS) ayıklar",
+    "pipeline": "seçilen adımları sırayla çalıştırır (extract, train, match, ...)",
+}
+PIPELINE_STEPS = ("prepare", "extract", "datagen", "train", "match", "eas", "sacrifices", "iwins", "promote")
+ENGINE_BINARY = {"darwin": "stallion_eas_mac", "win32": "stallion_eas_windows.exe"}.get(sys.platform, "stallion_eas_linux")
+OUTPUT_COMMANDS = {"extract", "prepare", "mine", "train", "datagen", "label", "eas", "sacrifices", "iwins"}
+# Every flag once: argparse options, help text and the commands that read it.
+CLI_FLAGS: list[tuple[str, dict[str, Any], set[str]]] = [
+    ("--phase", dict(choices=["base", "aggressive", "all"], default="base",
+                     help="base: Elo verisi; aggressive: feda/EAS verisi ve EAS'li terfi; all: pipeline iki fazı sırayla"),
+     {"extract", "match", "pipeline"}),
+    ("--source", dict(type=_path_arg, default=DEFAULT_EVAL, help="cp etiketli eval SBIN kaynağı"),
+     {"extract", "mine", "pipeline"}),
+    ("--puzzles", dict(type=_path_arg, default=DEFAULT_PUZZLES, help="feda bulmaca SBIN havuzu"),
+     {"extract", "prepare", "pipeline"}),
+    ("--target", dict(type=int, help="üretilecek konum sayısı (prepare: verilmezse tüm havuz)"),
+     {"extract", "prepare", "mine", "pipeline"}),
+    ("--offset-file", dict(type=_path_arg, default=ROOT / "data" / "stream_offset.json",
+                           help="kaynakta kalınan satır; sonraki çalıştırma buradan devam eder"),
+     {"extract", "mine", "pipeline"}),
+    ("--skip-lines", dict(type=int, help="ofset dosyası yerine bu satırdan başla"), {"extract", "pipeline"}),
+    ("--reset-offset", dict(action="store_true", help="kaynağın başından başla"), {"extract", "pipeline"}),
+    ("--no-offset", dict(action="store_true", help="rastgele satırdan başla, ofset dosyasına yazma"),
+     {"extract", "mine", "pipeline"}),
+    ("--sbin-labels", dict(choices=["cp", "wdl"], default="cp",
+                           help="cp: etiketi cp'den 400 ölçekle üret; wdl: kayıttaki WDL'yi aynen kullan"),
+     {"extract", "pipeline"}),
+    ("--wdl-lambda", dict(type=float, default=0.0, help="cp etiketine karışan kayıttaki WDL oranı (0: saf cp)"),
+     {"extract", "mine", "pipeline"}),
+    ("--base-filters", dict(type=_filter_list, default="mate,check,tactical",
+                            help="base/mine'de atlanan konumlar: mate, check, tactical (virgülle; \"\": filtre yok)"),
+     {"extract", "mine", "pipeline"}),
+    ("--aggressive-filters", dict(type=_filter_list, default="",
+                                  help="aggressive/prepare'de atlanan konumlar (varsayılan yok: bulmacalar taktiktir)"),
+     {"extract", "prepare", "pipeline"}),
+    ("--phase-dist", dict(default="35,35,20,10", help="base faz oranları: endgame,late_middle,midgame,opening"),
+     {"extract", "pipeline"}),
+    ("--random-dist", dict(action="store_true", help="base faz oranlarını rastgele seç"), {"extract", "pipeline"}),
+    ("--puzzle-ratio", dict(type=float, default=0.20, help="aggressive verinin bulmaca havuzundan gelen oranı"),
+     {"extract", "pipeline"}),
+    ("--sac-ratio", dict(type=float, default=0.50, help="aggressive verinin feda konumu oranı (kalanı keskin konum)"),
+     {"extract", "pipeline"}),
+    ("--augment-mirror", dict(action="store_true", help="aggressive: rok hakkı olmayan konumların a-h aynasını ekle"),
+     {"extract", "pipeline"}),
+    ("--allow-short-dataset", dict(action="store_true", help="hedefe ulaşılamazsa kısmi veriyi kabul et"),
+     {"extract", "prepare", "pipeline"}),
+    ("--dataset", dict(type=_path_arg, help="eğitilecek/etiketlenecek SBIN (pipeline: extract yerine bu veri)"),
+     {"train", "label", "pipeline"}),
+    ("--aggressive-dataset", dict(type=_path_arg, help="pipeline --phase all: aggressive fazın hazır verisi"),
+     {"pipeline"}),
+    ("--epochs", dict(type=int, default=12, help="epoch sayısı"), {"train", "pipeline"}),
+    ("--batch-size", dict(type=int, default=1024, help="batch boyutu"), {"train", "pipeline"}),
+    ("--lr", dict(type=float, default=2e-4, help="başlangıç öğrenme oranı; adım başına kosinüsle sıfıra iner"),
+     {"train", "pipeline"}),
+    ("--resume", dict(type=_path_arg, help=".nnue: ince ayar; .pt: kesilen koşuya devam (pipeline: taban ağ)"),
+     {"train", "pipeline"}),
+    ("--device", dict(choices=["auto", "cpu", "mps", "cuda"], default="auto", help="eğitim/madencilik cihazı"),
+     {"train", "mine", "pipeline"}),
+    ("--patience", dict(type=int, default=8, help="doğrulama kaybı bu kadar epoch iyileşmezse dur"),
+     {"train", "pipeline"}),
+    ("--validation", dict(type=float, default=0.05, help="doğrulamaya ayrılan konum oranı"), {"train", "pipeline"}),
+    ("--no-swa", dict(dest="swa", action="store_false", help="son epoch'ların ağırlık ortalaması (SWA) ağını üretme"),
+     {"train", "pipeline"}),
+    ("--feature-dropout", dict(type=float, default=0.0, help="eğitimde rastgele özellik düşürme oranı"),
+     {"train", "pipeline"}),
+    ("--model", dict(type=_path_arg, default=NETS / "stallion.nnue", help="madencilikte referans ağ"), {"mine"}),
+    ("--pool-size", dict(type=int, default=15_000_000, help="madencilikte değerlendirilen konum sayısı"), {"mine"}),
+    ("--engine", dict(type=_path_arg, default=ENGINE_ROOT / ENGINE_BINARY, help="self-play/etiket motoru"),
+     {"datagen", "label", "pipeline"}),
+    ("--depth", dict(type=int, help="hamle başına derinlik sınırı"), {"datagen", "label", "pipeline"}),
+    ("--nodes", dict(type=int, help="hamle başına düğüm sınırı"), {"datagen", "label", "pipeline"}),
+    ("--games", dict(type=int, default=100, help="oyun sayısı"), {"datagen", "match", "gauntlet", "pipeline"}),
+    ("--concurrency", dict(type=int, default=4, help="paralel oyun/motor sayısı"),
+     {"datagen", "label", "match", "gauntlet", "pipeline"}),
+    ("--random-chance", dict(type=float, default=0.05, help="self-play'de rastgele hamle olasılığı"),
+     {"datagen", "pipeline"}),
+    ("--opening-moves", dict(default="4-8", help="--book none iken rastgele açılış hamle aralığı"),
+     {"datagen", "pipeline"}),
+    ("--max-moves", dict(type=int, default=80,
+                         help="datagen: oyun uzunluğu sınırı; sacrifices/iwins: bu uzunluğa kadar olan oyunlar"),
+     {"datagen", "sacrifices", "iwins", "pipeline"}),
+    ("--book", dict(type=_book_arg, default=DEFAULT_BOOK, help="EPD açılış kitabı; none: kitapsız"),
+     {"datagen", "match", "gauntlet", "pipeline"}),
+    ("--candidate", dict(type=_path_arg, help="aday ağ"), {"match", "gauntlet", "pipeline"}),
+    ("--baseline", dict(type=_path_arg, default=NETS / "stallion.nnue", help="taban ağ"), {"match", "pipeline"}),
+    ("--tc", dict(default="5+0.05", help="cutechess süre kontrolü"), {"match", "gauntlet", "pipeline"}),
+    ("--sprt", dict(action="store_true", help="SPRT (elo0=0, elo1=15) ile erken karar"), {"match", "pipeline"}),
+    ("--promote", dict(action="store_true", help="SPRT H1 kabul edilirse adayı taban ağın yerine koy"),
+     {"match", "pipeline"}),
+    ("--min-eas-gain", dict(type=int, default=0, help="aggressive terfi için gereken en az EAS artışı"),
+     {"match", "pipeline"}),
+    ("--engine-src", dict(type=_path_arg, default=ENGINE_ROOT, help="gömülü motorun derlendiği kaynak dizin"),
+     {"match", "gauntlet", "pipeline"}),
+    ("--cutechess", dict(type=_path_arg, default=ROOT / "cutechess-cli", help="cutechess-cli yolu"),
+     {"match", "gauntlet", "pipeline"}),
+    ("--pgnout", dict(type=_path_arg, help="maç PGN çıktısı"), {"match", "gauntlet"}),
+    ("--json-out", dict(type=_path_arg, help="sonuç JSON çıktısı"), {"match", "gauntlet", "eas"}),
+    ("--stockfish", dict(type=_path_arg, default=ROOT / "stockfish", help="gauntlet rakibi"), {"gauntlet"}),
+    ("--anchor-elo", dict(type=int, default=2400, help="Stockfish UCI_Elo seviyesi"), {"gauntlet"}),
+    ("--min-score", dict(type=float, default=0.25, help="gauntlet geçme skoru"), {"gauntlet"}),
+    ("--pgn", dict(type=_path_arg, help="incelenecek PGN"), {"eas", "sacrifices", "iwins", "pipeline"}),
+    ("--assets", dict(type=_path_arg, default=DEFAULT_ASSETS, help="pgn-extract ve desen dosyaları"),
+     {"eas", "sacrifices", "iwins", "match", "pipeline"}),
+    ("--sac-type", dict(type=int, choices=[0, 1, 2, 3, 4, 5, 9], default=0,
+                        help="feda türü: 0 hepsi, 1-2 piyon, 3-4 hafif taş, 5 kale/kalite, 9 vezir"),
+     {"sacrifices", "pipeline"}),
+    ("--player", dict(help="iwins: yalnızca bu oyuncunun galibiyetleri"), {"iwins", "pipeline"}),
+    ("--steps", dict(default="extract,train,match,eas", help="adımlar: " + ", ".join(PIPELINE_STEPS)), {"pipeline"}),
+    ("--run-dir", dict(type=_path_arg, help="pipeline çıktı dizini (varsayılan runs/<zaman>)"), {"pipeline"}),
+    ("--max-iters", dict(type=int, default=1, help="yineleme sayısı (0: durdurulana kadar)"), {"pipeline"}),
+    ("--output", dict(type=_path_arg, help="çıktı dosyası"), OUTPUT_COMMANDS),
+    ("--seed", dict(type=int, default=42, help="rastgelelik tohumu"),
+     {"extract", "prepare", "datagen", "train", "match", "gauntlet", "pipeline"}),
+    ("--verbose", dict(action="store_true", help="ilerleme ve ayrıntılı çıktı"), set(COMMAND_HELP)),
+]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Stallion EAS eğitim araçları. Komut yardımı: stallion.py <komut> -h")
+    commands = parser.add_subparsers(dest="command", required=True, metavar="komut")
+    for command, text in COMMAND_HELP.items():
+        sub = commands.add_parser(command, help=text, description=text)
+        for flag, options, users in CLI_FLAGS:
+            if command in users:
+                sub.add_argument(flag, **options)
+    return parser
+
+
 def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
-    if args.command != "pipeline" and args.phase == "all":
+    if args.command in ("extract", "match") and args.phase == "all":
         raise ValueError("--phase all yalnızca pipeline içindir.")
-    if args.games_base is None:
-        args.games_base = args.games
-    if args.games_aggressive is None:
-        args.games_aggressive = args.games
-    for name in ("assets", "source", "puzzles", "offset_file", "dataset", "aggressive_dataset", "run_dir",
-                 "resume", "candidate", "baseline", "pgn", "pgnout", "json_out", "cutechess", "stockfish",
-                 "model", "output"):
-        setattr(args, name, resolve_path(getattr(args, name)))
-    args.book = None if args.book == "none" else resolve_path(args.book)
-    args.engine_src = resolve_path(args.engine_src, ENGINE_ROOT)
-    engine_name = {"darwin": "stallion_eas_mac", "win32": "stallion_eas_windows.exe"}.get(sys.platform, "stallion_eas_linux")
-    args.engine = resolve_path(args.engine, ENGINE_ROOT / engine_name)
     defaults = {
         "extract": ROOT / "data" / "train.sbin", "prepare": ROOT / "data" / "aggressive-prepared.sbin",
-        "datagen": ROOT / "data" / "selfplay.sbin", "eas": ROOT / "statistics_EAS_ratinglist.txt",
-        "sacrifices": ROOT / "games_with_sacrifices.pgn", "iwins": ROOT / "interesting_wins.pgn",
+        "mine": ROOT / "data" / "base_hard.sbin", "datagen": ROOT / "data" / "selfplay.sbin",
+        "eas": ROOT / "statistics_EAS_ratinglist.txt", "sacrifices": ROOT / "games_with_sacrifices.pgn",
+        "iwins": ROOT / "interesting_wins.pgn",
         "train": ROOT / "runs" / f"train-{datetime.now():%Y%m%d-%H%M%S-%f}" / "candidate.nnue",
     }
-    if args.output is None and args.command in defaults:
+    if args.command in defaults and args.output is None:
         args.output = defaults[args.command]
     if args.command in ("match", "gauntlet"):
-        if args.candidate is None or (args.command == "match" and args.baseline is None):
-            raise ValueError(f"{args.command} için --candidate{' ve --baseline' if args.command == 'match' else ''} gerekli.")
+        if args.candidate is None:
+            raise ValueError(f"{args.command} için --candidate gerekli.")
         if args.pgnout is None:
             args.pgnout = ROOT / "runs" / f"{args.command}-{datetime.now():%Y%m%d-%H%M%S-%f}.pgn"
     if args.command in ("train", "label") and args.dataset is None:
@@ -2242,7 +2224,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "extract":
             extract_dataset(args, args.phase, args.output)
         elif args.command == "prepare":
-            prepare_dataset(args)
+            prepare_dataset(args, args.output)
         elif args.command == "datagen":
             run_datagen(args)
         elif args.command == "mine":

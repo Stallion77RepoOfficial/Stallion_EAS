@@ -19,28 +19,28 @@
 - `--resume model.nnue` ince ayar, `--resume checkpoint.pt` aynı veri/ayar (seed, validation, batch-size) ile kesilen koşuya devamdır.
 - Parquet eğitim girdisi değildir; önce `sbin_tool.py convert --parquet x.parquet --sbin x.sbin`.
 
-## Komutlar (`training/.venv/bin/python stallion.py ...`)
+## Komutlar (`training/.venv/bin/python stallion.py <komut> ...`)
 
-- `extract --phase base --source data/evals.sbin --output base.sbin --target N [--base-filters mate,check,tactical]` — faz kotasına göre dengeli, native seçim.
-- `extract --phase aggressive ... [--puzzles pool.sbin] [--augment-mirror] [--aggressive-filters ...]` — feda/keskin konum seçimi (`--sac-ratio`, `--puzzle-ratio`).
-- `prepare` — yalnızca feda bulmaca havuzundan aggressive veri.
-- `mine --model current.nnue --target N --pool-size M` — modelin en çok yanıldığı konumlar (`--base-filters` uygulanır).
-- `train --dataset train.sbin --output candidate.nnue [--resume base.nnue] [--epochs N] [--batch-size B] [--lr X]`.
-- `datagen --engine motor --games 200 (--depth D | --nodes N) --output selfplay.sbin` — oyun sonucuyla etiketli self-play. Kitap varsayılanı `openings.epd`; `--book none` rastgele açılış oynar.
-- `label --dataset x.sbin --engine motor (--depth D | --nodes N)` — WDL-etiketli SBIN'e cp ekler.
-- `match --candidate a.nnue --baseline b.nnue --games 200 [--sprt]`, `gauntlet --candidate a.nnue` — her net için gömülü motor derler (`runs/engine-cache`), `--cutechess` (varsayılan `training/cutechess-cli`) ile oynatır.
-- `pipeline --phase base|aggressive|all --steps extract,train,match --max-iters N`.
-- `eas` / `sacrifices` / `iwins` — PGN istatistik/rapor araçları.
+Her komut yalnızca kendi bayraklarını kabul eder; açıklamalı liste için `stallion.py <komut> -h`.
 
-Arama sınırları bağımsızdır: `--depth` ve `--nodes` birlikte verilirse ilk dolan sınır durdurur; biri diğerini değiştirmez. Her komut tek bir sonuç satırı yazar; ilerleme, maç satırları ve derleme ayrıntısı için `--verbose`. Hata durumları sessizce atlanmaz, komut hata ile durur (geçersiz kayıt, paketlenemeyen FEN, motor hatası, bozuk ofset dosyası). Otomatik terfi ancak `--sprt` ile H1 kabul edilirse yapılır.
+- `extract --phase base|aggressive --target N [--output x.sbin]` — eval SBIN'den (`--source`, varsayılan `data/evals.sbin`) native seçim. Base: faz kotaları (`--phase-dist`), `--base-filters`. Aggressive: feda/keskin konumlar + bulmaca havuzu (`--puzzles`, `--puzzle-ratio`, `--sac-ratio`, `--augment-mirror`), `--aggressive-filters`. Kalınan yer `--offset-file`'a yazılır (`--skip-lines`, `--reset-offset`, `--no-offset`).
+- `prepare [--target N]` — yalnızca feda bulmaca havuzundan aggressive veri.
+- `mine --target N [--pool-size M] [--model ağ.nnue]` — referans ağın en çok yanıldığı konumlar.
+- `train --dataset x.sbin [--resume ağ.nnue] [--epochs N] [--batch-size B] [--lr X]`.
+- `datagen --games N (--depth D | --nodes N) [--book none]` — oyun sonucuyla etiketli self-play.
+- `label --dataset x.sbin (--depth D | --nodes N)` — WDL-etiketli SBIN'e cp ekler.
+- `match --candidate a.nnue [--baseline b.nnue] [--games N] [--sprt] [--promote]` — her net için gömülü motor derler (`runs/engine-cache`), cutechess ile oynatır, ardından EAS raporu yazar.
+- `gauntlet --candidate a.nnue [--anchor-elo 2400]` — Stockfish'e karşı hızlı kontrol.
+- `pipeline --phase base|aggressive|all --steps extract,train,match,eas [--max-iters N]` — adımları sırayla çalıştırır; eğitim varsayılan olarak taban ağdan (`--baseline`) ince ayardır.
+- `eas` / `sacrifices` / `iwins --pgn x.pgn` — PGN rapor araçları.
 
-Göreli yollar çalışma dizinine göredir.
+Arama sınırları bağımsızdır: `--depth` ve `--nodes` birlikte verilirse ilk dolan sınır durdurur; biri diğerini değiştirmez. Her komut tek bir sonuç satırı yazar; ilerleme, maç satırları ve derleme ayrıntısı için `--verbose`. Hatalar sessizce atlanmaz, komut hata ile durur. Otomatik terfi ancak `--sprt` ile H1 kabul edilirse yapılır. Göreli yollar çalışma dizinine göredir.
 
 Yardımcılar:
 
 - `convert_brilliant.py --pgn ... --output pool.sbin [--workers N]` — BrilliantPly PGN'den gerçek oyun sonucuyla etiketli feda havuzu.
 - `patricia_import.py data*.txt --output patricia.sbin --target 500000 --cp-weight 0.75 --cp-scale 140` — Patricia datagen metni; CP ölçeğini veri kaynağına göre kalibre edin.
-- `sbin_tool.py verify --sbin ... [--all] [--check-eval-labels]`, `sbin_tool.py benchmark --sbin ...` (batch üretim hızı).
+- `sbin_tool.py verify --sbin ... [--all] [--check-eval-labels]`, `sbin_tool.py benchmark --sbin ...` (batch üretim hızı), `sbin_tool.py convert --parquet ... --sbin ...`.
 
 ## Etiketler ve filtreler (önemli)
 
@@ -72,4 +72,4 @@ SBIN kayıtları `wdl` (u16, beyaz perspektifi) ve `eval` (i16 cp, beyaz perspek
 .venv/bin/python stallion.py match --candidate runs/cand.nnue --baseline ../engine/nets/stallion.nnue --games 400 --sprt
 ```
 
-Terfi sonrası eski netle derlenmiş motor ikilileri bayatlar; motoru yeniden derleyin. `data/`, `runs/`, `*.pt`, derlenen dylib git'e girmez. Eski özellik önbelleği (`data/.feature_cache`) artık kullanılmaz ve silinebilir.
+Terfi sonrası eski netle derlenmiş motor ikilileri bayatlar; motoru yeniden derleyin. `data/`, `runs/`, `*.pt`, derlenen dylib git'e girmez.

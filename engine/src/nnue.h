@@ -356,8 +356,7 @@ public:
     if (nw < 0) std::exit(EXIT_FAILURE);
     m_pre_nw[level] = nw;
     for (int i = 0; i < m_pre_nw[level]; ++i) m_pre_w[level][i] = static_cast<int16_t>(buf[i]);
-    int nb = collect_extra_features(position.board.data(), position.colors_bb.data(),
-                                    position.pieces_bb.data(), true, buf, NNUE_EXTRA_SLOTS);
+    int nb = mirror_extra_features(buf, nw, buf, NNUE_EXTRA_SLOTS);
     if (nb < 0) std::exit(EXIT_FAILURE);
     m_pre_nb[level] = nb;
     for (int i = 0; i < m_pre_nb[level]; ++i) m_pre_b[level][i] = static_cast<int16_t>(buf[i]);
@@ -370,12 +369,8 @@ public:
     m_curr = &m_accumulator_stack[m_idx];
   }
 
-  inline void add_extra_view(const BoardState &position, bool flip) noexcept {
+  inline void add_extra_list(const int16_t *extra, int n, bool flip) noexcept {
     if (!g_nnue) std::exit(EXIT_FAILURE);
-    int extra[NNUE_EXTRA_SLOTS];
-    const int n = collect_extra_features(position.board.data(), position.colors_bb.data(),
-                                         position.pieces_bb.data(), flip, extra, NNUE_EXTRA_SLOTS);
-    if (n < 0) std::exit(EXIT_FAILURE);
     auto &acc = flip ? m_curr->black : m_curr->white;
     const int16_t *F = g_nnue->feature_v.data();
     for (int k = 0; k < n; ++k) {
@@ -529,8 +524,8 @@ public:
     m_accumulator_stack[m_idx + 1] = m_accumulator_stack[m_idx];
     m_w_bucket[m_idx + 1] = m_w_bucket[m_idx];
     m_b_bucket[m_idx + 1] = m_b_bucket[m_idx];
-    std::copy_n(m_pre_w[m_idx], NNUE_EXTRA_SLOTS, m_pre_w[m_idx + 1]);
-    std::copy_n(m_pre_b[m_idx], NNUE_EXTRA_SLOTS, m_pre_b[m_idx + 1]);
+    std::copy_n(m_pre_w[m_idx], m_pre_nw[m_idx], m_pre_w[m_idx + 1]);
+    std::copy_n(m_pre_b[m_idx], m_pre_nb[m_idx], m_pre_b[m_idx + 1]);
     m_pre_nw[m_idx + 1] = m_pre_nw[m_idx];
     m_pre_nb[m_idx + 1] = m_pre_nb[m_idx];
     ++m_idx;
@@ -582,9 +577,9 @@ public:
         m_curr->black[i] += g_nnue->feature_v[black_off + i];
       }
     }
-    add_extra_view(position, false);
-    add_extra_view(position, true);
     store_extra_lists(position, 0);
+    add_extra_list(m_pre_w[0], m_pre_nw[0], false);
+    add_extra_list(m_pre_b[0], m_pre_nb[0], true);
     m_initialized = true;
   }
 
@@ -602,7 +597,7 @@ public:
         m_curr->white[i] += g_nnue->feature_v[off + i];
       }
     }
-    add_extra_view(position, false);
+    add_extra_list(m_pre_w[m_idx], m_pre_nw[m_idx], false);
   }
 
   inline void refresh_black(const BoardState &position, size_t new_b_bucket) noexcept {
@@ -619,7 +614,7 @@ public:
         m_curr->black[i] += g_nnue->feature_v[off + i];
       }
     }
-    add_extra_view(position, true);
+    add_extra_list(m_pre_b[m_idx], m_pre_nb[m_idx], true);
   }
 
   inline void add_sub(int from_piece, int from, int to_piece, int to) noexcept {

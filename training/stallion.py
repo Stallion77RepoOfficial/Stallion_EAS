@@ -61,17 +61,18 @@ NNUE_OFF_PAWN = NNUE_OFF_ZONE_ATK + 18            # +384
 NNUE_OFF_ROOKFILE = NNUE_OFF_PAWN + 384           # +256
 NNUE_OFF_COMPLEX = NNUE_OFF_ROOKFILE + 256        # +36
 NNUE_FEATURES = NNUE_OFF_COMPLEX + 36             # 13316
-NNUE_SLOTS = 256
+NNUE_SLOTS = 192
 # Sabit batch genişliği: tipik max ~72-80, ama gerçek veride 99'a kadar
-# satır var (15M satır taramasında görüldü) ve teorik üst sınır ~138
-# (terfi yığılması). 80 üstü batch'ler _slim_feature_width içinde
+# satır var (15M satır taramasında görüldü); güvenli üst sınır 172.
+# 80 üstü batch'ler _slim_feature_width içinde
 # tam genişliğe düşer; asla kesme olmaz.
 NNUE_FIXED_WIDTH = 80
 NNUE_ACCUMULATOR = 1024
 NNUE_PAYLOAD_SIZE = 2 * (NNUE_FEATURES * NNUE_ACCUMULATOR + NNUE_ACCUMULATOR + NNUE_OUTPUT_BUCKETS * (2 * NNUE_ACCUMULATOR) + NNUE_OUTPUT_BUCKETS)
 NNUE_FILE_SIZE = (NNUE_PAYLOAD_SIZE + 63) // 64 * 64
 
-CACHE_VERSION = 9
+CACHE_VERSION = 10
+COMPATIBLE_CHECKPOINT_CACHE_VERSIONS = {9, CACHE_VERSION}
 SCALE = 400
 QA = 255
 QB = 64
@@ -780,7 +781,7 @@ def sbin_depth(source: Path, requested: int) -> int | None:
     return None
 
 
-def eval_wdl(white_cp: float, stored_wdl: float, lambda_val: float = 0.25) -> float:
+def eval_wdl(white_cp: float, stored_wdl: float, lambda_val: float = 0.0) -> float:
     if abs(white_cp) == 2000 and stored_wdl in (0.0, 1.0):
         return 1.0 if white_cp > 0 else 0.0
     cp_wdl = cp_to_wdl(white_cp)
@@ -862,7 +863,7 @@ def extract_sbin_base(args: argparse.Namespace, source: Path, output: Path,
                 scanned += consumed
                 invalid += int(np.count_nonzero(phases[:consumed] == 255))
                 next_offset = cur + consumed
-                if time.monotonic() - last_print >= 5:
+                if getattr(args, "verbose", False) and time.monotonic() - last_print >= 5:
                     print(f"Taranan={scanned:,} toplanan={len(selected):,}/{target:,} geçersiz={invalid:,} tekrar={duplicates:,}", flush=True)
                     last_print = time.monotonic()
             if len(selected) >= target:
@@ -877,7 +878,7 @@ def extract_sbin_base(args: argparse.Namespace, source: Path, output: Path,
             with temporary.open("wb") as stream:
                 for begin in range(0, len(selected), 65536):
                     data = b"".join(ds.record_bytes(index) for index in selected[begin:begin + 65536])
-                    stream.write(sbin.calibrate_eval_records(data, float(getattr(args, "wdl_lambda", 0.25))) if labels == "cp" else data)
+                    stream.write(sbin.calibrate_eval_records(data, float(getattr(args, "wdl_lambda", 0.0))) if labels == "cp" else data)
             if file_identity(source) != source_before:
                 raise RuntimeError("Eval kaynağı çıkarma sırasında değişti; çıktı yayımlanmadı.")
             temporary.replace(output)
@@ -911,12 +912,9 @@ def mine_hard_dataset(args: argparse.Namespace) -> Path:
     device_name = getattr(args, "device", "auto")
     device = _torch_device(torch, device_name)
 
-    print(f"\n=== Zor Örnek Madenciliği (Hard Example Mining) Başlatılıyor ===", flush=True)
-    print(f"Referans Model: {model_path} ({file_sha256(model_path)[:16]})", flush=True)
-    print(f"Kaynak Veri: {source} ({source.stat().st_size // (1024*1024):,} MB)", flush=True)
-    print(f"Tarama Havuzu: {pool_size:,} pozisyon", flush=True)
-    print(f"Hedeflenen Zor Pozisyon: {target:,}", flush=True)
-    print(f"İşlem Cihazı: {device}\n", flush=True)
+    if getattr(args, "verbose", False):
+        print(f"Model: {model_path} ({file_sha256(model_path)[:16]}); kaynak: {source}; "
+              f"havuz: {pool_size:,}; hedef: {target:,}; cihaz: {device}", flush=True)
 
     model = _make_nnue_model().to(device)
     load_nnue(model, model_path)
@@ -948,7 +946,7 @@ def mine_hard_dataset(args: argparse.Namespace) -> Path:
         total_in_ds = ds.count
         if skip >= total_in_ds:
             skip = 0
-        mine_lambda = float(getattr(args, "wdl_lambda", 0.25))
+        mine_lambda = float(getattr(args, "wdl_lambda", 0.0))
         cp_view = ds.eval_view()
         wdl_view = ds.wdl_view()
         flags_view = ds.flags_view()
@@ -1004,7 +1002,7 @@ def mine_hard_dataset(args: argparse.Namespace) -> Path:
             scanned += take
             cur += count
 
-            if scanned % (chunk_size * 16) == 0 or scanned >= pool_size:
+            if getattr(args, "verbose", False) and (scanned % (chunk_size * 16) == 0 or scanned >= pool_size):
                 elapsed = time.perf_counter() - started
                 rate = scanned / elapsed if elapsed > 0 else 0
                 mean_err = float(np.mean(all_errors[:scanned]))
@@ -1019,7 +1017,8 @@ def mine_hard_dataset(args: argparse.Namespace) -> Path:
                 pass
 
         total_elapsed = time.perf_counter() - started
-        print(f"\n--- Tarama Tamamlandı ({total_elapsed:.1f} sn, {scanned / max(0.001, total_elapsed):,.0f} pos/s). En Zor {target:,} Pozisyon Seçiliyor... ---", flush=True)
+        if getattr(args, "verbose", False):
+            print(f"Tarama: {total_elapsed:.1f} sn, {scanned / max(0.001, total_elapsed):,.0f} pos/s", flush=True)
         if target >= pool_size:
             selected_local = np.arange(pool_size)
         else:
@@ -1035,11 +1034,9 @@ def mine_hard_dataset(args: argparse.Namespace) -> Path:
         min_hard_error = float(np.min(mined_errors))
         max_hard_error = float(np.max(mined_errors))
 
-        print(f"Genel Havuz Ortalama Hata: {mean_pool_error:.4f}", flush=True)
-        print(f"Seçilen Zor Pozisyonlar Ortalama Hata: {mean_hard_error:.4f} (Min: {min_hard_error:.4f}, Max: {max_hard_error:.4f})", flush=True)
-        print(f"Zorluk Artış Katsayısı: {mean_hard_error / max(1e-5, mean_pool_error):.2f}x daha zor!", flush=True)
-
-        print(f"Zor pozisyonlar diske yazılıyor: {output}...", flush=True)
+        if getattr(args, "verbose", False):
+            print(f"Ortalama hata: havuz={mean_pool_error:.4f}, seçilen={mean_hard_error:.4f} "
+                  f"({min_hard_error:.4f}..{max_hard_error:.4f})", flush=True)
         temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
         try:
             with temporary.open("wb") as stream:
@@ -1175,7 +1172,7 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
             "target": target, **result, "start_after": skip_lines,
             "min_depth_requested": args.min_depth, "source_min_depth": source_min_depth,
             "label_source": getattr(args, "sbin_labels", "cp"), "seed": seed,
-            "wdl_lambda": float(getattr(args, "wdl_lambda", 0.25)) if getattr(args, "sbin_labels", "cp") == "cp" else None,
+            "wdl_lambda": float(getattr(args, "wdl_lambda", 0.0)) if getattr(args, "sbin_labels", "cp") == "cp" else None,
             "phase_dist": distribution,
         })
         if result["rows"] < target and not getattr(args, "allow_short_dataset", False):
@@ -1258,7 +1255,7 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
                     try:
                         fen, white_wdl, white_cp = ds.get_fen(g_idx)
                         if getattr(args, "sbin_labels", "cp") == "cp":
-                            white_wdl = eval_wdl(white_cp, white_wdl, getattr(args, "wdl_lambda", 0.25))
+                            white_wdl = eval_wdl(white_cp, white_wdl, getattr(args, "wdl_lambda", 0.0))
                         accept_record(fen, white_wdl, white_cp)
                     except (ValueError, TypeError, KeyError, OverflowError):
                         invalid += 1
@@ -1266,7 +1263,7 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
                         total_scanned = g_idx + 1
                         break
                 cur += count
-                if total_scanned % 200000 < batch_size:
+                if getattr(args, "verbose", False) and total_scanned % 200000 < batch_size:
                     speed = (total_scanned - start_after) / max(1.0, time.time() - started)
                     detail = ", ".join(f"{key}={value:,}" for key, value in counts.items())
                     print(f"Taranan: {total_scanned:,} Toplanan: {len(records):,}/{target:,} "
@@ -1294,7 +1291,7 @@ def extract_dataset(args: argparse.Namespace, phase: str | None = None,
         "start_after": skip_lines, "next_offset": total_scanned,
         "min_depth_requested": args.min_depth, "source_min_depth": source_min_depth, "seed": seed,
         "label_source": getattr(args, "sbin_labels", "cp"),
-        "wdl_lambda": float(getattr(args, "wdl_lambda", 0.25)) if getattr(args, "sbin_labels", "cp") == "cp" else None,
+        "wdl_lambda": float(getattr(args, "wdl_lambda", 0.0)) if getattr(args, "sbin_labels", "cp") == "cp" else None,
         "phase_dist": None,
     })
     if len(records) < target and not getattr(args, "allow_short_dataset", False):
@@ -1555,8 +1552,9 @@ def run_label(args: argparse.Namespace) -> Path:
                 else:
                     labelled[index] = cp
             done += 1
-            print(f"  ilerleme: {done}/{len(pending)} parça ({len(labelled):,} etiketli, {failed} atlanan)",
-                  flush=True)
+            if getattr(args, "verbose", False):
+                print(f"  ilerleme: {done}/{len(pending)} parça ({len(labelled):,} etiketli, {failed} atlanan)",
+                      flush=True)
     for proc in processes:
         try:
             proc.quit()
@@ -1956,7 +1954,7 @@ def _slim_feature_width(feat: Any) -> int:
 def train_nnue(dataset: Path, output: Path, *, epochs: int, batch_size: int,
                lr: float, resume: Path | None, device_name: str, seed: int,
                patience: int, validation: float, swa: bool = True,
-               feature_dropout: float = 0.0) -> Path:
+               feature_dropout: float = 0.0, verbose: bool = False) -> Path:
     """Train and export one base or aggressive engine-compatible network."""
     torch = dependency("torch")
     np = dependency("numpy")
@@ -2012,7 +2010,7 @@ def train_nnue(dataset: Path, output: Path, *, epochs: int, batch_size: int,
                 raise ValueError(f"Checkpoint eksik alanlar içeriyor: {', '.join(sorted(missing))}; fine-tune için --resume model.nnue kullanın.")
             if saved["dataset_identity"] != file_identity(dataset):
                 raise ValueError("Checkpoint başka veri sürümüne ait; yeni veri için --resume ile NNUE kullanın.")
-            if saved["cache_version"] != CACHE_VERSION:
+            if saved["cache_version"] not in COMPATIBLE_CHECKPOINT_CACHE_VERSIONS:
                 raise ValueError("Checkpoint doğrulama ayrımı eski; --resume ile NNUE kullanın.")
             if not math.isclose(float(saved["validation"]), float(validation), rel_tol=0.0, abs_tol=1e-12):
                 raise ValueError("Checkpoint validation oranı değişmiş; aynı oranı kullanın.")
@@ -2109,7 +2107,7 @@ def train_nnue(dataset: Path, output: Path, *, epochs: int, batch_size: int,
             train_processed += batch_len
 
             log_interval = max(50_000, total_train // 20)
-            if train_processed - last_log_pos >= log_interval:
+            if verbose and train_processed - last_log_pos >= log_interval:
                 train_sum += float(train_loss_accum.item())
                 train_loss_accum.zero_()
                 now = time.perf_counter()
@@ -2134,7 +2132,7 @@ def train_nnue(dataset: Path, output: Path, *, epochs: int, batch_size: int,
         with torch.no_grad():
             for us, them, us_mask, them_mask, labels in chunked_batches(validation_ids, shuffle_chunks=False, epoch_seed=seed):
                 val_loss = functional.binary_cross_entropy_with_logits(
-                    model(us, them, us_mask, them_mask, torch.clamp((((us < NNUE_BASE_FEATURES) & (us_mask > 0)).sum(dim=1).long() - 1) // 2, 0, NNUE_OUTPUT_BUCKETS - 1)),
+                    model(us, them, us_mask, them_mask),
                     labels
                 )
                 val_loss_accum += val_loss * len(labels)
@@ -2402,6 +2400,8 @@ def verify_embedded_engine(binary: Path, timeout: float = 60.0) -> None:
 
 def run_match(args: argparse.Namespace, phase: str | None = None) -> MatchResult:
     phase = phase or getattr(args, "phase", None) or "nnue"
+    if getattr(args, "promote", False) and not getattr(args, "sprt", False):
+        raise ValueError("Otomatik terfi için --sprt gerekli.")
     candidate = require_network(args.candidate, "Aday NNUE")
     baseline = require_network(args.baseline, "Taban NNUE")
     engine_src = resolve_path(getattr(args, "engine_src", None), ENGINE_ROOT) or ENGINE_ROOT
@@ -2488,7 +2488,8 @@ def run_match(args: argparse.Namespace, phase: str | None = None) -> MatchResult
     try:
         assert process.stdout is not None
         for line in process.stdout:
-            print(line, end="", flush=True)
+            if getattr(args, "verbose", False):
+                print(line, end="", flush=True)
             log_lines.append(line)
             if re.search(
                     r"loses on time|disconnect|illegal move|illegal game|forfeit|"
@@ -2522,7 +2523,8 @@ def run_match(args: argparse.Namespace, phase: str | None = None) -> MatchResult
                 process.wait()
         raise
     finally:
-        atomic_text(artifact.with_suffix(".log"), "".join(log_lines))
+        if getattr(args, "verbose", False) or returncode or failures:
+            atomic_text(artifact.with_suffix(".log"), "".join(log_lines))
     if returncode:
         raise RuntimeError(f"cutechess-cli maçı başarısız oldu (exit {returncode}).")
     if failures:
@@ -2650,7 +2652,8 @@ def run_gauntlet(args: argparse.Namespace) -> bool:
     try:
         assert process.stdout is not None
         for line in process.stdout:
-            print(line, end="", flush=True)
+            if getattr(args, "verbose", False):
+                print(line, end="", flush=True)
             log_lines.append(line)
             if re.search(
                     r"loses on time|disconnect|illegal move|illegal game|forfeit|"
@@ -2680,7 +2683,8 @@ def run_gauntlet(args: argparse.Namespace) -> bool:
                 process.wait()
         raise
     finally:
-        atomic_text(artifact.with_suffix(".log"), "".join(log_lines))
+        if getattr(args, "verbose", False) or returncode or failures:
+            atomic_text(artifact.with_suffix(".log"), "".join(log_lines))
     if returncode:
         raise RuntimeError(f"cutechess-cli gauntlet başarısız oldu (exit {returncode}).")
     if failures:
@@ -2942,13 +2946,13 @@ def run_eas(args: argparse.Namespace) -> dict[str, Any]:
     atomic_text(output, report_text)
     if jsonout:
         atomic_json(jsonout, report)
-    print(f"\n{report_text}", flush=True)
     stats = report.get("stats", {})
     cand_eas = stats.get("Candidate")
     base_eas = stats.get("Baseline")
     if cand_eas is not None and base_eas is not None:
-        print(f"EAS sonucu: Candidate: {cand_eas} EAS, Baseline: {base_eas} EAS (Fark: {cand_eas - base_eas:+d} EAS)", flush=True)
-    print(f"[BAŞARILI] EAS raporu: {output}")
+        print(f"EAS: Candidate={cand_eas}, Baseline={base_eas}, fark={cand_eas - base_eas:+d}; rapor={output}", flush=True)
+    else:
+        print(f"EAS raporu: {output}", flush=True)
     return report
 
 
@@ -3226,10 +3230,8 @@ def maybe_promote(args: argparse.Namespace, phase: str, result: MatchResult,
         print(f"\n[TERFİ KAPALI] Elo: {result.elo_diff:+.1f} ({result.status}); {eas_info}; aday: {candidate}", flush=True)
         return False
 
-    sprt_used = result.status != "ESTIMATE_ONLY"
-    won = result.is_winner if sprt_used else (result.wins > result.losses)
-    if result.returncode != 0 or not won or result.elo_diff <= 0:
-        print(f"[TERFİ YOK] Galibiyet ve pozitif Elo gerekli; elo={result.elo_diff:+.1f}; sonuç={result.status}; aday={candidate}", flush=True)
+    if result.returncode != 0 or result.status != "PASSED" or not result.is_winner:
+        print(f"[TERFİ YOK] Terfi için SPRT kabulü gerekli; elo={result.elo_diff:+.1f}; sonuç={result.status}; aday={candidate}", flush=True)
         return False
 
     if phase in ("base", "nnue"):
@@ -3382,6 +3384,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
                         patience=args.patience, validation=args.validation,
                         swa=getattr(args, "swa", True),
                         feature_dropout=float(getattr(args, "feature_dropout", 0.0)),
+                        verbose=args.verbose,
                     )
                 elif step == "match":
                     if not candidate.is_file() and args.candidate:
@@ -3481,8 +3484,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--puzzle-ratio", type=float, default=0.20)
     parser.add_argument("--sac-ratio", type=float, default=0.50,
                         help="Aggressive fazında feda pozisyonu oranı (varsayılan: 0.50)")
-    parser.add_argument("--wdl-lambda", type=float, default=0.25,
-                        help="WDL hedef karışım oranı (0.0: saf CP dönüşümü, 1.0: kayıttaki WDL; varsayılan: 0.25). Kayıttaki WDL oyun sonucu veya yumuşak eval etiketi olabilir.")
+    parser.add_argument("--wdl-lambda", type=float, default=0.0,
+                        help="WDL hedef karışım oranı (0.0: saf CP dönüşümü, 1.0: kayıttaki WDL; varsayılan: 0.0). Kayıttaki WDL oyun sonucu veya yumuşak eval etiketi olabilir.")
     parser.add_argument("--augment-mirror", action="store_true",
                         help="Rok hakkı kalmamış pozisyonlar için yatay ayna (a-h flip) artırımı uygula")
     parser.add_argument("--seed", type=int, default=42)
@@ -3543,6 +3546,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sac-type", type=int, choices=[0, 1, 2, 3, 4, 5, 9], default=0)
     parser.add_argument("--max-moves", type=int, default=80)
     parser.add_argument("--max-iters", type=int, default=1)
+    parser.add_argument("--verbose", action="store_true",
+                        help="Ayrıntılı eğitim ve maç çıktısı")
     parser.add_argument("--version", action="version", version="stallion-training 1.0")
     return parser
 
@@ -3630,6 +3635,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 device_name=args.device, seed=args.seed, patience=args.patience,
                 validation=args.validation, swa=getattr(args, "swa", True),
                 feature_dropout=getattr(args, "feature_dropout", 0.0),
+                verbose=args.verbose,
             )
             return 0
         if args.command == "match":

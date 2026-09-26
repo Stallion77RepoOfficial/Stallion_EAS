@@ -1,6 +1,7 @@
 #include "sbin.h"
 #include "../engine/src/bitboard.h"
 #include "../engine/src/nnue.h"
+static_assert(SBIN_NNUE_SLOTS == NNUE_EXTRA_SLOTS);
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -361,7 +362,7 @@ int sbin_extract_nnue(const PackedPosition* in, int16_t* us, int16_t* them, int*
     }
     int extra_w[SBIN_NNUE_SLOTS], extra_b[SBIN_NNUE_SLOTS];
     const int nw = collect_extra_features(board, colors_bb, pieces_bb, false, extra_w, SBIN_NNUE_SLOTS);
-    const int nb = collect_extra_features(board, colors_bb, pieces_bb, true, extra_b, SBIN_NNUE_SLOTS);
+    const int nb = mirror_extra_features(extra_w, nw, extra_b, SBIN_NNUE_SLOTS);
     if (nw < 0 || nb < 0) return -1;
     if (count + nw > SBIN_NNUE_SLOTS || count + nb > SBIN_NNUE_SLOTS) return -1;
     const int* first = white_turn ? extra_w : extra_b;

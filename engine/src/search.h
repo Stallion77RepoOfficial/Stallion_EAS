@@ -1533,7 +1533,7 @@ finish:
     }
 
     if (thread_info.best_moves[0] == MoveNone) {
-      safe_printf("bestmove (none)\n");
+      safe_printf("bestmove 0000\n");
     } else {
       bool can_output = true;
 

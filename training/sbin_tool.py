@@ -282,7 +282,7 @@ def eval_targets(cp, wdl):
     return np.where(mate, (cp > 0).astype(float), expected)
 
 
-def calibrate_targets(cp, wdl_u16, lambda_val: float = 0.25):
+def calibrate_targets(cp, wdl_u16, lambda_val: float = 0.0):
     """White-POV WDL blended from CP and the stored WDL field.
 
     Mirrors stallion.eval_wdl: mate scores (|cp| == 2000 with a decisive
@@ -302,7 +302,7 @@ def calibrate_targets(cp, wdl_u16, lambda_val: float = 0.25):
     return np.where(mate, (cp > 0).astype(float), blended)
 
 
-def calibrate_eval_records(data: bytes, lambda_val: float = 0.25) -> bytes:
+def calibrate_eval_records(data: bytes, lambda_val: float = 0.0) -> bytes:
     import numpy as np
     if len(data) % 32:
         raise ValueError("SBIN kayıt boyutu 32'nin katı olmalı.")
@@ -356,16 +356,22 @@ def verify_sbin(sbin_path: Path, samples: int = 10000, *, full: bool = False,
         if check_eval_labels:
             label_counts = {"checked": 0, "elo400_mismatches": 0,
                             "expected_encoding": "elo400_white", "quantization_tolerance": 2 / 65535}
-            for begin in range(0, ds.count, 1048576):
-                end = min(begin + 1048576, ds.count)
-                raw = np.frombuffer(ds._mmap[begin * 32:end * 32], dtype=np.dtype([
-                    ("board", "V24"), ("cp", "<i2"), ("wdl", "<u2"), ("flags", "V4")]))
+            record_dtype = np.dtype([
+                ("board", "V24"), ("cp", "<i2"), ("wdl", "<u2"), ("flags", "V4")])
+            all_records = np.frombuffer(ds._mmap, dtype=record_dtype, count=ds.count)
+            def check_labels(raw):
                 cp = raw["cp"].astype(np.float64)
                 target = raw["wdl"].astype(np.float64) / 65535.0
                 expected = eval_targets(cp, raw["wdl"])
                 label_counts["checked"] += len(cp)
                 label_counts["elo400_mismatches"] += int(np.count_nonzero(np.abs(target - expected) > 2 / 65535))
+            if full:
+                for begin in range(0, ds.count, 1048576):
+                    check_labels(all_records[begin:begin + 1048576])
+            else:
+                check_labels(all_records[np.asarray(test_indices, dtype=np.int64)])
             report["eval_label_calibration"] = label_counts
+            del all_records
 
         for idx in test_indices:
             packed = ds._position(idx)
@@ -396,8 +402,10 @@ def verify_sbin(sbin_path: Path, samples: int = 10000, *, full: bool = False,
     report["passed"] = report["invalid_records"] == 0 and report["oracle_failures"] == 0
     if check_eval_labels:
         report["passed"] = report["passed"] and report["eval_label_calibration"]["elo400_mismatches"] == 0
+    labels_text = (f" etiket_uyumsuzluğu={report['eval_label_calibration']['elo400_mismatches']:,}/"
+                   f"{report['eval_label_calibration']['checked']:,}") if check_eval_labels else ""
     print(f"Kontrol={report['checked']:,} geçersiz={report['invalid_records']:,} "
-          f"oracle_hatası={report['oracle_failures']:,} süre={elapsed:.1f} sn", flush=True)
+          f"oracle_hatası={report['oracle_failures']:,}{labels_text} süre={elapsed:.1f} sn", flush=True)
     return report
 
 

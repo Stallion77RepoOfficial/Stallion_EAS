@@ -18,7 +18,7 @@ struct PackedPosition {
 
 static_assert(sizeof(PackedPosition) == 32, "PackedPosition must be exactly 32 bytes");
 
-enum { SBIN_NNUE_SLOTS = 256 };
+enum { SBIN_NNUE_SLOTS = 192 };
 
 #ifdef __cplusplus
 extern "C" {

@@ -536,15 +536,16 @@ inline int collect_extra_features(const uint8_t board[64],
       const int tf = kf + (off % 3) - 1, tr = kr + (off / 3) - 1;
       if (tf < 0 || tf > 7 || tr < 0 || tr > 7) continue;
       const int target_real = flip ? ((tr * 8 + tf) ^ 56) : (tr * 8 + tf);
-      const uint64_t atks = colors_bb[enemy_real] &
-          ((PAWN_ATK_SAFE(enemy_real ^ 1, target_real) & pieces_bb[PieceTypes::Pawn]) |
-           (KNIGHT_ATK_SAFE(target_real) & pieces_bb[PieceTypes::Knight]) |
-           (get_bishop_attacks(target_real, occupied) &
-            (pieces_bb[PieceTypes::Bishop] | pieces_bb[PieceTypes::Queen])) |
-           (get_rook_attacks(target_real, occupied) &
-            (pieces_bb[PieceTypes::Rook] | pieces_bb[PieceTypes::Queen])) |
-           (KING_ATK_SAFE(target_real) & pieces_bb[PieceTypes::King]));
-      if (atks)
+      const uint64_t enemy = colors_bb[enemy_real];
+      const bool attacked =
+          (PAWN_ATK_SAFE(enemy_real ^ 1, target_real) & enemy & pieces_bb[PieceTypes::Pawn]) ||
+          (KNIGHT_ATK_SAFE(target_real) & enemy & pieces_bb[PieceTypes::Knight]) ||
+          (KING_ATK_SAFE(target_real) & enemy & pieces_bb[PieceTypes::King]) ||
+          (get_bishop_attacks(target_real, occupied) & enemy &
+           (pieces_bb[PieceTypes::Bishop] | pieces_bb[PieceTypes::Queen])) ||
+          (get_rook_attacks(target_real, occupied) & enemy &
+           (pieces_bb[PieceTypes::Rook] | pieces_bb[PieceTypes::Queen]));
+      if (attacked)
         if (!push(nnue_zone_atk_index(slot_king, off))) return -1;
     }
   }
@@ -631,4 +632,45 @@ inline int collect_extra_features(const uint8_t board[64],
     }
 
   return n;
+}
+
+// A black-perspective feature list is the vertically mirrored, color-swapped
+// white list. Reuse the already computed attacks and pawn/rook properties.
+// In-place conversion is supported; the result is sorted for linear deltas.
+inline int mirror_extra_features(const int *white, int count, int *black, int cap) noexcept {
+  if (!white || !black || count < 0 || count > cap) return -1;
+  for (int i = 0; i < count; ++i) {
+    const size_t idx = static_cast<size_t>(white[i]);
+    size_t mapped;
+    if (idx < NNUE_OFF_MATERIAL) return -1;
+    if (idx < NNUE_OFF_ZONE_OCC) {
+      const size_t rel = idx - NNUE_OFF_MATERIAL;
+      mapped = NNUE_OFF_MATERIAL + ((rel / 50) ^ 1) * 50 + rel % 50;
+    } else if (idx < NNUE_OFF_ZONE_ATK) {
+      const size_t rel = idx - NNUE_OFF_ZONE_OCC;
+      const size_t off = (rel % 117) / 13;
+      const size_t occ = rel % 13;
+      const size_t mirrored_off = (2 - off / 3) * 3 + off % 3;
+      const size_t mirrored_occ = occ == 0 ? 0 : (occ & 1 ? occ + 1 : occ - 1);
+      mapped = nnue_zone_occ_index((rel / 117) ^ 1, mirrored_off, mirrored_occ);
+    } else if (idx < NNUE_OFF_PAWN) {
+      const size_t rel = idx - NNUE_OFF_ZONE_ATK;
+      const size_t off = rel % 9;
+      mapped = nnue_zone_atk_index((rel / 9) ^ 1, (2 - off / 3) * 3 + off % 3);
+    } else if (idx < NNUE_OFF_ROOKFILE) {
+      const size_t rel = idx - NNUE_OFF_PAWN;
+      mapped = nnue_pawn_index((rel / 192) ^ 1, (rel % 192) / 64, (rel % 64) ^ 56);
+    } else if (idx < NNUE_OFF_COMPLEX) {
+      const size_t rel = idx - NNUE_OFF_ROOKFILE;
+      mapped = nnue_rookfile_index((rel / 128) ^ 1, (rel % 128) / 64, (rel % 64) ^ 56);
+    } else if (idx < NNUE_INPUT_SIZE) {
+      const size_t rel = idx - NNUE_OFF_COMPLEX;
+      mapped = nnue_complex_index((rel / 18) ^ 1, ((rel % 18) / 9) ^ 1, rel % 9);
+    } else {
+      return -1;
+    }
+    black[i] = static_cast<int>(mapped);
+  }
+  std::sort(black, black + count);
+  return count;
 }

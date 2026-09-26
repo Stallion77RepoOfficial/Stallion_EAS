@@ -225,7 +225,11 @@ constexpr size_t NNUE_OFF_PAWN = NNUE_OFF_ZONE_ATK + 18;          // +384
 constexpr size_t NNUE_OFF_ROOKFILE = NNUE_OFF_PAWN + 384;         // +256
 constexpr size_t NNUE_OFF_COMPLEX = NNUE_OFF_ROOKFILE + 256;      // +36
 constexpr size_t NNUE_INPUT_SIZE = NNUE_OFF_COMPLEX + 36;         // 13316
-constexpr int NNUE_EXTRA_SLOTS = 256;
+// At most 32 pieces (including two kings) can be on the board. The fixed
+// blocks use 50 slots; every other piece can contribute at most three slots.
+// 192 leaves room beyond the resulting 172 total position features.
+constexpr int NNUE_EXTRA_SLOTS = 192;
+static_assert(32 + 10 + 18 + 18 + 4 + 3 * (32 - 2) <= NNUE_EXTRA_SLOTS);
 
 constexpr inline size_t nnue_material_index(int side, int type, int count) noexcept {
   const int c = count < 0 ? 0 : (count > 9 ? 9 : count);

@@ -314,8 +314,7 @@ inline void update_nnue_state(ThreadInfo &thread_info, Action move,
   int post_w[NNUE_EXTRA_SLOTS], post_b[NNUE_EXTRA_SLOTS];
   const int nw1 = collect_extra_features(new_position.board.data(), new_position.colors_bb.data(),
                                          new_position.pieces_bb.data(), false, post_w, NNUE_EXTRA_SLOTS);
-  const int nb1 = collect_extra_features(new_position.board.data(), new_position.colors_bb.data(),
-                                         new_position.pieces_bb.data(), true, post_b, NNUE_EXTRA_SLOTS);
+  const int nb1 = mirror_extra_features(post_w, nw1, post_b, NNUE_EXTRA_SLOTS);
   if (nw1 < 0 || nb1 < 0) std::exit(EXIT_FAILURE);
   int rem_w[NNUE_EXTRA_SLOTS], add_w[NNUE_EXTRA_SLOTS];
   int rem_b[NNUE_EXTRA_SLOTS], add_b[NNUE_EXTRA_SLOTS];

@@ -236,6 +236,20 @@ inline int legal_movegen(const Position &position, Move *move_list) {
   return legal_nmoves;
 }
 
+// Same answer as legal_movegen(...) != 0, stopping at the first legal move.
+inline bool has_legal_move(const Position &position) {
+  const uint64_t checkers = attacks_square(
+      position, get_king_pos(position, position.color), position.color ^ 1);
+  std::array<Move, ListSize> pseudo_list;
+  const int pseudo_nmoves =
+      movegen(position, pseudo_list.data(), checkers, Generate::GenAll);
+  for (int i = 0; i < pseudo_nmoves; i++) {
+    if (is_legal(position, pseudo_list[i]))
+      return true;
+  }
+  return false;
+}
+
 inline Move get_next_move(Move *moves, int *scores, int start_idx, int len) noexcept {
   int best_idx = start_idx, best_score = scores[start_idx];
   for (int i = start_idx + 1; i < len; i++) {

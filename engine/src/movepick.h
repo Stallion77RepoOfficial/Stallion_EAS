@@ -16,9 +16,10 @@ struct MovePicker {
   uint64_t checkers = 0;
   int idx = 0;
 
-  MoveInfo captures{};
-  MoveInfo quiets{};
-  MoveInfo bad_captures{};
+  // Lists are read only up to their len; the buffers are not cleared.
+  MoveInfo captures;
+  MoveInfo quiets;
+  MoveInfo bad_captures;
 };
 
 inline void init_picker(MovePicker &picker, [[maybe_unused]] const Position &position,

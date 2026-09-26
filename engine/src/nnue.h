@@ -316,29 +316,73 @@ inline int64_t screlu_flatten(const std::array<int32_t, LAYER1_SIZE> &us,
 #endif
 }
 
+// Pieces of one position, one bitboard per piece code (2..13).
+using PieceSet = std::array<uint64_t, 14>;
+
+inline PieceSet piece_set(const BoardState &position) noexcept {
+  PieceSet pieces{};
+  for (int piece = Pieces::WPawn; piece <= Pieces::BKing; ++piece)
+    pieces[piece] = position.colors_bb[piece & 1] & position.pieces_bb[piece >> 1];
+  return pieces;
+}
+
+// Feature rows to add to and subtract from one accumulator perspective.
+struct RowDelta {
+  const int16_t *add[NNUE_FEATURE_SLOTS];
+  const int16_t *sub[NNUE_FEATURE_SLOTS];
+  int n_add = 0, n_sub = 0;
+};
+
+// out = in + sum(add rows) - sum(sub rows), in register-sized tiles so each
+// accumulator value is read and written once however many rows change.
+// out may equal in. Integer sums: the result does not depend on the order.
+inline void apply_rows(int32_t *out, const int32_t *in, const RowDelta &delta) noexcept {
+  constexpr size_t Tile = 64;
+  for (size_t base = 0; base < LAYER1_SIZE; base += Tile) {
+    int32_t tile[Tile];
+    for (size_t i = 0; i < Tile; ++i) tile[i] = in[base + i];
+    for (int k = 0; k < delta.n_add; ++k) {
+      const int16_t *row = delta.add[k] + base;
+      for (size_t i = 0; i < Tile; ++i) tile[i] += row[i];
+    }
+    for (int k = 0; k < delta.n_sub; ++k) {
+      const int16_t *row = delta.sub[k] + base;
+      for (size_t i = 0; i < Tile; ++i) tile[i] -= row[i];
+    }
+    for (size_t i = 0; i < Tile; ++i) out[base + i] = tile[i];
+  }
+}
+
+// Accumulators are built lazily: a move only records the new pieces, and
+// evaluate() brings the current level up to date from the nearest computed
+// ancestor by adding the piece and extra-feature differences. A king-bucket
+// change for a perspective goes through the refresh cache instead.
 class alignas(64) NNUE_State {
 public:
-  alignas(64) Accumulator<LAYER1_SIZE> m_accumulator_stack[MaxSearchDepth];
-  Accumulator<LAYER1_SIZE> *m_curr = &m_accumulator_stack[0];
-  uint8_t m_w_bucket[MaxSearchDepth]{};
-  uint8_t m_b_bucket[MaxSearchDepth]{};
-  int16_t m_pre_w[MaxSearchDepth][NNUE_EXTRA_SLOTS]{};
-  int16_t m_pre_b[MaxSearchDepth][NNUE_EXTRA_SLOTS]{};
-  int m_pre_nw[MaxSearchDepth]{};
-  int m_pre_nb[MaxSearchDepth]{};
-  int m_idx = 0;
-  bool m_initialized = false;
+  struct Level {
+    PieceSet pieces{};
+    std::array<int16_t, NNUE_EXTRA_SLOTS> extra_w{};
+    std::array<int16_t, NNUE_EXTRA_SLOTS> extra_b{};
+    int n_w = 0, n_b = 0;
+    uint8_t w_bucket = 0, b_bucket = 0;
+    bool computed = false;
+  };
 
   // Refresh cache ("Finny table"): per perspective and king bucket, the last
   // accumulator built for that bucket with the pieces and extra features it
-  // holds. A king-bucket change applies only the differences to it. Each
-  // entry is always self-consistent, so it is neither copied nor reset.
+  // holds. Each entry is always self-consistent, so it is neither copied nor
+  // reset.
   struct RefreshEntry {
     alignas(64) std::array<int32_t, LAYER1_SIZE> acc;
-    std::array<uint64_t, 14> pieces{};
+    PieceSet pieces{};
     std::array<int16_t, NNUE_EXTRA_SLOTS> extra{};
     int n_extra = 0;
   };
+
+  alignas(64) Accumulator<LAYER1_SIZE> m_accumulator_stack[MaxSearchDepth];
+  Level m_levels[MaxSearchDepth];
+  int m_idx = 0;
+  bool m_initialized = false;
   std::unique_ptr<RefreshEntry[]> m_refresh;
 
   NNUE_State() = default;
@@ -347,389 +391,159 @@ public:
     if (this != &other) {
       m_idx = other.m_idx;
       m_initialized = other.m_initialized;
-      if (m_initialized)
-        std::copy_n(other.m_accumulator_stack, m_idx + 1, m_accumulator_stack);
-      std::copy_n(other.m_w_bucket, m_idx + 1, m_w_bucket);
-      std::copy_n(other.m_b_bucket, m_idx + 1, m_b_bucket);
-      std::copy_n(&other.m_pre_w[0][0], (m_idx + 1) * NNUE_EXTRA_SLOTS, &m_pre_w[0][0]);
-      std::copy_n(&other.m_pre_b[0][0], (m_idx + 1) * NNUE_EXTRA_SLOTS, &m_pre_b[0][0]);
-      std::copy_n(other.m_pre_nw, m_idx + 1, m_pre_nw);
-      std::copy_n(other.m_pre_nb, m_idx + 1, m_pre_nb);
-      m_curr = &m_accumulator_stack[m_idx];
+      std::copy_n(other.m_levels, m_idx + 1, m_levels);
+      for (int level = 0; level <= m_idx; ++level)
+        if (m_levels[level].computed)
+          m_accumulator_stack[level] = other.m_accumulator_stack[level];
     }
     return *this;
   }
 
-  inline void store_extra_lists(const BoardState &position, int level) noexcept {
-    if (level < 0 || level >= MaxSearchDepth) std::exit(EXIT_FAILURE);
+  inline void reset_nnue(const BoardState &position) noexcept {
+    if (!g_nnue) std::exit(EXIT_FAILURE);
+    m_idx = 0;
+    m_initialized = true;
+    Level &level = m_levels[0];
+    level.pieces = piece_set(position);
+    compute_extras(position, level);
+    refresh_side(false);
+    refresh_side(true);
+    level.computed = true;
+  }
+
+  inline void push(const BoardState &position) noexcept {
+    if (!g_nnue || !m_initialized || m_idx >= MaxSearchDepth - 1) std::exit(EXIT_FAILURE);
+    ++m_idx;
+    m_levels[m_idx].pieces = piece_set(position);
+    m_levels[m_idx].computed = false;
+  }
+
+  inline void pop() noexcept {
+    if (!g_nnue || !m_initialized || m_idx <= 0) std::exit(EXIT_FAILURE);
+    --m_idx;
+  }
+
+  inline int evaluate(const BoardState &position) noexcept {
+    if (!g_nnue || !m_initialized) std::exit(EXIT_FAILURE);
+    if (piece_set(position) != m_levels[m_idx].pieces) std::exit(EXIT_FAILURE);
+    update(position);
+    const int piece_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
+    if (piece_count < 2 || piece_count > 32) std::exit(EXIT_FAILURE);
+    const auto &acc = m_accumulator_stack[m_idx];
+    const bool white = position.color == Colors::White;
+    const size_t b = static_cast<size_t>(std::clamp((piece_count - 1) / 2, 0, static_cast<int>(OUTPUT_BUCKETS) - 1));
+    const int64_t output = screlu_flatten(white ? acc.white : acc.black, white ? acc.black : acc.white,
+                                          g_nnue->output_v[b]);
+    return static_cast<int>(std::clamp<int64_t>(
+        (output + g_nnue->output_bias[b]) * SCALE / QAB, -MaxEval, MaxEval));
+  }
+
+private:
+  static inline void compute_extras(const BoardState &position, Level &level) noexcept {
     int buf[NNUE_EXTRA_SLOTS];
-    int nw = collect_extra_features(position.board.data(), position.colors_bb.data(),
-                                    position.pieces_bb.data(), false, buf, NNUE_EXTRA_SLOTS);
+    const int nw = collect_extra_features(position.board.data(), position.colors_bb.data(),
+                                          position.pieces_bb.data(), false, buf, NNUE_EXTRA_SLOTS);
     if (nw < 0) std::exit(EXIT_FAILURE);
-    m_pre_nw[level] = nw;
-    for (int i = 0; i < m_pre_nw[level]; ++i) m_pre_w[level][i] = static_cast<int16_t>(buf[i]);
-    int nb = mirror_extra_features(buf, nw, buf, NNUE_EXTRA_SLOTS);
+    for (int i = 0; i < nw; ++i) level.extra_w[i] = static_cast<int16_t>(buf[i]);
+    const int nb = mirror_extra_features(buf, nw, buf, NNUE_EXTRA_SLOTS);
     if (nb < 0) std::exit(EXIT_FAILURE);
-    m_pre_nb[level] = nb;
-    for (int i = 0; i < m_pre_nb[level]; ++i) m_pre_b[level][i] = static_cast<int16_t>(buf[i]);
+    for (int i = 0; i < nb; ++i) level.extra_b[i] = static_cast<int16_t>(buf[i]);
+    level.n_w = nw;
+    level.n_b = nb;
+    const int wking = get_lsb(level.pieces[Pieces::WKing]);
+    const int bking = get_lsb(level.pieces[Pieces::BKing]);
+    level.w_bucket = static_cast<uint8_t>(KingBucketTable[wking]);
+    level.b_bucket = static_cast<uint8_t>(KingBucketTable[bking ^ 56]);
   }
 
-  static inline void add_row(int32_t *acc, const int16_t *row) noexcept {
-    for (size_t i = 0; i < LAYER1_SIZE; ++i) acc[i] += row[i];
-  }
-  static inline void sub_row(int32_t *acc, const int16_t *row) noexcept {
-    for (size_t i = 0; i < LAYER1_SIZE; ++i) acc[i] -= row[i];
-  }
-
-  inline void refresh_side(const BoardState &position, size_t bucket, bool black) noexcept {
-    if (!g_nnue || !m_initialized || bucket >= NNUE_KING_BUCKETS) std::exit(EXIT_FAILURE);
-    if (!m_refresh) {
-      m_refresh = std::make_unique<RefreshEntry[]>(2 * NNUE_KING_BUCKETS);
-      for (size_t i = 0; i < 2 * NNUE_KING_BUCKETS; ++i)
-        std::copy_n(g_nnue->feature_bias.data(), LAYER1_SIZE, m_refresh[i].acc.begin());
-    }
-    auto &entry = m_refresh[(black ? NNUE_KING_BUCKETS : 0) + bucket];
+  static inline void piece_rows(const PieceSet &from, const PieceSet &to, size_t bucket, bool black,
+                                RowDelta &delta) noexcept {
     const int16_t *F = g_nnue->feature_v.data();
-    int32_t *acc = entry.acc.data();
     for (int piece = Pieces::WPawn; piece <= Pieces::BKing; ++piece) {
-      const uint64_t now = position.colors_bb[piece & 1] & position.pieces_bb[piece >> 1];
-      uint64_t removed = entry.pieces[piece] & ~now, added = now & ~entry.pieces[piece];
+      uint64_t removed = from[piece] & ~to[piece], added = to[piece] & ~from[piece];
       while (removed) {
         const auto idx = feature_indices(piece, pop_lsb(removed), bucket, bucket);
-        sub_row(acc, F + (black ? idx.second : idx.first) * LAYER1_SIZE);
+        delta.sub[delta.n_sub++] = F + (black ? idx.second : idx.first) * LAYER1_SIZE;
       }
       while (added) {
         const auto idx = feature_indices(piece, pop_lsb(added), bucket, bucket);
-        add_row(acc, F + (black ? idx.second : idx.first) * LAYER1_SIZE);
+        delta.add[delta.n_add++] = F + (black ? idx.second : idx.first) * LAYER1_SIZE;
       }
-      entry.pieces[piece] = now;
     }
-    const int16_t *extra = black ? m_pre_b[m_idx] : m_pre_w[m_idx];
-    const int n_extra = black ? m_pre_nb[m_idx] : m_pre_nw[m_idx];
+  }
+
+  // Both lists are sorted; emits the rows of the symmetric difference.
+  static inline void extra_rows(const int16_t *from, int n_from, const int16_t *to, int n_to,
+                                RowDelta &delta) noexcept {
+    const int16_t *F = g_nnue->feature_v.data();
     int i = 0, j = 0;
-    while (i < entry.n_extra || j < n_extra) {
-      if (j == n_extra || (i < entry.n_extra && entry.extra[i] < extra[j])) {
-        sub_row(acc, F + static_cast<size_t>(entry.extra[i++]) * LAYER1_SIZE);
-      } else if (i == entry.n_extra || extra[j] < entry.extra[i]) {
-        add_row(acc, F + static_cast<size_t>(extra[j++]) * LAYER1_SIZE);
+    while (i < n_from || j < n_to) {
+      if (j == n_to || (i < n_from && from[i] < to[j])) {
+        delta.sub[delta.n_sub++] = F + static_cast<size_t>(from[i++]) * LAYER1_SIZE;
+      } else if (i == n_from || to[j] < from[i]) {
+        delta.add[delta.n_add++] = F + static_cast<size_t>(to[j++]) * LAYER1_SIZE;
       } else {
         ++i;
         ++j;
       }
     }
+  }
+
+  // Builds one perspective of the current level through the refresh cache.
+  inline void refresh_side(bool black) noexcept {
+    if (!m_refresh) {
+      m_refresh = std::make_unique<RefreshEntry[]>(2 * NNUE_KING_BUCKETS);
+      for (size_t i = 0; i < 2 * NNUE_KING_BUCKETS; ++i)
+        std::copy_n(g_nnue->feature_bias.data(), LAYER1_SIZE, m_refresh[i].acc.begin());
+    }
+    const Level &level = m_levels[m_idx];
+    const size_t bucket = black ? level.b_bucket : level.w_bucket;
+    auto &entry = m_refresh[(black ? NNUE_KING_BUCKETS : 0) + bucket];
+    const int16_t *extra = black ? level.extra_b.data() : level.extra_w.data();
+    const int n_extra = black ? level.n_b : level.n_w;
+    RowDelta delta;
+    piece_rows(entry.pieces, level.pieces, bucket, black, delta);
+    extra_rows(entry.extra.data(), entry.n_extra, extra, n_extra, delta);
+    apply_rows(entry.acc.data(), entry.acc.data(), delta);
+    entry.pieces = level.pieces;
     std::copy_n(extra, n_extra, entry.extra.begin());
     entry.n_extra = n_extra;
-    std::copy_n(acc, LAYER1_SIZE, (black ? m_curr->black : m_curr->white).begin());
+    auto &acc = m_accumulator_stack[m_idx];
+    std::copy_n(entry.acc.begin(), LAYER1_SIZE, (black ? acc.black : acc.white).begin());
   }
 
-  inline void pop() noexcept {
-    if (!g_nnue || !m_initialized) std::exit(EXIT_FAILURE);
-    if (m_idx <= 0) std::exit(EXIT_FAILURE);
-    --m_idx;
-    m_curr = &m_accumulator_stack[m_idx];
-  }
-
-  inline void add_extra_list(const int16_t *extra, int n, bool flip) noexcept {
-    if (!g_nnue) std::exit(EXIT_FAILURE);
-    auto &acc = flip ? m_curr->black : m_curr->white;
-    const int16_t *F = g_nnue->feature_v.data();
-    for (int k = 0; k < n; ++k) {
-      const size_t off = static_cast<size_t>(extra[k]) * LAYER1_SIZE;
-      #pragma unroll 4
-      for (size_t i = 0; i < LAYER1_SIZE; ++i) {
-        acc[i] += F[off + i];
+  inline void update(const BoardState &position) noexcept {
+    Level &now = m_levels[m_idx];
+    if (now.computed) return;
+    int ancestor = m_idx - 1;
+    while (!m_levels[ancestor].computed) --ancestor;
+    const Level &from = m_levels[ancestor];
+    const auto &from_acc = m_accumulator_stack[ancestor];
+    auto &acc = m_accumulator_stack[m_idx];
+    if (now.pieces == from.pieces) {
+      const PieceSet pieces = now.pieces;
+      now = from;
+      now.pieces = pieces;
+      acc = from_acc;
+      return;
+    }
+    compute_extras(position, now);
+    for (const bool black : {false, true}) {
+      const size_t bucket = black ? now.b_bucket : now.w_bucket;
+      if (bucket != (black ? from.b_bucket : from.w_bucket)) {
+        refresh_side(black);
+        continue;
+      }
+      RowDelta delta;
+      piece_rows(from.pieces, now.pieces, bucket, black, delta);
+      if (black) {
+        extra_rows(from.extra_b.data(), from.n_b, now.extra_b.data(), now.n_b, delta);
+        apply_rows(acc.black.data(), from_acc.black.data(), delta);
+      } else {
+        extra_rows(from.extra_w.data(), from.n_w, now.extra_w.data(), now.n_w, delta);
+        apply_rows(acc.white.data(), from_acc.white.data(), delta);
       }
     }
-  }
-
-  inline void apply_extra_delta(const int *rem_w, int nrw, const int *add_w, int naw,
-                                const int *rem_b, int nrb, const int *add_b, int nab) noexcept {
-    if (!g_nnue || !m_initialized) std::exit(EXIT_FAILURE);
-    const int16_t *F = g_nnue->feature_v.data();
-    auto *W = m_curr->white.data();
-    auto *B = m_curr->black.data();
-
-#if defined(STALLION_SIMD_AVX512)
-    auto vec_sub = [](int32_t *acc, const int16_t *f) noexcept {
-      for (size_t i = 0; i < LAYER1_SIZE; i += 16) {
-        __m256i f16 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(f + i));
-        __m512i f32 = _mm512_cvtepi16_epi32(f16);
-        __m512i a = _mm512_loadu_si512(reinterpret_cast<const void *>(acc + i));
-        _mm512_storeu_si512(reinterpret_cast<void *>(acc + i), _mm512_sub_epi32(a, f32));
-      }
-    };
-    auto vec_add = [](int32_t *acc, const int16_t *f) noexcept {
-      for (size_t i = 0; i < LAYER1_SIZE; i += 16) {
-        __m256i f16 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(f + i));
-        __m512i f32 = _mm512_cvtepi16_epi32(f16);
-        __m512i a = _mm512_loadu_si512(reinterpret_cast<const void *>(acc + i));
-        _mm512_storeu_si512(reinterpret_cast<void *>(acc + i), _mm512_add_epi32(a, f32));
-      }
-    };
-
-    for (int k = 0; k < nrw; ++k) vec_sub(W, F + static_cast<size_t>(rem_w[k]) * LAYER1_SIZE);
-    for (int k = 0; k < naw; ++k) vec_add(W, F + static_cast<size_t>(add_w[k]) * LAYER1_SIZE);
-    for (int k = 0; k < nrb; ++k) vec_sub(B, F + static_cast<size_t>(rem_b[k]) * LAYER1_SIZE);
-    for (int k = 0; k < nab; ++k) vec_add(B, F + static_cast<size_t>(add_b[k]) * LAYER1_SIZE);
-
-#elif defined(STALLION_SIMD_NEON)
-    auto vec_sub = [](int32_t *acc, const int16_t *f) noexcept {
-      for (size_t i = 0; i < LAYER1_SIZE; i += 8) {
-        int16x8_t f_raw = vld1q_s16(f + i);
-        int32x4_t f_lo = vmovl_s16(vget_low_s16(f_raw));
-        int32x4_t f_hi = vmovl_s16(vget_high_s16(f_raw));
-        int32x4_t a_lo = vld1q_s32(acc + i);
-        int32x4_t a_hi = vld1q_s32(acc + i + 4);
-        vst1q_s32(acc + i, vsubq_s32(a_lo, f_lo));
-        vst1q_s32(acc + i + 4, vsubq_s32(a_hi, f_hi));
-      }
-    };
-    auto vec_add = [](int32_t *acc, const int16_t *f) noexcept {
-      for (size_t i = 0; i < LAYER1_SIZE; i += 8) {
-        int16x8_t f_raw = vld1q_s16(f + i);
-        int32x4_t f_lo = vmovl_s16(vget_low_s16(f_raw));
-        int32x4_t f_hi = vmovl_s16(vget_high_s16(f_raw));
-        int32x4_t a_lo = vld1q_s32(acc + i);
-        int32x4_t a_hi = vld1q_s32(acc + i + 4);
-        vst1q_s32(acc + i, vaddq_s32(a_lo, f_lo));
-        vst1q_s32(acc + i + 4, vaddq_s32(a_hi, f_hi));
-      }
-    };
-
-    for (int k = 0; k < nrw; ++k) vec_sub(W, F + static_cast<size_t>(rem_w[k]) * LAYER1_SIZE);
-    for (int k = 0; k < naw; ++k) vec_add(W, F + static_cast<size_t>(add_w[k]) * LAYER1_SIZE);
-    for (int k = 0; k < nrb; ++k) vec_sub(B, F + static_cast<size_t>(rem_b[k]) * LAYER1_SIZE);
-    for (int k = 0; k < nab; ++k) vec_add(B, F + static_cast<size_t>(add_b[k]) * LAYER1_SIZE);
-
-#elif defined(STALLION_SIMD_AVX2)
-    auto vec_sub = [](int32_t *acc, const int16_t *f) noexcept {
-      for (size_t i = 0; i < LAYER1_SIZE; i += 16) {
-        __m128i f_lo16 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(f + i));
-        __m128i f_hi16 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(f + i + 8));
-        __m256i f_lo32 = _mm256_cvtepi16_epi32(f_lo16);
-        __m256i f_hi32 = _mm256_cvtepi16_epi32(f_hi16);
-        __m256i a_lo = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(acc + i));
-        __m256i a_hi = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(acc + i + 8));
-        _mm256_storeu_si256(reinterpret_cast<__m256i *>(acc + i), _mm256_sub_epi32(a_lo, f_lo32));
-        _mm256_storeu_si256(reinterpret_cast<__m256i *>(acc + i + 8), _mm256_sub_epi32(a_hi, f_hi32));
-      }
-    };
-    auto vec_add = [](int32_t *acc, const int16_t *f) noexcept {
-      for (size_t i = 0; i < LAYER1_SIZE; i += 16) {
-        __m128i f_lo16 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(f + i));
-        __m128i f_hi16 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(f + i + 8));
-        __m256i f_lo32 = _mm256_cvtepi16_epi32(f_lo16);
-        __m256i f_hi32 = _mm256_cvtepi16_epi32(f_hi16);
-        __m256i a_lo = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(acc + i));
-        __m256i a_hi = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(acc + i + 8));
-        _mm256_storeu_si256(reinterpret_cast<__m256i *>(acc + i), _mm256_add_epi32(a_lo, f_lo32));
-        _mm256_storeu_si256(reinterpret_cast<__m256i *>(acc + i + 8), _mm256_add_epi32(a_hi, f_hi32));
-      }
-    };
-
-    for (int k = 0; k < nrw; ++k) vec_sub(W, F + static_cast<size_t>(rem_w[k]) * LAYER1_SIZE);
-    for (int k = 0; k < naw; ++k) vec_add(W, F + static_cast<size_t>(add_w[k]) * LAYER1_SIZE);
-    for (int k = 0; k < nrb; ++k) vec_sub(B, F + static_cast<size_t>(rem_b[k]) * LAYER1_SIZE);
-    for (int k = 0; k < nab; ++k) vec_add(B, F + static_cast<size_t>(add_b[k]) * LAYER1_SIZE);
-
-#elif defined(STALLION_SIMD_SSSE3) || defined(STALLION_SIMD_SSE2)
-    auto vec_sub = [](int32_t *acc, const int16_t *f) noexcept {
-      const __m128i zero = _mm_setzero_si128();
-      for (size_t i = 0; i < LAYER1_SIZE; i += 4) {
-        __m128i f16 = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(f + i));
-        __m128i sgn = _mm_cmpgt_epi16(zero, f16);
-        __m128i f32 = _mm_unpacklo_epi16(f16, sgn);
-        __m128i a = _mm_loadu_si128(reinterpret_cast<const __m128i *>(acc + i));
-        _mm_storeu_si128(reinterpret_cast<__m128i *>(acc + i), _mm_sub_epi32(a, f32));
-      }
-    };
-    auto vec_add = [](int32_t *acc, const int16_t *f) noexcept {
-      const __m128i zero = _mm_setzero_si128();
-      for (size_t i = 0; i < LAYER1_SIZE; i += 4) {
-        __m128i f16 = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(f + i));
-        __m128i sgn = _mm_cmpgt_epi16(zero, f16);
-        __m128i f32 = _mm_unpacklo_epi16(f16, sgn);
-        __m128i a = _mm_loadu_si128(reinterpret_cast<const __m128i *>(acc + i));
-        _mm_storeu_si128(reinterpret_cast<__m128i *>(acc + i), _mm_add_epi32(a, f32));
-      }
-    };
-
-    for (int k = 0; k < nrw; ++k) vec_sub(W, F + static_cast<size_t>(rem_w[k]) * LAYER1_SIZE);
-    for (int k = 0; k < naw; ++k) vec_add(W, F + static_cast<size_t>(add_w[k]) * LAYER1_SIZE);
-    for (int k = 0; k < nrb; ++k) vec_sub(B, F + static_cast<size_t>(rem_b[k]) * LAYER1_SIZE);
-    for (int k = 0; k < nab; ++k) vec_add(B, F + static_cast<size_t>(add_b[k]) * LAYER1_SIZE);
-
-#else
-    for (int k = 0; k < nrw; ++k) {
-      const int16_t *f = F + static_cast<size_t>(rem_w[k]) * LAYER1_SIZE;
-      for (size_t i = 0; i < LAYER1_SIZE; ++i) W[i] -= f[i];
-    }
-    for (int k = 0; k < naw; ++k) {
-      const int16_t *f = F + static_cast<size_t>(add_w[k]) * LAYER1_SIZE;
-      for (size_t i = 0; i < LAYER1_SIZE; ++i) W[i] += f[i];
-    }
-    for (int k = 0; k < nrb; ++k) {
-      const int16_t *f = F + static_cast<size_t>(rem_b[k]) * LAYER1_SIZE;
-      for (size_t i = 0; i < LAYER1_SIZE; ++i) B[i] -= f[i];
-    }
-    for (int k = 0; k < nab; ++k) {
-      const int16_t *f = F + static_cast<size_t>(add_b[k]) * LAYER1_SIZE;
-      for (size_t i = 0; i < LAYER1_SIZE; ++i) B[i] += f[i];
-    }
-#endif
-  }
-
-  inline void push_null() noexcept {
-    if (!g_nnue || !m_initialized || m_idx < 0 || m_idx >= MaxSearchDepth - 1) std::exit(EXIT_FAILURE);
-    m_accumulator_stack[m_idx + 1] = m_accumulator_stack[m_idx];
-    m_w_bucket[m_idx + 1] = m_w_bucket[m_idx];
-    m_b_bucket[m_idx + 1] = m_b_bucket[m_idx];
-    std::copy_n(m_pre_w[m_idx], m_pre_nw[m_idx], m_pre_w[m_idx + 1]);
-    std::copy_n(m_pre_b[m_idx], m_pre_nb[m_idx], m_pre_b[m_idx + 1]);
-    m_pre_nw[m_idx + 1] = m_pre_nw[m_idx];
-    m_pre_nb[m_idx + 1] = m_pre_nb[m_idx];
-    ++m_idx;
-    m_curr = &m_accumulator_stack[m_idx];
-  }
-
-  inline int evaluate(int color, int piece_count) const noexcept {
-    if (!g_nnue || !m_initialized) std::exit(EXIT_FAILURE);
-    if ((color != Colors::White && color != Colors::Black) || piece_count < 2 || piece_count > 32)
-      std::exit(EXIT_FAILURE);
-    const auto &us = (color == Colors::White) ? m_curr->white : m_curr->black;
-    const auto &them = (color == Colors::White) ? m_curr->black : m_curr->white;
-    const size_t b = static_cast<size_t>(std::clamp((piece_count - 1) / 2, 0, static_cast<int>(OUTPUT_BUCKETS) - 1));
-    const int64_t output = screlu_flatten(us, them, g_nnue->output_v[b]);
-    return static_cast<int>(std::clamp<int64_t>(
-        (output + g_nnue->output_bias[b]) * SCALE / QAB, -MaxEval, MaxEval));
-  }
-
-  inline void reset_nnue(const BoardState &position) noexcept {
-    if (!g_nnue) std::exit(EXIT_FAILURE);
-    m_initialized = false;
-    m_idx = 0;
-    m_curr = &m_accumulator_stack[0];
-
-    const uint64_t w_kbb = position.colors_bb[Colors::White] & position.pieces_bb[PieceTypes::King];
-    const uint64_t b_kbb = position.colors_bb[Colors::Black] & position.pieces_bb[PieceTypes::King];
-    if (pop_count(w_kbb) != 1 || pop_count(b_kbb) != 1)
-      std::exit(EXIT_FAILURE);
-    const int wking = get_lsb(w_kbb);
-    const int bking = get_lsb(b_kbb);
-
-    const size_t w_b = static_cast<size_t>(KingBucketTable[wking]);
-    const size_t b_b = static_cast<size_t>(KingBucketTable[bking ^ 56]);
-    m_w_bucket[0] = static_cast<uint8_t>(w_b);
-    m_b_bucket[0] = static_cast<uint8_t>(b_b);
-
-    m_curr->init(g_nnue->feature_bias.data());
-
-    uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
-    while (occ) {
-      const int sq = pop_lsb(occ);
-      const int piece = position.board[sq];
-      const auto [white_idx, black_idx] = feature_indices(piece, sq, w_b, b_b);
-      const size_t white_off = white_idx * LAYER1_SIZE;
-      const size_t black_off = black_idx * LAYER1_SIZE;
-      #pragma unroll 4
-      for (size_t i = 0; i < LAYER1_SIZE; ++i) {
-        m_curr->white[i] += g_nnue->feature_v[white_off + i];
-        m_curr->black[i] += g_nnue->feature_v[black_off + i];
-      }
-    }
-    store_extra_lists(position, 0);
-    add_extra_list(m_pre_w[0], m_pre_nw[0], false);
-    add_extra_list(m_pre_b[0], m_pre_nb[0], true);
-    m_initialized = true;
-  }
-
-  inline void refresh_white(const BoardState &position, size_t new_w_bucket) noexcept {
-    refresh_side(position, new_w_bucket, false);
-  }
-
-  inline void refresh_black(const BoardState &position, size_t new_b_bucket) noexcept {
-    refresh_side(position, new_b_bucket, true);
-  }
-
-  inline void add_sub(int from_piece, int from, int to_piece, int to) noexcept {
-    if (!g_nnue || !m_initialized || m_idx < 0 || m_idx >= MaxSearchDepth - 1) std::exit(EXIT_FAILURE);
-    const size_t wb = m_w_bucket[m_idx];
-    const size_t bb = m_b_bucket[m_idx];
-    m_w_bucket[m_idx + 1] = static_cast<uint8_t>(wb);
-    m_b_bucket[m_idx + 1] = static_cast<uint8_t>(bb);
-
-    const auto [wf, bf] = feature_indices(from_piece, from, wb, bb);
-    const auto [wt, bt] = feature_indices(to_piece, to, wb, bb);
-
-    const auto &curr = m_accumulator_stack[m_idx];
-    auto &next = m_accumulator_stack[m_idx + 1];
-
-    const size_t off_wt = wt * LAYER1_SIZE, off_wf = wf * LAYER1_SIZE;
-    const size_t off_bt = bt * LAYER1_SIZE, off_bf = bf * LAYER1_SIZE;
-
-    #pragma unroll 4
-    for (size_t i = 0; i < LAYER1_SIZE; ++i) {
-      next.white[i] = curr.white[i] + g_nnue->feature_v[off_wt + i] - g_nnue->feature_v[off_wf + i];
-      next.black[i] = curr.black[i] + g_nnue->feature_v[off_bt + i] - g_nnue->feature_v[off_bf + i];
-    }
-    ++m_idx;
-    m_curr = &m_accumulator_stack[m_idx];
-  }
-
-  inline void add_sub_sub(int from_piece, int from, int to_piece, int to, int captured, int captured_sq) noexcept {
-    if (!g_nnue || !m_initialized || m_idx < 0 || m_idx >= MaxSearchDepth - 1) std::exit(EXIT_FAILURE);
-    const size_t wb = m_w_bucket[m_idx];
-    const size_t bb = m_b_bucket[m_idx];
-    m_w_bucket[m_idx + 1] = static_cast<uint8_t>(wb);
-    m_b_bucket[m_idx + 1] = static_cast<uint8_t>(bb);
-
-    const auto [wf, bf] = feature_indices(from_piece, from, wb, bb);
-    const auto [wt, bt] = feature_indices(to_piece, to, wb, bb);
-    const auto [wc, bc] = feature_indices(captured, captured_sq, wb, bb);
-
-    const auto &curr = m_accumulator_stack[m_idx];
-    auto &next = m_accumulator_stack[m_idx + 1];
-
-    const size_t off_wt = wt * LAYER1_SIZE, off_wf = wf * LAYER1_SIZE, off_wc = wc * LAYER1_SIZE;
-    const size_t off_bt = bt * LAYER1_SIZE, off_bf = bf * LAYER1_SIZE, off_bc = bc * LAYER1_SIZE;
-
-    #pragma unroll 4
-    for (size_t i = 0; i < LAYER1_SIZE; ++i) {
-      next.white[i] = curr.white[i] + g_nnue->feature_v[off_wt + i] - g_nnue->feature_v[off_wf + i] - g_nnue->feature_v[off_wc + i];
-      next.black[i] = curr.black[i] + g_nnue->feature_v[off_bt + i] - g_nnue->feature_v[off_bf + i] - g_nnue->feature_v[off_bc + i];
-    }
-    ++m_idx;
-    m_curr = &m_accumulator_stack[m_idx];
-  }
-
-  inline void add_add_sub_sub(int p1, int from1, int to1, int p2, int from2, int to2) noexcept {
-    if (!g_nnue || !m_initialized || m_idx < 0 || m_idx >= MaxSearchDepth - 1) std::exit(EXIT_FAILURE);
-    const size_t wb = m_w_bucket[m_idx];
-    const size_t bb = m_b_bucket[m_idx];
-    m_w_bucket[m_idx + 1] = static_cast<uint8_t>(wb);
-    m_b_bucket[m_idx + 1] = static_cast<uint8_t>(bb);
-
-    const auto [w1f, b1f] = feature_indices(p1, from1, wb, bb);
-    const auto [w1t, b1t] = feature_indices(p1, to1, wb, bb);
-    const auto [w2f, b2f] = feature_indices(p2, from2, wb, bb);
-    const auto [w2t, b2t] = feature_indices(p2, to2, wb, bb);
-
-    const auto &curr = m_accumulator_stack[m_idx];
-    auto &next = m_accumulator_stack[m_idx + 1];
-
-    const size_t off_w1t = w1t * LAYER1_SIZE, off_w1f = w1f * LAYER1_SIZE;
-    const size_t off_w2t = w2t * LAYER1_SIZE, off_w2f = w2f * LAYER1_SIZE;
-    const size_t off_b1t = b1t * LAYER1_SIZE, off_b1f = b1f * LAYER1_SIZE;
-    const size_t off_b2t = b2t * LAYER1_SIZE, off_b2f = b2f * LAYER1_SIZE;
-
-    #pragma unroll 4
-    for (size_t i = 0; i < LAYER1_SIZE; ++i) {
-      next.white[i] = curr.white[i] + g_nnue->feature_v[off_w1t + i] - g_nnue->feature_v[off_w1f + i]
-                                    + g_nnue->feature_v[off_w2t + i] - g_nnue->feature_v[off_w2f + i];
-      next.black[i] = curr.black[i] + g_nnue->feature_v[off_b1t + i] - g_nnue->feature_v[off_b1f + i]
-                                    + g_nnue->feature_v[off_b2t + i] - g_nnue->feature_v[off_b2f + i];
-    }
-    ++m_idx;
-    m_curr = &m_accumulator_stack[m_idx];
+    now.computed = true;
   }
 };

@@ -184,8 +184,7 @@ inline bool has_non_pawn_material(const BoardState &position, int color) noexcep
 }
 
 inline int eval(BoardState &position, ThreadInfo &thread_info) {
-  const int piece_count = pop_count(position.colors_bb[0] | position.colors_bb[1]);
-  return thread_info.nnue_state.evaluate(position.color, piece_count);
+  return thread_info.nnue_state.evaluate(position);
 }
 
 inline int correct_eval(const BoardState &position, const ThreadInfo &thread_info,
@@ -271,8 +270,7 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
     return correct_eval(pos, thread_info, eval(pos, thread_info));
   };
 
-  std::array<Action, MaxActions> terminal_moves{};
-  if (!legal_movegen(position, terminal_moves.data())) {
+  if (!has_legal_move(position)) {
     return attacks_square(position, get_king_pos(position, position.color), position.color ^ 1)
                ? -MateScore + thread_info.search_ply : 0;
   }
@@ -414,7 +412,7 @@ inline int qsearch(int alpha, int beta, BoardState &position, ThreadInfo &thread
 
     BoardState moved_position = position;
     make_move(moved_position, move);
-    update_nnue_state(thread_info, move, position, moved_position);
+    thread_info.nnue_state.push(moved_position);
 
     int score = ScoreNone;
     bool can_recurse = (thread_info.search_ply + 1 < MaxSearchPly - 4) &&
@@ -622,7 +620,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
 
         make_move(temp_pos, MoveNone);
 
-        update_nnue_state(thread_info, MoveNone, position, temp_pos);
+        thread_info.nnue_state.push(temp_pos);
         ss_push(position, thread_info, MoveNone);
 
         int R = NMPBase + depth / NMPDepthDiv +
@@ -664,7 +662,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
       BoardState mc_pos = position;
       make_move(mc_pos, move);
 
-      update_nnue_state(thread_info, move, position, mc_pos);
+      thread_info.nnue_state.push(mc_pos);
       ss_push(position, thread_info, move);
       int mc_score = -search<false>(-beta, -beta + 1, depth - 4, false, mc_pos,
                                     thread_info, table);
@@ -711,7 +709,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
 
       make_move(moved_position, move);
 
-      update_nnue_state(thread_info, move, position, moved_position);
+      thread_info.nnue_state.push(moved_position);
       ss_push(position, thread_info, move);
 
       int probcut_score =
@@ -859,7 +857,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &posi
     BoardState moved_position = position;
     make_move(moved_position, move);
 
-    update_nnue_state(thread_info, move, position, moved_position);
+    thread_info.nnue_state.push(moved_position);
     ss_push(position, thread_info, move);
 
     bool full_search = false;

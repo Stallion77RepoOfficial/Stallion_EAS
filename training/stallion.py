@@ -42,11 +42,7 @@ DEFAULT_EVAL = ROOT / "data" / "evals.sbin"
 DEFAULT_PUZZLES = ROOT / "data" / "puzzle_sacrifices.sbin"
 DEFAULT_BOOK = ROOT / "openings.epd"
 NNUE_OUTPUT_BUCKETS = 16
-# 16 king buckets x 768 piece-square inputs + 1028 extra inputs (engine defs.h).
-NNUE_FEATURES = 13316
 NNUE_ACCUMULATOR = 1024
-NNUE_PAYLOAD_SIZE = 2 * (NNUE_FEATURES * NNUE_ACCUMULATOR + NNUE_ACCUMULATOR + NNUE_OUTPUT_BUCKETS * (2 * NNUE_ACCUMULATOR) + NNUE_OUTPUT_BUCKETS)
-NNUE_FILE_SIZE = (NNUE_PAYLOAD_SIZE + 63) // 64 * 64
 # Checkpoints store the validation split scheme; a new scheme needs a new run.
 SPLIT_VERSION = 2
 SCALE = 400
@@ -131,11 +127,25 @@ def _sbin() -> Any:
     return importlib.import_module(".sbin_tool", __package__) if __package__ else importlib.import_module("sbin_tool")
 
 
+def nnue_features() -> int:
+    """Input count of the engine layout (engine/src/defs.h, via the native library)."""
+    return _sbin().load_native_lib().sbin_nnue_features()
+
+
+def nnue_payload_size() -> int:
+    return 2 * (nnue_features() * NNUE_ACCUMULATOR + NNUE_ACCUMULATOR
+                + NNUE_OUTPUT_BUCKETS * (2 * NNUE_ACCUMULATOR) + NNUE_OUTPUT_BUCKETS)
+
+
+def nnue_file_size() -> int:
+    return (nnue_payload_size() + 63) // 64 * 64
+
+
 def _require_nnue_size(size: int) -> None:
-    if size not in (NNUE_PAYLOAD_SIZE, NNUE_FILE_SIZE):
+    if size not in (nnue_payload_size(), nnue_file_size()):
         raise ValueError(
-            f"NNUE boyutu geçersiz: {size} byte; yalnızca 16 giriş / 16 çıkış bucket "
-            f"({NNUE_FEATURES}x{NNUE_ACCUMULATOR}, {NNUE_PAYLOAD_SIZE} veya {NNUE_FILE_SIZE} byte) desteklenir."
+            f"NNUE boyutu geçersiz: {size} byte; motor düzeni {nnue_features()}x{NNUE_ACCUMULATOR} "
+            f"({nnue_payload_size()} veya {nnue_file_size()} byte) bekliyor."
         )
 
 
@@ -671,7 +681,7 @@ class BatchBuffers:
         self.indices = np.empty(2 * batch_size * slots, dtype=np.int32)
         self.offsets = np.empty(2 * batch_size + 1, dtype=np.int32)
         self.t_bags = np.empty(2 * batch_size * slots, dtype=np.int32)
-        self.t_offsets = np.empty(NNUE_FEATURES + 1, dtype=np.int32)
+        self.t_offsets = np.empty(nnue_features() + 1, dtype=np.int32)
         self.buckets = np.empty(batch_size, dtype=np.int64)
         self.targets = np.empty(batch_size, dtype=np.float32)
         self.count = self.valid = self.nnz = 0
@@ -774,7 +784,7 @@ def _make_nnue_model() -> Any:
     class Model(nn.Module):  # type: ignore[name-defined]
         def __init__(self) -> None:
             super().__init__()
-            self.embedding = nn.EmbeddingBag(NNUE_FEATURES, NNUE_ACCUMULATOR,
+            self.embedding = nn.EmbeddingBag(nnue_features(), NNUE_ACCUMULATOR,
                                              mode="sum", include_last_offset=True)
             self.feature_bias = nn.Parameter(torch.zeros(NNUE_ACCUMULATOR))
             self.output_weights = nn.Parameter(torch.zeros(NNUE_OUTPUT_BUCKETS, NNUE_ACCUMULATOR * 2))
@@ -797,7 +807,7 @@ def export_nnue(model: Any, output: Path) -> Path:
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     expected_shapes = {
-        "embedding.weight": (NNUE_FEATURES, NNUE_ACCUMULATOR),
+        "embedding.weight": (nnue_features(), NNUE_ACCUMULATOR),
         "feature_bias": (NNUE_ACCUMULATOR,),
         "output_weights": (NNUE_OUTPUT_BUCKETS, NNUE_ACCUMULATOR * 2),
         "output_biases": (NNUE_OUTPUT_BUCKETS,),
@@ -839,9 +849,9 @@ def export_nnue(model: Any, output: Path) -> Path:
         (feature_i16.tobytes(), bias_i16.tobytes(),
          out_w_i16.tobytes(), out_b_i16.tobytes())
     )
-    if len(payload) != NNUE_PAYLOAD_SIZE:
-        raise RuntimeError(f"NNUE payload boyutu beklenmiyor: {len(payload)} != {NNUE_PAYLOAD_SIZE}")
-    data = payload + bytes(NNUE_FILE_SIZE - len(payload))
+    if len(payload) != nnue_payload_size():
+        raise RuntimeError(f"NNUE payload boyutu beklenmiyor: {len(payload)} != {nnue_payload_size()}")
+    data = payload + bytes(nnue_file_size() - len(payload))
     atomic_bytes(output, data)
     return output
 
@@ -854,9 +864,10 @@ def load_nnue(model: Any, network: Path) -> None:
     data = network.read_bytes()
 
     _require_nnue_size(len(data))
-    offset = NNUE_FEATURES * NNUE_ACCUMULATOR * 2
+    features = nnue_features()
+    offset = features * NNUE_ACCUMULATOR * 2
     feature = np.frombuffer(data[:offset], dtype="<i2").reshape(
-        NNUE_FEATURES, NNUE_ACCUMULATOR).astype(np.float32) / QA
+        features, NNUE_ACCUMULATOR).astype(np.float32) / QA
     bias = np.frombuffer(data[offset:offset + NNUE_ACCUMULATOR * 2], dtype="<i2").astype(np.float32) / QA
     offset += NNUE_ACCUMULATOR * 2
     out_w = np.frombuffer(data[offset:offset + NNUE_OUTPUT_BUCKETS * NNUE_ACCUMULATOR * 4], dtype="<i2").astype(np.float32)

@@ -1,7 +1,6 @@
 #include "sbin.h"
 #include "../engine/src/bitboard.h"
 #include "../engine/src/nnue.h"
-static_assert(SBIN_NNUE_SLOTS == NNUE_FEATURE_SLOTS);
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -599,9 +598,21 @@ int sbin_unpack_fen(const PackedPosition* in, char* fen_buf, size_t buf_len, flo
     return 0;
 }
 
-int sbin_nnue_slots() { return SBIN_NNUE_SLOTS; }
+int sbin_nnue_slots() { return NNUE_FEATURE_SLOTS; }
 
 int sbin_nnue_features() { return static_cast<int>(NNUE_INPUT_SIZE); }
+
+int sbin_nnue_base_features() { return static_cast<int>(NNUE_BASE_FEATURES); }
+
+int sbin_feature_block(int index, int* out) {
+    if (index < 0 || index >= static_cast<int>(Feature::Count)) return -1;
+    const auto& block = FeatureBlocks[index];
+    out[0] = static_cast<int>(feature_offset(static_cast<Feature>(index)));
+    out[1] = block.outer;
+    out[2] = block.inner;
+    out[3] = block.cells;
+    return 0;
+}
 
 int sbin_stat_count() { return SBIN_STAT_COUNT; }
 
@@ -610,11 +621,11 @@ int sbin_extract_nnue(const PackedPosition* in, int16_t* us, int16_t* them, int*
     uint8_t board[64];
     int count = 0;
     if (!decode_position(in, board, count)) return -1;
-    int32_t us_buf[SBIN_NNUE_SLOTS], them_buf[SBIN_NNUE_SLOTS];
+    int32_t us_buf[NNUE_FEATURE_SLOTS], them_buf[NNUE_FEATURE_SLOTS];
     int n_us = 0, n_them = 0;
     position_features(*in, us_buf, n_us, them_buf, n_them);
-    std::fill_n(us, SBIN_NNUE_SLOTS, -1);
-    std::fill_n(them, SBIN_NNUE_SLOTS, -1);
+    std::fill_n(us, NNUE_FEATURE_SLOTS, -1);
+    std::fill_n(them, NNUE_FEATURE_SLOTS, -1);
     for (int i = 0; i < n_us; ++i) us[i] = static_cast<int16_t>(us_buf[i]);
     for (int i = 0; i < n_them; ++i) them[i] = static_cast<int16_t>(them_buf[i]);
     if (out_white_turn) *out_white_turn = (in->flags & 1) == 0;
@@ -671,7 +682,7 @@ long long sbin_build_batch(const PackedPosition* records, size_t record_count,
                            int32_t* indices, int32_t* offsets,
                            int32_t* t_bags, int32_t* t_offsets,
                            int64_t* buckets, float* targets) {
-    std::vector<int32_t> them(count * SBIN_NNUE_SLOTS);
+    std::vector<int32_t> them(count * NNUE_FEATURE_SLOTS);
     std::vector<int> them_count(count);
     const uint64_t keep = dropout > 0.0f ? uint64_t((1.0 - double(dropout)) * 18446744073709551615.0) : 0;
     size_t nnz = 0;
@@ -683,15 +694,15 @@ long long sbin_build_batch(const PackedPosition* records, size_t record_count,
         const int64_t row = rows[i];
         if (row < 0 || static_cast<size_t>(row) >= record_count) return -1;
         const PackedPosition& record = records[row];
-        int32_t us[SBIN_NNUE_SLOTS];
+        int32_t us[NNUE_FEATURE_SLOTS];
         int n_us = 0, n_them = 0;
-        position_features(record, us, n_us, them.data() + i * SBIN_NNUE_SLOTS, n_them);
+        position_features(record, us, n_us, them.data() + i * NNUE_FEATURE_SLOTS, n_them);
         offsets[i] = static_cast<int32_t>(nnz);
         uint64_t state = mix64(seed ^ (uint64_t(row) * 0x9e3779b97f4a7c15ULL));
         for (int k = 0; k < n_us; ++k)
             if (!keep || keep_feature(state)) indices[nnz++] = us[k];
         int kept = 0;
-        int32_t* other = them.data() + i * SBIN_NNUE_SLOTS;
+        int32_t* other = them.data() + i * NNUE_FEATURE_SLOTS;
         for (int k = 0; k < n_them; ++k)
             if (!keep || keep_feature(state)) other[kept++] = other[k];
         them_count[i] = kept;
@@ -702,7 +713,7 @@ long long sbin_build_batch(const PackedPosition* records, size_t record_count,
     }
     for (size_t i = 0; i < count; ++i) {
         offsets[count + i] = static_cast<int32_t>(nnz);
-        std::copy_n(them.data() + i * SBIN_NNUE_SLOTS, them_count[i], indices + nnz);
+        std::copy_n(them.data() + i * NNUE_FEATURE_SLOTS, them_count[i], indices + nnz);
         nnz += them_count[i];
     }
     offsets[2 * count] = static_cast<int32_t>(nnz);

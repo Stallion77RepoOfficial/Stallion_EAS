@@ -1,5 +1,7 @@
 #pragma once
+#include <algorithm>
 #include <array>
+#include <iterator>
 #include <chrono>
 #include <cinttypes>
 #include <cstdint>
@@ -218,50 +220,78 @@ constexpr size_t NNUE_FEATURES_PER_KING_BUCKET = 12 * 64;
 constexpr size_t NNUE_FEATURES_PER_COLOR = 6 * 64;
 constexpr size_t NNUE_FEATURES_PER_PIECE = 64;
 constexpr size_t NNUE_BASE_FEATURES = NNUE_KING_BUCKETS * NNUE_FEATURES_PER_KING_BUCKET;
-constexpr size_t NNUE_OFF_MATERIAL = NNUE_BASE_FEATURES;          // +100
-constexpr size_t NNUE_OFF_ZONE_OCC = NNUE_OFF_MATERIAL + 100;     // +234
-constexpr size_t NNUE_OFF_ZONE_ATK = NNUE_OFF_ZONE_OCC + 234;     // +18
-constexpr size_t NNUE_OFF_PAWN = NNUE_OFF_ZONE_ATK + 18;          // +384
-constexpr size_t NNUE_OFF_ROOKFILE = NNUE_OFF_PAWN + 384;         // +256
-constexpr size_t NNUE_OFF_COMPLEX = NNUE_OFF_ROOKFILE + 256;      // +36
-constexpr size_t NNUE_INPUT_SIZE = NNUE_OFF_COMPLEX + 36;         // 13316
-// Exact feature bounds under the position rules the engine enforces (at most
-// 16 pieces and 8 pawns per side). Fixed blocks: 10 material + 18 king-zone
-// occupancy + 18 king-zone attack + 4 complex. Per piece: a pawn has at most
-// 3 structure features, a rook 2 file features, other pieces none; the worst
-// side is 8 pawns + 7 rooks. Buffers use these bounds, so no position can
-// overflow them and nothing is allocated beyond the reachable maximum.
+// Extra feature blocks, in index order. Each block is (outer x inner x cells):
+// the per-color/per-king copy, the within-copy variant and its cells. Size,
+// offset, input count and buffer bounds are all derived from this table.
+enum class Feature : int { Material, ZoneOcc, ZoneAtk, Pawn, RookFile, Complex, Count };
+
+struct FeatureBlock {
+  int outer;     // copies: side, king or color
+  int inner;     // variants inside a copy
+  int cells;     // indices per variant
+  int fixed;     // active per position regardless of pieces
+  int per_pawn;  // active per pawn
+  int per_rook;  // active per rook
+  constexpr int size() const noexcept { return outer * inner * cells; }
+};
+
+constexpr FeatureBlock FeatureBlocks[] = {
+    /* Material: side x piece type x count 0..9   */ {2, 5, 10, 10, 0, 0},
+    /* ZoneOcc:  king x zone square x occupant    */ {2, 9, 13, 18, 0, 0},
+    /* ZoneAtk:  king x zone square               */ {2, 9, 1, 18, 0, 0},
+    /* Pawn:     color x structure state x square */ {2, 3, 64, 0, 3, 0},
+    /* RookFile: color x file kind x square       */ {2, 2, 64, 0, 0, 2},
+    /* Complex:  side x square color x count 0..8 */ {2, 2, 9, 4, 0, 0},
+};
+static_assert(std::size(FeatureBlocks) == static_cast<size_t>(Feature::Count));
+
+constexpr size_t feature_offset(Feature feature) noexcept {
+  size_t offset = NNUE_BASE_FEATURES;
+  for (int i = 0; i < static_cast<int>(feature); ++i) offset += static_cast<size_t>(FeatureBlocks[i].size());
+  return offset;
+}
+
+constexpr size_t NNUE_INPUT_SIZE = feature_offset(Feature::Count);
+
+// Reachable bounds under the rules the engine enforces (per side at most 16
+// pieces and 8 pawns): the worst side keeps 8 pawns and 7 rooks.
 constexpr int NNUE_MAX_PIECES = 32;
-constexpr int NNUE_FIXED_EXTRA = 10 + 18 + 18 + 4;
-constexpr int NNUE_SIDE_EXTRA = 3 * 8 + 2 * 7;
-constexpr int NNUE_EXTRA_SLOTS = NNUE_FIXED_EXTRA + 2 * NNUE_SIDE_EXTRA;   // 126
-constexpr int NNUE_FEATURE_SLOTS = NNUE_MAX_PIECES + NNUE_EXTRA_SLOTS;     // 158
+constexpr int nnue_extra_bound() noexcept {
+  int fixed = 0, per_pawn = 0, per_rook = 0;
+  for (const auto &block : FeatureBlocks) {
+    fixed += block.fixed;
+    per_pawn += block.per_pawn;
+    per_rook += block.per_rook;
+  }
+  return fixed + 2 * (8 * per_pawn + 7 * per_rook);
+}
+constexpr int NNUE_EXTRA_SLOTS = nnue_extra_bound();
+constexpr int NNUE_FEATURE_SLOTS = NNUE_MAX_PIECES + NNUE_EXTRA_SLOTS;
+
+// Index of (outer, inner, cell) inside a block.
+constexpr inline size_t feature_index(Feature feature, int outer, int inner, int cell) noexcept {
+  const auto &block = FeatureBlocks[static_cast<int>(feature)];
+  return feature_offset(feature) +
+         static_cast<size_t>((outer * block.inner + inner) * block.cells + cell);
+}
 
 constexpr inline size_t nnue_material_index(int side, int type, int count) noexcept {
-  const int c = count < 0 ? 0 : (count > 9 ? 9 : count);
-  return NNUE_OFF_MATERIAL + static_cast<size_t>(side) * 50 +
-         static_cast<size_t>(type) * 10 + static_cast<size_t>(c);
+  return feature_index(Feature::Material, side, type, std::clamp(count, 0, 9));
 }
 constexpr inline size_t nnue_zone_occ_index(int king, int off, int occ) noexcept {
-  return NNUE_OFF_ZONE_OCC + static_cast<size_t>(king) * 117 +
-         static_cast<size_t>(off) * 13 + static_cast<size_t>(occ);
+  return feature_index(Feature::ZoneOcc, king, off, occ);
 }
 constexpr inline size_t nnue_zone_atk_index(int king, int off) noexcept {
-  return NNUE_OFF_ZONE_ATK + static_cast<size_t>(king) * 9 +
-         static_cast<size_t>(off);
+  return feature_index(Feature::ZoneAtk, king, off, 0);
 }
 constexpr inline size_t nnue_pawn_index(int color, int state, int sq) noexcept {
-  return NNUE_OFF_PAWN + static_cast<size_t>(color) * 192 +
-         static_cast<size_t>(state) * 64 + static_cast<size_t>(sq);
+  return feature_index(Feature::Pawn, color, state, sq);
 }
 constexpr inline size_t nnue_rookfile_index(int color, int kind, int sq) noexcept {
-  return NNUE_OFF_ROOKFILE + static_cast<size_t>(color) * 128 +
-         static_cast<size_t>(kind) * 64 + static_cast<size_t>(sq);
+  return feature_index(Feature::RookFile, color, kind, sq);
 }
 constexpr inline size_t nnue_complex_index(int side, int sqcolor, int count) noexcept {
-  const int c = count < 0 ? 0 : (count > 8 ? 8 : count);
-  return NNUE_OFF_COMPLEX + static_cast<size_t>(side) * 18 +
-         static_cast<size_t>(sqcolor) * 9 + static_cast<size_t>(c);
+  return feature_index(Feature::Complex, side, sqcolor, std::clamp(count, 0, 8));
 }
 
 constexpr inline uint16_t get_zobrist_key(uint8_t piece, uint8_t sq) noexcept {

@@ -752,37 +752,30 @@ inline int collect_extra_features(const uint8_t board[64],
 // In-place conversion is supported; the result is sorted for linear deltas.
 inline int mirror_extra_features(const int *white, int count, int *black, int cap) noexcept {
   if (!white || !black || count < 0 || count > cap) return -1;
+  auto mirror_zone = [](int off) { return (2 - off / 3) * 3 + off % 3; };
   for (int i = 0; i < count; ++i) {
     const size_t idx = static_cast<size_t>(white[i]);
-    size_t mapped;
-    if (idx < NNUE_OFF_MATERIAL) return -1;
-    if (idx < NNUE_OFF_ZONE_OCC) {
-      const size_t rel = idx - NNUE_OFF_MATERIAL;
-      mapped = NNUE_OFF_MATERIAL + ((rel / 50) ^ 1) * 50 + rel % 50;
-    } else if (idx < NNUE_OFF_ZONE_ATK) {
-      const size_t rel = idx - NNUE_OFF_ZONE_OCC;
-      const size_t off = (rel % 117) / 13;
-      const size_t occ = rel % 13;
-      const size_t mirrored_off = (2 - off / 3) * 3 + off % 3;
-      const size_t mirrored_occ = occ == 0 ? 0 : (occ & 1 ? occ + 1 : occ - 1);
-      mapped = nnue_zone_occ_index((rel / 117) ^ 1, mirrored_off, mirrored_occ);
-    } else if (idx < NNUE_OFF_PAWN) {
-      const size_t rel = idx - NNUE_OFF_ZONE_ATK;
-      const size_t off = rel % 9;
-      mapped = nnue_zone_atk_index((rel / 9) ^ 1, (2 - off / 3) * 3 + off % 3);
-    } else if (idx < NNUE_OFF_ROOKFILE) {
-      const size_t rel = idx - NNUE_OFF_PAWN;
-      mapped = nnue_pawn_index((rel / 192) ^ 1, (rel % 192) / 64, (rel % 64) ^ 56);
-    } else if (idx < NNUE_OFF_COMPLEX) {
-      const size_t rel = idx - NNUE_OFF_ROOKFILE;
-      mapped = nnue_rookfile_index((rel / 128) ^ 1, (rel % 128) / 64, (rel % 64) ^ 56);
-    } else if (idx < NNUE_INPUT_SIZE) {
-      const size_t rel = idx - NNUE_OFF_COMPLEX;
-      mapped = nnue_complex_index((rel / 18) ^ 1, ((rel % 18) / 9) ^ 1, rel % 9);
-    } else {
-      return -1;
+    if (idx < NNUE_BASE_FEATURES || idx >= NNUE_INPUT_SIZE) return -1;
+    int block = 0;
+    while (idx >= feature_offset(static_cast<Feature>(block + 1))) ++block;
+    const Feature feature = static_cast<Feature>(block);
+    const auto &shape = FeatureBlocks[block];
+    const int rel = static_cast<int>(idx - feature_offset(feature));
+    const int outer = rel / (shape.inner * shape.cells);
+    int inner = rel / shape.cells % shape.inner;
+    int cell = rel % shape.cells;
+    switch (feature) {
+    case Feature::ZoneOcc:
+      inner = mirror_zone(inner);
+      cell = cell == 0 ? 0 : (cell & 1 ? cell + 1 : cell - 1);
+      break;
+    case Feature::ZoneAtk: inner = mirror_zone(inner); break;
+    case Feature::Pawn:
+    case Feature::RookFile: cell ^= 56; break;
+    case Feature::Complex: inner ^= 1; break;
+    default: break;
     }
-    black[i] = static_cast<int>(mapped);
+    black[i] = static_cast<int>(feature_index(feature, outer ^ 1, inner, cell));
   }
   std::sort(black, black + count);
   return count;

@@ -26,7 +26,7 @@
 #define STALLION_SIMD_SSE2 1
 #endif
 
-constexpr size_t INPUT_SIZE = NNUE_INPUT_SIZE; // 13316 = 12288 base + 1028 extra
+constexpr size_t INPUT_SIZE = NNUE_INPUT_SIZE;
 constexpr size_t LAYER1_SIZE = 1024;
 
 constexpr int KingBucketTable[64] = {

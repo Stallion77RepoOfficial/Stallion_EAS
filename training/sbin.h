@@ -18,9 +18,6 @@ struct PackedPosition {
 
 static_assert(sizeof(PackedPosition) == 32, "PackedPosition must be exactly 32 bytes");
 
-// Features per side of one position (engine NNUE_FEATURE_SLOTS).
-enum { SBIN_NNUE_SLOTS = 158 };
-
 enum SbinValidationStatus {
     SBIN_MISSING_FULLMOVE = 1,
     SBIN_NONZERO_PADDING = 2,
@@ -68,13 +65,16 @@ extern "C" {
 int sbin_format_version();
 int sbin_nnue_slots();
 int sbin_nnue_features();
+int sbin_nnue_base_features();
+// Extra feature block i: {offset, outer, inner, cells}; returns -1 past the end.
+int sbin_feature_block(int index, int* out);
 int sbin_stat_count();
 
 int sbin_pack_fen(const char* fen, float wdl, int16_t eval, PackedPosition* out);
 
 int sbin_unpack_fen(const PackedPosition* in, char* fen_buf, size_t buf_len, float* out_wdl, int16_t* out_eval);
 
-// Padded [SBIN_NNUE_SLOTS] feature lists of one validated record (-1 = empty slot).
+// Padded [sbin_nnue_slots()] feature lists of one validated record (-1 = empty slot).
 int sbin_extract_nnue(const PackedPosition* in, int16_t* us, int16_t* them, int* out_white_turn);
 
 size_t sbin_validate_batch(const PackedPosition* positions, size_t count, uint8_t* status);

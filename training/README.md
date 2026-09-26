@@ -2,7 +2,7 @@
 
 ## Mimari (motorla birebir aynı olmalı)
 
-- Girdi: `13316 = 12288 baz (16 king-bucket × 768 özellik/bucket) + 1028 ekstra`, gizli katman `1024`, çıkış `16 bucket × 2048`. Buradaki 768, `12 taş kodu × 64 kare` stride'ıdır; eski bucket sayısı değildir.
+- Girdi: `13316 = 12288 baz (16 king-bucket × 768 özellik/bucket) + 1028 ekstra` (ekstra bloklar `engine/src/defs.h` içindeki `FeatureBlocks` tablosundan türetilir; ofsetler, giriş sayısı ve tampon sınırları elle yazılmaz), gizli katman `1024`, çıkış `16 bucket × 2048`. Buradaki 768, `12 taş kodu × 64 kare` stride'ıdır; eski bucket sayısı değildir.
 - Ekstra bloklar: materyal `100` + şah-bölgesi taş `234` + şah-bölgesi saldırı `18` + piyon yapısı `384` + kale-hattı `256` + fil-piyon kompleksi `36`. Sadece öğrenilmiş ağırlık — insan değer biçmez (HCE yok).
 - King bucket tablosu, `feature_indices`, `collect_extra_features` ve `mirror_extra_features` motor header'larından gelir; SBIN native kodu (`sbin.cpp`) aynı header'ları include eder. `sbin_tool.py verify` native özellikleri bağımsız Python oracle'ı (`oracle_features`) ile karşılaştırır.
 - Çıkış bucket'ı: `clamp((taş_sayısı - 1) // 2, 0, 15)` — motor ve eğitimde aynı.

@@ -74,6 +74,8 @@ def load_native_lib():
         "sbin_format_version": (c_int, []),
         "sbin_nnue_slots": (c_int, []),
         "sbin_nnue_features": (c_int, []),
+        "sbin_nnue_base_features": (c_int, []),
+        "sbin_feature_block": (c_int, [c_int, POINTER(c_int)]),
         "sbin_stat_count": (c_int, []),
         "sbin_pack_fen": (c_int, [c_char_p, c_float, c_int16, POINTER(PackedPosition)]),
         "sbin_unpack_fen": (c_int, [POINTER(PackedPosition), c_char_p, c_size_t, POINTER(c_float), POINTER(c_int16)]),
@@ -96,8 +98,8 @@ def load_native_lib():
         function.argtypes = argtypes
     if lib.sbin_format_version() != FORMAT_VERSION:
         raise RuntimeError("SBIN kütüphane sürümü uyuşmuyor; make -C training çalıştırın.")
-    if lib.sbin_nnue_features() != workflow.NNUE_FEATURES or lib.sbin_stat_count() != len(STAT_NAMES):
-        raise RuntimeError("SBIN kütüphanesi ile stallion.py NNUE/istatistik düzeni uyuşmuyor.")
+    if lib.sbin_stat_count() != len(STAT_NAMES):
+        raise RuntimeError("SBIN kütüphanesi ile sbin_tool.py istatistik düzeni uyuşmuyor.")
     return lib
 
 
@@ -244,12 +246,23 @@ PIECE_CODES = {"P": 2, "p": 3, "N": 4, "n": 5, "B": 6, "b": 7,
                "R": 8, "r": 9, "Q": 10, "q": 11, "K": 12, "k": 13}
 FEATURES_PER_KING_BUCKET = 12 * 64
 FEATURES_PER_COLOR = 6 * 64
-OFF_MATERIAL = 16 * FEATURES_PER_KING_BUCKET
-OFF_ZONE_OCC = OFF_MATERIAL + 100
-OFF_ZONE_ATK = OFF_ZONE_OCC + 234
-OFF_PAWN = OFF_ZONE_ATK + 18
-OFF_ROOKFILE = OFF_PAWN + 384
-OFF_COMPLEX = OFF_ROOKFILE + 256
+MATERIAL, ZONE_OCC, ZONE_ATK, PAWN, ROOKFILE, COMPLEX = range(6)
+
+
+@lru_cache(maxsize=1)
+def feature_blocks() -> list[tuple[int, int, int, int]]:
+    """(offset, outer, inner, cells) of each extra block, from the engine layout."""
+    lib = load_native_lib()
+    blocks = []
+    out = (c_int * 4)()
+    while lib.sbin_feature_block(len(blocks), out) == 0:
+        blocks.append(tuple(out))
+    return blocks
+
+
+def _extra(block: int, outer: int, inner: int, cell: int) -> int:
+    offset, _, inner_count, cells = feature_blocks()[block]
+    return offset + (outer * inner_count + inner) * cells + cell
 
 
 def _step_table(steps) -> list[int]:
@@ -318,7 +331,7 @@ def _collect_extra_view(board: list[int], colors: list[int], pieces: list[int],
     for slot_side in range(2):
         real_side = slot_side ^ 1 if flip else slot_side
         for typ in range(5):
-            out.append(OFF_MATERIAL + slot_side * 50 + typ * 10 + min(mat_count[real_side][typ], 9))
+            out.append(_extra(MATERIAL, slot_side, typ, min(mat_count[real_side][typ], 9)))
     for slot_king in range(2):
         real_king = slot_king ^ 1 if flip else slot_king
         king_view = kings[real_king] ^ 56 if flip else kings[real_king]
@@ -330,7 +343,7 @@ def _collect_extra_view(board: list[int], colors: list[int], pieces: list[int],
             target_real = ((tr * 8 + tf) ^ 56) if flip else (tr * 8 + tf)
             piece = board[target_real]
             occ = 0 if piece < 2 or piece > 13 else (piece ^ 1 if flip else piece) - 1
-            out.append(OFF_ZONE_OCC + slot_king * 117 + off * 13 + occ)
+            out.append(_extra(ZONE_OCC, slot_king, off, occ))
     occ_bb = colors[0] | colors[1]
     for slot_king in range(2):
         real_king = slot_king ^ 1 if flip else slot_king
@@ -343,7 +356,7 @@ def _collect_extra_view(board: list[int], colors: list[int], pieces: list[int],
                 continue
             target_real = ((tr * 8 + tf) ^ 56) if flip else (tr * 8 + tf)
             if _attacked_by(target_real, enemy_real, occ_bb, colors, pieces):
-                out.append(OFF_ZONE_ATK + slot_king * 9 + off)
+                out.append(_extra(ZONE_ATK, slot_king, off, 0))
     for slot_color in range(2):
         real_color = slot_color ^ 1 if flip else slot_color
         pawn_code = 2 + real_color
@@ -364,7 +377,7 @@ def _collect_extra_view(board: list[int], colors: list[int], pieces: list[int],
                 else:
                     has = any(rr * 8 + f != real and board[rr * 8 + f] == pawn_code for rr in range(8))
                 if has:
-                    out.append(OFF_PAWN + slot_color * 192 + state * 64 + sq)
+                    out.append(_extra(PAWN, slot_color, state, sq))
     for slot_color in range(2):
         real_color = slot_color ^ 1 if flip else slot_color
         rook_code = 8 + real_color
@@ -377,12 +390,12 @@ def _collect_extra_view(board: list[int], colors: list[int], pieces: list[int],
                 file_pawns = [board[rr * 8 + f] for rr in range(8) if board[rr * 8 + f] in (2, 3)]
                 ok = not file_pawns if kind == 0 else all((p & 1) != real_color for p in file_pawns)
                 if ok:
-                    out.append(OFF_ROOKFILE + slot_color * 128 + kind * 64 + sq)
+                    out.append(_extra(ROOKFILE, slot_color, kind, sq))
     for slot_side in range(2):
         for sc in range(2):
             real_side = slot_side ^ 1 if flip else slot_side
             real_sc = sc ^ 1 if flip else sc
-            out.append(OFF_COMPLEX + slot_side * 18 + sc * 9 + min(complex_count[real_side][real_sc], 8))
+            out.append(_extra(COMPLEX, slot_side, sc, min(complex_count[real_side][real_sc], 8)))
     return out
 
 

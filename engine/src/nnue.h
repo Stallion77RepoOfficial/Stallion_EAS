@@ -329,6 +329,18 @@ public:
   int m_idx = 0;
   bool m_initialized = false;
 
+  // Refresh cache ("Finny table"): per perspective and king bucket, the last
+  // accumulator built for that bucket with the pieces and extra features it
+  // holds. A king-bucket change applies only the differences to it. Each
+  // entry is always self-consistent, so it is neither copied nor reset.
+  struct RefreshEntry {
+    alignas(64) std::array<int32_t, LAYER1_SIZE> acc;
+    std::array<uint64_t, 14> pieces{};
+    std::array<int16_t, NNUE_EXTRA_SLOTS> extra{};
+    int n_extra = 0;
+  };
+  std::unique_ptr<RefreshEntry[]> m_refresh;
+
   NNUE_State() = default;
   NNUE_State(const NNUE_State &other) noexcept { *this = other; }
   NNUE_State &operator=(const NNUE_State &other) noexcept {
@@ -360,6 +372,54 @@ public:
     if (nb < 0) std::exit(EXIT_FAILURE);
     m_pre_nb[level] = nb;
     for (int i = 0; i < m_pre_nb[level]; ++i) m_pre_b[level][i] = static_cast<int16_t>(buf[i]);
+  }
+
+  static inline void add_row(int32_t *acc, const int16_t *row) noexcept {
+    for (size_t i = 0; i < LAYER1_SIZE; ++i) acc[i] += row[i];
+  }
+  static inline void sub_row(int32_t *acc, const int16_t *row) noexcept {
+    for (size_t i = 0; i < LAYER1_SIZE; ++i) acc[i] -= row[i];
+  }
+
+  inline void refresh_side(const BoardState &position, size_t bucket, bool black) noexcept {
+    if (!g_nnue || !m_initialized || bucket >= NNUE_KING_BUCKETS) std::exit(EXIT_FAILURE);
+    if (!m_refresh) {
+      m_refresh = std::make_unique<RefreshEntry[]>(2 * NNUE_KING_BUCKETS);
+      for (size_t i = 0; i < 2 * NNUE_KING_BUCKETS; ++i)
+        std::copy_n(g_nnue->feature_bias.data(), LAYER1_SIZE, m_refresh[i].acc.begin());
+    }
+    auto &entry = m_refresh[(black ? NNUE_KING_BUCKETS : 0) + bucket];
+    const int16_t *F = g_nnue->feature_v.data();
+    int32_t *acc = entry.acc.data();
+    for (int piece = Pieces::WPawn; piece <= Pieces::BKing; ++piece) {
+      const uint64_t now = position.colors_bb[piece & 1] & position.pieces_bb[piece >> 1];
+      uint64_t removed = entry.pieces[piece] & ~now, added = now & ~entry.pieces[piece];
+      while (removed) {
+        const auto idx = feature_indices(piece, pop_lsb(removed), bucket, bucket);
+        sub_row(acc, F + (black ? idx.second : idx.first) * LAYER1_SIZE);
+      }
+      while (added) {
+        const auto idx = feature_indices(piece, pop_lsb(added), bucket, bucket);
+        add_row(acc, F + (black ? idx.second : idx.first) * LAYER1_SIZE);
+      }
+      entry.pieces[piece] = now;
+    }
+    const int16_t *extra = black ? m_pre_b[m_idx] : m_pre_w[m_idx];
+    const int n_extra = black ? m_pre_nb[m_idx] : m_pre_nw[m_idx];
+    int i = 0, j = 0;
+    while (i < entry.n_extra || j < n_extra) {
+      if (j == n_extra || (i < entry.n_extra && entry.extra[i] < extra[j])) {
+        sub_row(acc, F + static_cast<size_t>(entry.extra[i++]) * LAYER1_SIZE);
+      } else if (i == entry.n_extra || extra[j] < entry.extra[i]) {
+        add_row(acc, F + static_cast<size_t>(extra[j++]) * LAYER1_SIZE);
+      } else {
+        ++i;
+        ++j;
+      }
+    }
+    std::copy_n(extra, n_extra, entry.extra.begin());
+    entry.n_extra = n_extra;
+    std::copy_n(acc, LAYER1_SIZE, (black ? m_curr->black : m_curr->white).begin());
   }
 
   inline void pop() noexcept {
@@ -584,37 +644,11 @@ public:
   }
 
   inline void refresh_white(const BoardState &position, size_t new_w_bucket) noexcept {
-    if (!g_nnue || !m_initialized) std::exit(EXIT_FAILURE);
-    if (new_w_bucket >= NNUE_KING_BUCKETS) std::exit(EXIT_FAILURE);
-    std::copy_n(g_nnue->feature_bias.data(), LAYER1_SIZE, m_curr->white.begin());
-    uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
-    while (occ) {
-      const int sq = pop_lsb(occ);
-      const int piece = position.board[sq];
-      const size_t off = feature_indices(piece, sq, new_w_bucket, m_b_bucket[m_idx]).first * LAYER1_SIZE;
-      #pragma unroll 4
-      for (size_t i = 0; i < LAYER1_SIZE; ++i) {
-        m_curr->white[i] += g_nnue->feature_v[off + i];
-      }
-    }
-    add_extra_list(m_pre_w[m_idx], m_pre_nw[m_idx], false);
+    refresh_side(position, new_w_bucket, false);
   }
 
   inline void refresh_black(const BoardState &position, size_t new_b_bucket) noexcept {
-    if (!g_nnue || !m_initialized) std::exit(EXIT_FAILURE);
-    if (new_b_bucket >= NNUE_KING_BUCKETS) std::exit(EXIT_FAILURE);
-    std::copy_n(g_nnue->feature_bias.data(), LAYER1_SIZE, m_curr->black.begin());
-    uint64_t occ = position.colors_bb[0] | position.colors_bb[1];
-    while (occ) {
-      const int sq = pop_lsb(occ);
-      const int piece = position.board[sq];
-      const size_t off = feature_indices(piece, sq, m_w_bucket[m_idx], new_b_bucket).second * LAYER1_SIZE;
-      #pragma unroll 4
-      for (size_t i = 0; i < LAYER1_SIZE; ++i) {
-        m_curr->black[i] += g_nnue->feature_v[off + i];
-      }
-    }
-    add_extra_list(m_pre_b[m_idx], m_pre_nb[m_idx], true);
+    refresh_side(position, new_b_bucket, true);
   }
 
   inline void add_sub(int from_piece, int from, int to_piece, int to) noexcept {

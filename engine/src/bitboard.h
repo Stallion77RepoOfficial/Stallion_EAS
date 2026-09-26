@@ -750,32 +750,37 @@ inline int collect_extra_features(const uint8_t board[64],
 // A black-perspective feature list is the vertically mirrored, color-swapped
 // white list. Reuse the already computed attacks and pawn/rook properties.
 // In-place conversion is supported; the result is sorted for linear deltas.
+// Mirror of one extra index of a block known at compile time: the strides
+// fold to constants.
+template <Feature F>
+constexpr int mirror_extra_index(int rel) noexcept {
+  constexpr auto shape = FeatureBlocks[static_cast<int>(F)];
+  const int outer = rel / (shape.inner * shape.cells);
+  int inner = rel / shape.cells % shape.inner;
+  int cell = rel % shape.cells;
+  if constexpr (F == Feature::ZoneOcc || F == Feature::ZoneAtk)
+    inner = (2 - inner / 3) * 3 + inner % 3;
+  if constexpr (F == Feature::ZoneOcc)
+    cell = cell == 0 ? 0 : (cell & 1 ? cell + 1 : cell - 1);
+  if constexpr (F == Feature::Pawn || F == Feature::RookFile)
+    cell ^= 56;
+  if constexpr (F == Feature::Complex)
+    inner ^= 1;
+  return static_cast<int>(feature_index(F, outer ^ 1, inner, cell));
+}
+
 inline int mirror_extra_features(const int *white, int count, int *black, int cap) noexcept {
   if (!white || !black || count < 0 || count > cap) return -1;
-  auto mirror_zone = [](int off) { return (2 - off / 3) * 3 + off % 3; };
+  constexpr auto off = [](Feature f) { return static_cast<int>(feature_offset(f)); };
   for (int i = 0; i < count; ++i) {
-    const size_t idx = static_cast<size_t>(white[i]);
-    if (idx < NNUE_BASE_FEATURES || idx >= NNUE_INPUT_SIZE) return -1;
-    int block = 0;
-    while (idx >= feature_offset(static_cast<Feature>(block + 1))) ++block;
-    const Feature feature = static_cast<Feature>(block);
-    const auto &shape = FeatureBlocks[block];
-    const int rel = static_cast<int>(idx - feature_offset(feature));
-    const int outer = rel / (shape.inner * shape.cells);
-    int inner = rel / shape.cells % shape.inner;
-    int cell = rel % shape.cells;
-    switch (feature) {
-    case Feature::ZoneOcc:
-      inner = mirror_zone(inner);
-      cell = cell == 0 ? 0 : (cell & 1 ? cell + 1 : cell - 1);
-      break;
-    case Feature::ZoneAtk: inner = mirror_zone(inner); break;
-    case Feature::Pawn:
-    case Feature::RookFile: cell ^= 56; break;
-    case Feature::Complex: inner ^= 1; break;
-    default: break;
-    }
-    black[i] = static_cast<int>(feature_index(feature, outer ^ 1, inner, cell));
+    const int idx = white[i];
+    if (idx < off(Feature::Material) || idx >= static_cast<int>(NNUE_INPUT_SIZE)) return -1;
+    if (idx < off(Feature::ZoneOcc)) black[i] = mirror_extra_index<Feature::Material>(idx - off(Feature::Material));
+    else if (idx < off(Feature::ZoneAtk)) black[i] = mirror_extra_index<Feature::ZoneOcc>(idx - off(Feature::ZoneOcc));
+    else if (idx < off(Feature::Pawn)) black[i] = mirror_extra_index<Feature::ZoneAtk>(idx - off(Feature::ZoneAtk));
+    else if (idx < off(Feature::RookFile)) black[i] = mirror_extra_index<Feature::Pawn>(idx - off(Feature::Pawn));
+    else if (idx < off(Feature::Complex)) black[i] = mirror_extra_index<Feature::RookFile>(idx - off(Feature::RookFile));
+    else black[i] = mirror_extra_index<Feature::Complex>(idx - off(Feature::Complex));
   }
   std::sort(black, black + count);
   return count;

@@ -18,7 +18,8 @@ struct PackedPosition {
 
 static_assert(sizeof(PackedPosition) == 32, "PackedPosition must be exactly 32 bytes");
 
-enum { SBIN_NNUE_SLOTS = 192 };
+// Features per side of one position (engine NNUE_FEATURE_SLOTS).
+enum { SBIN_NNUE_SLOTS = 158 };
 
 enum SbinValidationStatus {
     SBIN_MISSING_FULLMOVE = 1,

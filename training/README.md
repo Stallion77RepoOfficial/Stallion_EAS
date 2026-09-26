@@ -8,7 +8,7 @@
 - Çıkış bucket'ı: `clamp((taş_sayısı - 1) // 2, 0, 15)` — motor ve eğitimde aynı.
 - Kuantizasyon: `QA=255, QB=64, QAB=16320, SCALE=400`; kayıp uzayı `400/ln(10)` ile centipawn'a bağlıdır.
 - Net dosyası: payload `27.338.784` bayt, padded `27.338.816` bayt. Motor net'i gömülü taşır (`net_embed.S`); çalışma anında net dosyası okunmaz. Yalnızca 16 king bucket / 16 çıkış bucket biçimi kabul edilir.
-- Pozisyon başına en fazla `192` özellik slotu (yasal 32 taşlı konumda üst sınır `172`), özellik kesilmez.
+- Özellik tamponları tam sınıra göre: taraf başına en fazla `158` özellik (`32` taş + `126` ekstra; motorun kuralı olan taraf başına ≤16 taş, ≤8 piyon altında ulaşılabilecek en yüksek değer). Her pozisyon yalnızca gerçekte aktif olan özellikleri kullanır.
 
 ## Eğitim
 

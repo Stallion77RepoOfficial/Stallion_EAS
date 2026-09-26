@@ -1,7 +1,7 @@
 #include "sbin.h"
 #include "../engine/src/bitboard.h"
 #include "../engine/src/nnue.h"
-static_assert(SBIN_NNUE_SLOTS == NNUE_EXTRA_SLOTS);
+static_assert(SBIN_NNUE_SLOTS == NNUE_FEATURE_SLOTS);
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -230,10 +230,10 @@ static void position_features(const PackedPosition& in, int32_t* us, int& n_us,
         black[n] = static_cast<int32_t>(black_idx);
         ++n;
     }
-    int extra_w[SBIN_NNUE_SLOTS], extra_b[SBIN_NNUE_SLOTS];
-    const int nw = collect_extra_features(board, colors_bb, pieces_bb, false, extra_w, SBIN_NNUE_SLOTS);
-    const int nb = mirror_extra_features(extra_w, nw, extra_b, SBIN_NNUE_SLOTS);
-    if (nw < 0 || nb < 0 || n + nw > SBIN_NNUE_SLOTS || n + nb > SBIN_NNUE_SLOTS) std::abort();
+    int extra_w[NNUE_EXTRA_SLOTS], extra_b[NNUE_EXTRA_SLOTS];
+    const int nw = collect_extra_features(board, colors_bb, pieces_bb, false, extra_w, NNUE_EXTRA_SLOTS);
+    const int nb = mirror_extra_features(extra_w, nw, extra_b, NNUE_EXTRA_SLOTS);
+    if (nw < 0 || nb < 0) std::abort();
     for (int i = 0; i < nw; ++i) white[n + i] = extra_w[i];
     for (int i = 0; i < nb; ++i) black[n + i] = extra_b[i];
     n_us = n + (white_turn ? nw : nb);

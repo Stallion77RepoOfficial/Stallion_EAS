@@ -225,11 +225,17 @@ constexpr size_t NNUE_OFF_PAWN = NNUE_OFF_ZONE_ATK + 18;          // +384
 constexpr size_t NNUE_OFF_ROOKFILE = NNUE_OFF_PAWN + 384;         // +256
 constexpr size_t NNUE_OFF_COMPLEX = NNUE_OFF_ROOKFILE + 256;      // +36
 constexpr size_t NNUE_INPUT_SIZE = NNUE_OFF_COMPLEX + 36;         // 13316
-// At most 32 pieces (including two kings) can be on the board. The fixed
-// blocks use 50 slots; every other piece can contribute at most three slots.
-// 192 leaves room beyond the resulting 172 total position features.
-constexpr int NNUE_EXTRA_SLOTS = 192;
-static_assert(32 + 10 + 18 + 18 + 4 + 3 * (32 - 2) <= NNUE_EXTRA_SLOTS);
+// Exact feature bounds under the position rules the engine enforces (at most
+// 16 pieces and 8 pawns per side). Fixed blocks: 10 material + 18 king-zone
+// occupancy + 18 king-zone attack + 4 complex. Per piece: a pawn has at most
+// 3 structure features, a rook 2 file features, other pieces none; the worst
+// side is 8 pawns + 7 rooks. Buffers use these bounds, so no position can
+// overflow them and nothing is allocated beyond the reachable maximum.
+constexpr int NNUE_MAX_PIECES = 32;
+constexpr int NNUE_FIXED_EXTRA = 10 + 18 + 18 + 4;
+constexpr int NNUE_SIDE_EXTRA = 3 * 8 + 2 * 7;
+constexpr int NNUE_EXTRA_SLOTS = NNUE_FIXED_EXTRA + 2 * NNUE_SIDE_EXTRA;   // 126
+constexpr int NNUE_FEATURE_SLOTS = NNUE_MAX_PIECES + NNUE_EXTRA_SLOTS;     // 158
 
 constexpr inline size_t nnue_material_index(int side, int type, int count) noexcept {
   const int c = count < 0 ? 0 : (count > 9 ? 9 : count);

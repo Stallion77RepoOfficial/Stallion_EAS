@@ -75,7 +75,6 @@ int main(int argc, char* argv[]) {
     BoardState position{};
     auto thread_info = std::make_unique<ThreadInfo>();
     init_LMR();
-    ensure_bbs_initialized();
     resize_TT(DefaultHashMB);
 
     const auto args = collect_args(argc, argv);

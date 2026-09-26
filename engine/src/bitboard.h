@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <thread>
+#include <type_traits>
 
 void init_bbs() noexcept;
 
@@ -97,32 +98,6 @@ inline MultiArray<uint64_t, 2, 64> PawnAttacks{};
 inline std::array<uint64_t, 64> KingAttacks{};
 inline std::array<uint64_t, 64> KnightAttacks{};
 
-inline std::atomic<bool> BBS_INITIALIZED{false};
-inline std::atomic<bool> BBS_INITIALIZING{false};
-inline thread_local bool BBS_INIT_IN_THIS_THREAD = false;
-
-inline void ensure_bbs_initialized() noexcept {
-  if (BBS_INITIALIZED.load(std::memory_order_acquire)) [[likely]]
-    return;
-  if (BBS_INIT_IN_THIS_THREAD) [[unlikely]]
-    return;
-
-  bool expected = false;
-  if (BBS_INITIALIZING.compare_exchange_strong(expected, true,
-                                               std::memory_order_acq_rel)) {
-
-    BBS_INIT_IN_THIS_THREAD = true;
-    init_bbs();
-    BBS_INITIALIZED.store(true, std::memory_order_release);
-    BBS_INIT_IN_THIS_THREAD = false;
-    BBS_INITIALIZING.store(false, std::memory_order_release);
-  } else {
-
-    while (!BBS_INITIALIZED.load(std::memory_order_acquire))
-      std::this_thread::yield();
-  }
-}
-
 constexpr std::array<uint64_t, 64> BishopMagics = {
     0x2020420401002200, 0x05210A020A002118, 0x1110040454C00484,
     0x1008095104080000, 0xC409104004000000, 0x0002901048080200,
@@ -173,14 +148,12 @@ constexpr std::array<uint64_t, 64> RookMagics = {
 inline uint64_t KNIGHT_ATK_SAFE(int sq) noexcept {
   if (!is_valid_square(sq)) [[unlikely]]
     return 0ULL;
-  ensure_bbs_initialized();
   return KnightAttacks[static_cast<size_t>(sq)];
 }
 
 inline uint64_t KING_ATK_SAFE(int sq) noexcept {
   if (!is_valid_square(sq)) [[unlikely]]
     return 0ULL;
-  ensure_bbs_initialized();
   return KingAttacks[static_cast<size_t>(sq)];
 }
 
@@ -188,7 +161,6 @@ inline uint64_t PAWN_ATK_SAFE(int color, int sq) noexcept {
   if (!is_valid_square(sq)) [[unlikely]]
     return 0ULL;
   const int c = color & 1;
-  ensure_bbs_initialized();
   return PawnAttacks[static_cast<size_t>(c)][static_cast<size_t>(sq)];
 }
 
@@ -196,26 +168,18 @@ inline uint64_t BISHOP_ATK_SAFE(int sq, uint64_t occ) noexcept {
   if (!is_valid_square(sq)) [[unlikely]]
     return 0ULL;
   const size_t idx_sq = static_cast<size_t>(sq);
-  ensure_bbs_initialized();
-  const uint64_t mask = BishopMasks[idx_sq];
-  const uint64_t index = ((occ & mask) * BishopMagics[idx_sq]) >> 55;
-  const size_t attack_index = static_cast<size_t>(index);
-  if (attack_index >= BishopAttacks[idx_sq].size()) [[unlikely]]
-    return 0ULL;
-  return BishopAttacks[idx_sq][attack_index];
+  // A 64-bit product shifted by 55 is below 512, the table width.
+  static_assert(std::tuple_size_v<std::remove_reference_t<decltype(BishopAttacks[0])>> == (1u << (64 - 55)));
+  return BishopAttacks[idx_sq][((occ & BishopMasks[idx_sq]) * BishopMagics[idx_sq]) >> 55];
 }
 
 inline uint64_t ROOK_ATK_SAFE(int sq, uint64_t occ) noexcept {
   if (!is_valid_square(sq)) [[unlikely]]
     return 0ULL;
   const size_t idx_sq = static_cast<size_t>(sq);
-  ensure_bbs_initialized();
-  const uint64_t mask = RookMasks[idx_sq];
-  const uint64_t index = ((occ & mask) * RookMagics[idx_sq]) >> 52;
-  const size_t attack_index = static_cast<size_t>(index);
-  if (attack_index >= RookAttacks[idx_sq].size()) [[unlikely]]
-    return 0ULL;
-  return RookAttacks[idx_sq][attack_index];
+  // A 64-bit product shifted by 52 is below 4096, the table width.
+  static_assert(std::tuple_size_v<std::remove_reference_t<decltype(RookAttacks[0])>> == (1u << (64 - 52)));
+  return RookAttacks[idx_sq][((occ & RookMasks[idx_sq]) * RookMagics[idx_sq]) >> 52];
 }
 
 constexpr inline int get_file(int square) noexcept { return square & 7; }
@@ -557,6 +521,10 @@ inline void init_bbs() noexcept {
   }
 }
 
+// Attack tables are filled once during static initialization of any program
+// or library that includes this header, before any lookup can run.
+inline const bool BitboardsReady = (init_bbs(), true);
+
 inline void update_bb(Position &pos, int from_piece, int from, int to_piece, int to,
                       int captured_piece, int capture_sq) noexcept {
   const int color = get_color(from_piece);
@@ -592,7 +560,6 @@ inline int collect_extra_features(const uint8_t board[64],
                                   const uint64_t pieces_bb[7],
                                   bool flip, int *out, int cap) noexcept {
   if (!board || !colors_bb || !pieces_bb || !out || cap < NNUE_EXTRA_SLOTS) return -1;
-  ensure_bbs_initialized();
   const uint64_t wbb = colors_bb[0] & pieces_bb[PieceTypes::King];
   const uint64_t bbb = colors_bb[1] & pieces_bb[PieceTypes::King];
   if (!wbb || !bbb) return -1;
@@ -639,26 +606,32 @@ inline int collect_extra_features(const uint8_t board[64],
     }
   }
 
+  // Squares attacked by each color. Attack relations are symmetric, so a
+  // square is in this map exactly when the color attacks it.
   const uint64_t occupied = colors_bb[0] | colors_bb[1];
+  uint64_t attacked_by[2] = {};
+  for (int color = 0; color < 2; ++color) {
+    const uint64_t own = colors_bb[color];
+    uint64_t map = 0;
+    for (uint64_t bb = own & pieces_bb[PieceTypes::Pawn]; bb;) map |= PAWN_ATK_SAFE(color, pop_lsb(bb));
+    for (uint64_t bb = own & pieces_bb[PieceTypes::Knight]; bb;) map |= KNIGHT_ATK_SAFE(pop_lsb(bb));
+    for (uint64_t bb = own & (pieces_bb[PieceTypes::Bishop] | pieces_bb[PieceTypes::Queen]); bb;)
+      map |= get_bishop_attacks(pop_lsb(bb), occupied);
+    for (uint64_t bb = own & (pieces_bb[PieceTypes::Rook] | pieces_bb[PieceTypes::Queen]); bb;)
+      map |= get_rook_attacks(pop_lsb(bb), occupied);
+    for (uint64_t bb = own & pieces_bb[PieceTypes::King]; bb;) map |= KING_ATK_SAFE(pop_lsb(bb));
+    attacked_by[color] = map;
+  }
   for (int slot_king = 0; slot_king < 2; ++slot_king) {
     const int real_king = flip ? (slot_king ^ 1) : slot_king;
     const int king_view = flip ? (kings[real_king] ^ 56) : kings[real_king];
     const int kf = get_file(king_view), kr = get_rank(king_view);
-    const int enemy_real = flip ? slot_king : (slot_king ^ 1);
+    const uint64_t enemy_attacks = attacked_by[flip ? slot_king : (slot_king ^ 1)];
     for (int off = 0; off < 9; ++off) {
       const int tf = kf + (off % 3) - 1, tr = kr + (off / 3) - 1;
       if (tf < 0 || tf > 7 || tr < 0 || tr > 7) continue;
       const int target_real = flip ? ((tr * 8 + tf) ^ 56) : (tr * 8 + tf);
-      const uint64_t enemy = colors_bb[enemy_real];
-      const bool attacked =
-          (PAWN_ATK_SAFE(enemy_real ^ 1, target_real) & enemy & pieces_bb[PieceTypes::Pawn]) ||
-          (KNIGHT_ATK_SAFE(target_real) & enemy & pieces_bb[PieceTypes::Knight]) ||
-          (KING_ATK_SAFE(target_real) & enemy & pieces_bb[PieceTypes::King]) ||
-          (get_bishop_attacks(target_real, occupied) & enemy &
-           (pieces_bb[PieceTypes::Bishop] | pieces_bb[PieceTypes::Queen])) ||
-          (get_rook_attacks(target_real, occupied) & enemy &
-           (pieces_bb[PieceTypes::Rook] | pieces_bb[PieceTypes::Queen]));
-      if (attacked)
+      if ((enemy_attacks >> target_real) & 1)
         if (!push(nnue_zone_atk_index(slot_king, off))) return -1;
     }
   }

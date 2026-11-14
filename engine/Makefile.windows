@@ -1,0 +1,10 @@
+EXE := stallion_eas_windows.exe
+CXX := x86_64-w64-mingw32-g++
+CXXFLAGS := -O3 -std=c++23 -ffast-math -pthread
+# Override with ARCH_FLAGS= for x86-64 machines without AVX2.
+ARCH_FLAGS ?= -mavx2
+LDFLAGS := -static -static-libgcc -static-libstdc++
+STRIP := x86_64-w64-mingw32-strip
+include Makefile.rules
+.PHONY: windows
+windows: all

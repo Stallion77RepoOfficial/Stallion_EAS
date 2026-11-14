@@ -1,0 +1,7 @@
+.PHONY: all
+BINARIES := stallion_eas_mac stallion_eas_linux stallion_eas_windows.exe stallion_eas_android
+DEBUG_BINARIES := stallion_eas_mac_asan stallion_eas_linux_asan stallion_eas_windows_asan.exe stallion_eas_android_asan
+
+all:
+	rm -f $(BINARIES) $(DEBUG_BINARIES)
+	rm -rf $(addsuffix .dSYM,$(BINARIES) $(DEBUG_BINARIES))

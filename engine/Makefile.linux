@@ -1,0 +1,8 @@
+EXE := stallion_eas_linux
+CXX := g++
+CXXFLAGS := -O3 -std=c++23 -ffast-math -pthread
+LDLIBS := -lm
+STRIP := strip
+include Makefile.rules
+.PHONY: linux
+linux: all

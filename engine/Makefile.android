@@ -1,0 +1,14 @@
+# Makefile.android — Android (NDK) için bağımsız derleme
+EXE := stallion_eas_android
+ANDROID_NDK_HOME ?= $(patsubst %/toolchains,%,$(lastword $(sort $(wildcard $(HOME)/Library/Android/sdk/ndk/*/toolchains $(HOME)/Library/Android/sdk/ndk/*/*/toolchains $(HOME)/Android/Sdk/ndk/*/toolchains))))
+NDK_HOST_TAG ?= $(if $(filter Darwin,$(shell uname -s)),darwin-x86_64,linux-x86_64)
+ANDROID_API ?= 24
+CXX := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/$(NDK_HOST_TAG)/bin/aarch64-linux-android$(ANDROID_API)-clang++
+CXXFLAGS := -O3 -std=c++23 -ffast-math -pthread
+ARCH_FLAGS ?= -march=armv8-a
+LDLIBS := -lm
+LDFLAGS := -static-libstdc++
+STRIP := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/$(NDK_HOST_TAG)/bin/llvm-strip
+include Makefile.rules
+.PHONY: android
+android: all

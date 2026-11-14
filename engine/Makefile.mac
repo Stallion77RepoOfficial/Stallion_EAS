@@ -1,0 +1,9 @@
+EXE := stallion_eas_mac
+CXX := clang++
+CXXFLAGS := -O3 -std=c++23 -ffast-math -pthread
+ARCH_FLAGS ?= $(if $(filter arm64,$(shell uname -m)),-march=armv8-a,)
+LDLIBS := -lm
+STRIP := strip
+include Makefile.rules
+.PHONY: mac
+mac: all

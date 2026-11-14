@@ -1,0 +1,10 @@
+.DS_Store
+/engine/stallion_eas_mac
+/engine/stallion_eas_windows.exe
+/engine/nets/*.promotion.lock
+/stockfish19/
+*.pt
+/gpu/
+/training/
+/.playwright-cli/
+/output/playwright/

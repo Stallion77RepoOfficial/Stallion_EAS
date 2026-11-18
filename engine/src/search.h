@@ -194,7 +194,8 @@ inline bool out_of_time(ThreadInfo &ti) noexcept {
 
   if (!ti.infinite_search && !thread_data.pondering) {
     const uint64_t elapsed = time_elapsed(ti.start_time);
-    if (ti.time_manager.should_stop(elapsed, ti.best_move_stable, ti.is_movetime) ||
+    if (ti.time_manager.should_stop(elapsed, ti.best_move_stable,
+                                    ti.eval_dropping, ti.is_movetime) ||
         elapsed > ti.max_time) {
       thread_data.stop = true;
       return true;
@@ -1282,6 +1283,7 @@ inline void iterative_deepen(BoardState &pos, ThreadInfo &ti,
   ti.best_moves[0] = ti.root_moves.empty() ? MoveNone : ti.root_moves[0].move;
 
   Action prev_best = MoveNone;
+  int prev_score = ScoreNone;
   int alpha = ScoreNone;
   int beta = -ScoreNone;
   int bm_stability = 0;
@@ -1314,6 +1316,7 @@ inline void iterative_deepen(BoardState &pos, ThreadInfo &ti,
       int window_depth = depth;
       int delta = std::max(24, static_cast<int>(AspStartWindow) * 3 / 2);
       bool extended_fail_low = false;
+      bool saw_fail_low = false;
       int score = search<true>(alpha, beta, depth, false, pos, ti, table);
 
       while (score <= alpha || score >= beta || thread_data.stop) {
@@ -1352,6 +1355,8 @@ inline void iterative_deepen(BoardState &pos, ThreadInfo &ti,
           if (ti.thread_id == 0 && !extended_fail_low && depth > 6 &&
               !ti.is_movetime && !ti.infinite_search && !thread_data.pondering) {
             extended_fail_low = true;
+            saw_fail_low = true;
+            ti.eval_dropping = true;
             ti.opt_time = std::min(ti.max_time, ti.opt_time + ti.original_opt / 3ULL);
             ti.time_manager.soft_limit = ti.opt_time;
           }
@@ -1388,6 +1393,31 @@ inline void iterative_deepen(BoardState &pos, ThreadInfo &ti,
                       format_pv(pos, ti).c_str());
         }
 
+        if (!ti.is_movetime && !ti.infinite_search && !thread_data.pondering &&
+            ti.multipv == 1 && ti.multipv_index == 0 && depth > 6) {
+          const bool best_move_changed = (prev_best != MoveNone && ti.best_moves[0] != prev_best);
+          if (!best_move_changed && prev_best != MoveNone) {
+            bm_stability = std::min(bm_stability + 1, 8);
+            ++ti.stability_counter;
+          } else {
+            bm_stability = 0;
+            ti.stability_counter = 0;
+          }
+          const int eval_drop =
+              (prev_score != ScoreNone && std::abs(score) < MateThreshold &&
+               std::abs(prev_score) < MateThreshold)
+                  ? (prev_score - score)
+                  : 0;
+          ti.eval_dropping = saw_fail_low || (eval_drop > 15) || best_move_changed;
+          ti.best_move_stable = (ti.stability_counter >= 3 && !ti.eval_dropping);
+          double eval_scale = std::clamp(1.0 + eval_drop * 0.010, 0.92, 1.35);
+          if (saw_fail_low) eval_scale = std::max(eval_scale, 1.25);
+          if (best_move_changed) eval_scale = std::max(eval_scale, 1.15);
+          RootAction *best_entry = find_root_move(ti, ti.best_moves[0]);
+          adjust_soft_limit(ti, best_entry ? best_entry->nodes : 0ULL, bm_stability,
+                            eval_scale);
+        }
+
         const bool budget_exhausted =
             !ti.infinite_search && !thread_data.pondering &&
             (static_cast<uint64_t>(elapsed_ms) > ti.opt_time ||
@@ -1395,19 +1425,6 @@ inline void iterative_deepen(BoardState &pos, ThreadInfo &ti,
               total_nodes >= ti.max_nodes_searched));
         if (budget_exhausted) {
           thread_data.stop = true;
-        } else if (!ti.is_movetime && ti.multipv == 1 && ti.multipv_index == 0 &&
-                   depth > 6) {
-          if (ti.best_moves[0] == prev_best) {
-            bm_stability = std::min(bm_stability + 1, 8);
-            ++ti.stability_counter;
-            ti.best_move_stable = (ti.stability_counter >= 3);
-          } else {
-            bm_stability = 0;
-            ti.stability_counter = 0;
-            ti.best_move_stable = false;
-          }
-          RootAction *best_entry = find_root_move(ti, ti.best_moves[0]);
-          adjust_soft_limit(ti, best_entry ? best_entry->nodes : 0ULL, bm_stability);
         }
       }
 
@@ -1416,7 +1433,10 @@ inline void iterative_deepen(BoardState &pos, ThreadInfo &ti,
         break;
       }
 
-      if (ti.multipv_index == 0) prev_best = ti.best_moves[0];
+      if (ti.multipv_index == 0) {
+        prev_best = ti.best_moves[0];
+        prev_score = score;
+      }
 
       if (depth > 6 && ti.multipv_index == 0 && active_multipv == 1) {
         // Stagger helper aspiration windows around the score to vary worker trees.

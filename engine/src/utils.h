@@ -79,6 +79,7 @@ struct TimeManager {
   void initialize(uint64_t time_left, uint64_t increment, int moves_to_go,
                   uint32_t game_move) noexcept;
   bool should_stop(uint64_t elapsed, bool best_move_stable,
+                   bool eval_dropping = false,
                    bool is_movetime = false) noexcept;
 };
 
@@ -153,6 +154,7 @@ struct ThreadInfoBase {
   TimeManager time_manager;
   bool is_movetime = false;
   bool best_move_stable = false;
+  bool eval_dropping = false;
   int stability_counter = 0;
 
   OpeningBook opening_book;
@@ -674,29 +676,34 @@ inline void TimeManager::initialize(uint64_t time_left, uint64_t increment,
 }
 
 inline bool TimeManager::should_stop(uint64_t elapsed, bool best_move_stable,
+                                     bool eval_dropping,
                                      bool is_movetime) noexcept {
   if (elapsed >= hard_limit) return true;
   if (is_movetime) return false;
   if (elapsed >= soft_limit) {
-    if (best_move_stable) return true;
+    if (best_move_stable && !eval_dropping) return true;
     soft_limit = std::min(soft_limit + allocated_time / 8ULL, hard_limit);
   }
   return false;
 }
 
 inline void adjust_soft_limit(ThreadInfo &ti, uint64_t best_move_nodes,
-                              int bm_stability) noexcept {
+                              int bm_stability,
+                              double eval_scale = 1.0) noexcept {
   const uint64_t visited = ti.nodes.load(std::memory_order_relaxed);
   if (visited == 0) return;
 
-  const double bm_share = static_cast<double>(best_move_nodes) / visited;
+  const double bm_share =
+      std::clamp(static_cast<double>(best_move_nodes) / visited, 0.0, 1.0);
   const double node_scale =
       (static_cast<double>(NodeTmFactor1) / 100.0 - bm_share) * NodeTmFactor2 / 100.0;
-  const double stability_scale = BmFactor1 / 100.0 - (bm_stability * 0.06);
+  const double stability_scale =
+      std::max(0.55, BmFactor1 / 100.0 - (bm_stability * 0.06));
 
-  const long double scaled_time =
-      static_cast<long double>(ti.original_opt) * node_scale * stability_scale;
-  const uint64_t min_opt = std::min<uint64_t>(ti.max_time, std::max<uint64_t>(1ULL, ti.original_opt / 4ULL));
+  const long double scaled_time = static_cast<long double>(ti.original_opt) *
+                                  node_scale * stability_scale * eval_scale;
+  const uint64_t min_opt =
+      std::min<uint64_t>(ti.max_time, std::max<uint64_t>(1ULL, ti.original_opt / 4ULL));
   const uint64_t clamped_time = static_cast<uint64_t>(std::clamp<long double>(
       scaled_time, static_cast<long double>(min_opt), static_cast<long double>(ti.max_time)));
   ti.opt_time = std::min<uint64_t>(clamped_time, ti.max_time);

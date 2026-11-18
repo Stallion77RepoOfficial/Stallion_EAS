@@ -385,6 +385,7 @@ inline void handle_go(std::istringstream &iss, BoardState &pos, ThreadInfo &ti,
   ti.ponder_move = MoveNone;
   thread_data.ponder_hit_time = -1;
   ti.best_move_stable = false;
+  ti.eval_dropping = false;
   ti.stability_counter = 0;
   ti.time_checks = 0;
   ti.max_nodes_searched = UINT64_MAX / 2;
@@ -623,6 +624,7 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       thread_info.time_manager = TimeManager();
       thread_info.is_movetime = false;
       thread_info.best_move_stable = false;
+      thread_info.eval_dropping = false;
       thread_info.stability_counter = 0;
       thread_info.root_moves.clear();
       thread_info.root_moves_limited = false;

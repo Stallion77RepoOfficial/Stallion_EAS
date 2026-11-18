@@ -195,7 +195,7 @@ struct GameHistory {
 
 inline constexpr int BucketEntries = 3;
 inline constexpr int MaxAge = 32;
-inline constexpr int LowPlyHistDepth = 4;
+inline constexpr int MaxLowPlyHistDepth = 8;
 
 struct TTEntry {
   uint32_t position_key{0};
@@ -232,9 +232,6 @@ using StateRecord = GameHistory;
 inline constexpr int MaxActions = ListSize;
 inline constexpr int MaxSearchPly = MaxSearchDepth;
 inline constexpr int MaxGameLen = GameSize;
-
-inline constexpr std::array<int, 7> SeeValues{0, 100, 460, 465, 680, 1300, 10000};
-inline constexpr std::array<int, 7> MaterialValues{0, 105, 320, 330, 520, 950, 10000};
 
 namespace Random {
 inline thread_local std::mt19937 rd(std::random_device{}());
@@ -501,3 +498,132 @@ inline constexpr std::array<uint64_t, 778> zobrist_keys{
     0x8C9A454AF9E09984ULL, 0x333EE6727BD12DCBULL, 0x9847468F925DC38CULL, 0x446ED5203696ABACULL,
     0x71FDDF9EF5B5DEF6ULL, 0xD4D61614CC333541ULL
 };
+
+// Runtime-configurable engine options (defined in uci.h).
+extern MultiArray<int, MaxSearchDepth + 1, MaxActions> LMRTable;
+void init_LMR() noexcept;
+
+extern int NormalizationFactor;
+extern int NnueEvalScale;
+extern int HalfmoveScaleMax;
+extern int Contempt;
+extern std::array<int, 7> SeeValues;
+extern std::array<int, 7> MaterialValues;
+
+extern int CorrWeight;
+extern int CorrHistMax;
+extern int CorrDeltaDiv;
+extern int CorrDeltaMax;
+extern int CorrCont1EvalPct;
+extern int CorrCont2EvalPct;
+extern int CorrCont2UpdPct;
+
+extern int HistBonus;
+extern int HistMax;
+extern int HistGravityMax;
+extern int HistDepthBoostMargin;
+extern int HistCont4UpdPct;
+extern int LowPlyHistDepth;
+extern int LowPlyDecayDiv;
+extern int LowPlyHistMult;
+extern int Killer2Offset;
+extern int CounterMoveBonus;
+extern int PawnPushRank7Bonus;
+extern int PawnPushRank6Bonus;
+extern int MvvLvaVictimMult;
+
+extern int TtAgePenalty;
+extern int TtPvBonus;
+extern int TtReplaceDepthMargin;
+extern int TtHalfmoveLimit;
+
+extern int DeltaMarginBase;
+extern int QSearchCheckSeeMargin;
+extern int QSearchCapSeeMargin;
+extern int MainCapSeeMargin;
+
+extern int NMPMinDepth;
+extern int NMPBase;
+extern int NMPDepthDiv;
+extern int NMPEvalDiv;
+extern int NMPEvalMaxRed;
+extern int NMPVerifyDepth;
+extern int NMPVerifyPct;
+
+extern int RFPMargin;
+extern int RFPMaxDepth;
+extern int RFPTtPvMargin;
+extern int RazorMargin;
+extern int RazorMaxDepth;
+extern int IIRMinDepth;
+
+extern int ProbCutMargin;
+extern int ProbCutMinDepth;
+extern int ProbCutTtDepthMargin;
+extern int ProbCutReduction;
+
+extern int LMPBase;
+extern int LMPDepth;
+extern int LmpImprDiv;
+extern int LmpNoImprDiv;
+extern int FPDepth;
+extern int FPMargin1;
+extern int FPMargin2;
+extern int HistPruneDepth;
+extern int HistPruneThreshold;
+extern int SeePruningDepth;
+extern int SeePruningQuietMargin;
+extern int SeePruningNoisyMargin;
+
+extern int SEDepth;
+extern int SETtDepthMargin;
+extern int SEBetaDepthFactor;
+extern int SEDoubleExtMargin;
+extern int SETripleExtMargin;
+extern int HistExtThreshold;
+extern int HistExtMinDepth;
+extern int MaxExtBudget;
+
+extern int LMRMinDepth;
+extern int LMRBase;
+extern int LMRRatio;
+extern int LMRHistoryDiv;
+extern int LMRCapHistoryDiv;
+extern int LMRAdvPawnRed;
+
+extern int AspStartWindow;
+extern int AspMinDepth;
+extern int AspMinDelta;
+extern int AspDeltaPct;
+extern int AspWidenPct;
+extern int AspMinHalfWin;
+extern int AspHalfWinOffset;
+extern int AspThreadSpread;
+
+extern int NodeTmFactor1;
+extern int NodeTmFactor2;
+extern int BmFactor1;
+extern int BmMinFactor;
+extern int BmStabilityStep;
+extern int TmReserveMax;
+extern int TmReservePct;
+extern int TmBaseDiv;
+extern int TmIncPct;
+extern int TmOpeningMoves;
+extern int TmOpeningPct;
+extern int TmMidgameMoves;
+extern int TmMidgamePct;
+extern int TmEndgamePct;
+extern int TmMaxAllocMult;
+extern int TmMaxUsablePct;
+extern int TmSoftExtDiv;
+extern int TmMinOptPct;
+extern int FailLowTimePct;
+extern int EvalDropThreshold;
+extern int BmStableCount;
+extern int EvalScaleSlope;
+extern int EvalScaleMin;
+extern int EvalScaleMax;
+extern int FailLowEvalScale;
+extern int BmChangeTimeScale;
+extern int BookRepeatSkipPct;

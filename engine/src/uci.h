@@ -10,6 +10,7 @@
 #include <charconv>
 #include <chrono>
 #include <cinttypes>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +24,154 @@
 #include <vector>
 
 inline bool tb_initialized = false;
+
+// Engine option storage and defaults.
+MultiArray<int, MaxSearchDepth + 1, MaxActions> LMRTable{};
+
+int NormalizationFactor = 195;
+int NnueEvalScale = 100;
+int HalfmoveScaleMax = 200;
+int Contempt = 0;
+
+std::array<int, 7> SeeValues{0, 100, 460, 465, 680, 1300, 10000};
+std::array<int, 7> MaterialValues{0, 105, 320, 330, 520, 950, 10000};
+
+int CorrWeight = 35;
+int CorrHistMax = 1024;
+int CorrDeltaDiv = 8;
+int CorrDeltaMax = 256;
+int CorrCont1EvalPct = 75;
+int CorrCont2EvalPct = 50;
+int CorrCont2UpdPct = 75;
+
+int HistBonus = 251;
+int HistMax = 2425;
+int HistGravityMax = 16384;
+int HistDepthBoostMargin = 125;
+int HistCont4UpdPct = 50;
+int LowPlyHistDepth = 4;
+int LowPlyDecayDiv = 4;
+int LowPlyHistMult = 2;
+int Killer2Offset = 1000;
+int CounterMoveBonus = 8000;
+int PawnPushRank7Bonus = 14000;
+int PawnPushRank6Bonus = 7000;
+int MvvLvaVictimMult = 100;
+
+int TtAgePenalty = 8;
+int TtPvBonus = 2;
+int TtReplaceDepthMargin = 4;
+int TtHalfmoveLimit = 90;
+
+int DeltaMarginBase = 180;
+int QSearchCheckSeeMargin = -107;
+int QSearchCapSeeMargin = -15;
+int MainCapSeeMargin = -107;
+
+int NMPMinDepth = 1;
+int NMPBase = 5;
+int NMPDepthDiv = 9;
+int NMPEvalDiv = 209;
+int NMPEvalMaxRed = 3;
+int NMPVerifyDepth = 12;
+int NMPVerifyPct = 75;
+
+int RFPMargin = 70;
+int RFPMaxDepth = 10;
+int RFPTtPvMargin = 25;
+
+int RazorMargin = 140;
+int RazorMaxDepth = 3;
+
+int IIRMinDepth = 4;
+
+int ProbCutMargin = 191;
+int ProbCutMinDepth = 5;
+int ProbCutTtDepthMargin = 4;
+int ProbCutReduction = 4;
+
+int LMPBase = 4;
+int LMPDepth = 8;
+int LmpImprDiv = 1;
+int LmpNoImprDiv = 2;
+
+int FPDepth = 6;
+int FPMargin1 = 90;
+int FPMargin2 = 80;
+
+int HistPruneDepth = 4;
+int HistPruneThreshold = 1200;
+
+int SeePruningDepth = 9;
+int SeePruningQuietMargin = -80;
+int SeePruningNoisyMargin = -15;
+
+int SEDepth = 7;
+int SETtDepthMargin = 3;
+int SEBetaDepthFactor = 150;
+int SEDoubleExtMargin = 14;
+int SETripleExtMargin = 125;
+
+int HistExtThreshold = 7000;
+int HistExtMinDepth = 4;
+int MaxExtBudget = 10;
+
+int LMRMinDepth = 3;
+int LMRBase = 4;
+int LMRRatio = 16;
+int LMRHistoryDiv = 4096;
+int LMRCapHistoryDiv = 4096;
+int LMRAdvPawnRed = 2;
+
+int AspStartWindow = 15;
+int AspMinDepth = 6;
+int AspMinDelta = 24;
+int AspDeltaPct = 150;
+int AspWidenPct = 50;
+int AspMinHalfWin = 26;
+int AspHalfWinOffset = 15;
+int AspThreadSpread = 8;
+
+int NodeTmFactor1 = 108;
+int NodeTmFactor2 = 134;
+int BmFactor1 = 109;
+int BmMinFactor = 55;
+int BmStabilityStep = 6;
+int TmReserveMax = 50;
+int TmReservePct = 10;
+int TmBaseDiv = 22;
+int TmIncPct = 75;
+int TmOpeningMoves = 20;
+int TmOpeningPct = 80;
+int TmMidgameMoves = 40;
+int TmMidgamePct = 110;
+int TmEndgamePct = 100;
+int TmMaxAllocMult = 300;
+int TmMaxUsablePct = 70;
+int TmSoftExtDiv = 8;
+int TmMinOptPct = 25;
+int FailLowTimePct = 33;
+int EvalDropThreshold = 15;
+int BmStableCount = 3;
+int EvalScaleSlope = 10;
+int EvalScaleMin = 92;
+int EvalScaleMax = 135;
+int FailLowEvalScale = 125;
+int BmChangeTimeScale = 115;
+int BookRepeatSkipPct = 50;
+
+void init_LMR() noexcept {
+  const double offset = static_cast<double>(LMRBase) * 0.1;
+  const double denom = static_cast<double>(LMRRatio) * 0.1;
+  for (int d = 0; d <= MaxSearchDepth; ++d) {
+    const double log_d = std::log1p(static_cast<double>(d));
+    for (int m = 0; m < MaxActions; ++m) {
+      const double log_m = std::log1p(static_cast<double>(m));
+      const double reduction = offset + (log_d * log_m) / denom;
+      LMRTable[d][m] = static_cast<int>(reduction + 0.5);
+    }
+  }
+}
 
 inline bool parse_int64(const std::string &text, int64_t &out) noexcept {
   if (text.empty()) return false;
@@ -166,7 +315,7 @@ inline void configure_worker_threads(int64_t thread_count) {
 
 inline std::vector<OptionEntry> build_option_table(ThreadInfo &ti) {
   std::vector<OptionEntry> entries;
-  entries.reserve(24 + params.size());
+  entries.reserve(160);
 
   entries.push_back(make_spin("Hash", 1, 131072, DefaultHashMB,
                               [](int64_t mb) { resize_TT(static_cast<int>(mb)); }));
@@ -226,18 +375,275 @@ inline std::vector<OptionEntry> build_option_table(ThreadInfo &ti) {
                               [&ti](int64_t v) { ti.book_min_weight = static_cast<int>(v); }));
   entries.push_back(make_spin("PonderTimeFactor", 0, 200, ti.ponder_time_factor,
                               [&ti](int64_t v) { ti.ponder_time_factor = static_cast<int>(v); }));
+
+  // Eval / SEE / Material
   entries.push_back(make_spin("NormalizationFactor", 50, 500, NormalizationFactor,
                               [](int64_t v) { NormalizationFactor = static_cast<int>(v); }));
+  entries.push_back(make_spin("NnueEvalScale", 25, 300, NnueEvalScale,
+                              [](int64_t v) { NnueEvalScale = static_cast<int>(v); }));
+  entries.push_back(make_spin("HalfmoveScaleMax", 100, 400, HalfmoveScaleMax,
+                              [](int64_t v) { HalfmoveScaleMax = static_cast<int>(v); }));
+  entries.push_back(make_spin("Contempt", -200, 200, Contempt,
+                              [](int64_t v) { Contempt = static_cast<int>(v); }));
+  entries.push_back(make_spin("SeeValPawn", 20, 300, SeeValues[PieceTypes::Pawn],
+                              [](int64_t v) { SeeValues[PieceTypes::Pawn] = static_cast<int>(v); }));
+  entries.push_back(make_spin("SeeValKnight", 100, 1000, SeeValues[PieceTypes::Knight],
+                              [](int64_t v) { SeeValues[PieceTypes::Knight] = static_cast<int>(v); }));
+  entries.push_back(make_spin("SeeValBishop", 100, 1000, SeeValues[PieceTypes::Bishop],
+                              [](int64_t v) { SeeValues[PieceTypes::Bishop] = static_cast<int>(v); }));
+  entries.push_back(make_spin("SeeValRook", 200, 1500, SeeValues[PieceTypes::Rook],
+                              [](int64_t v) { SeeValues[PieceTypes::Rook] = static_cast<int>(v); }));
+  entries.push_back(make_spin("SeeValQueen", 400, 2500, SeeValues[PieceTypes::Queen],
+                              [](int64_t v) { SeeValues[PieceTypes::Queen] = static_cast<int>(v); }));
+  entries.push_back(make_spin("MatValPawn", 20, 300, MaterialValues[PieceTypes::Pawn],
+                              [](int64_t v) { MaterialValues[PieceTypes::Pawn] = static_cast<int>(v); }));
+  entries.push_back(make_spin("MatValKnight", 100, 1000, MaterialValues[PieceTypes::Knight],
+                              [](int64_t v) { MaterialValues[PieceTypes::Knight] = static_cast<int>(v); }));
+  entries.push_back(make_spin("MatValBishop", 100, 1000, MaterialValues[PieceTypes::Bishop],
+                              [](int64_t v) { MaterialValues[PieceTypes::Bishop] = static_cast<int>(v); }));
+  entries.push_back(make_spin("MatValRook", 200, 1500, MaterialValues[PieceTypes::Rook],
+                              [](int64_t v) { MaterialValues[PieceTypes::Rook] = static_cast<int>(v); }));
+  entries.push_back(make_spin("MatValQueen", 400, 2500, MaterialValues[PieceTypes::Queen],
+                              [](int64_t v) { MaterialValues[PieceTypes::Queen] = static_cast<int>(v); }));
 
-  for (Parameter &param : params) {
-    entries.push_back(make_spin(param.name, param.min, param.max, param.value,
-                                [&param](int64_t v) {
-                                  param.value = static_cast<int>(v);
-                                  if (param.name == "LMRBase" || param.name == "LMRRatio") {
-                                    init_LMR();
-                                  }
-                                }));
-  }
+  // Correction History
+  entries.push_back(make_spin("CorrWeight", 0, 200, CorrWeight,
+                              [](int64_t v) { CorrWeight = static_cast<int>(v); }));
+  entries.push_back(make_spin("CorrHistMax", 64, 4096, CorrHistMax,
+                              [](int64_t v) { CorrHistMax = static_cast<int>(v); }));
+  entries.push_back(make_spin("CorrDeltaDiv", 1, 64, CorrDeltaDiv,
+                              [](int64_t v) { CorrDeltaDiv = static_cast<int>(v); }));
+  entries.push_back(make_spin("CorrDeltaMax", 16, 1024, CorrDeltaMax,
+                              [](int64_t v) { CorrDeltaMax = static_cast<int>(v); }));
+  entries.push_back(make_spin("CorrCont1EvalPct", 0, 200, CorrCont1EvalPct,
+                              [](int64_t v) { CorrCont1EvalPct = static_cast<int>(v); }));
+  entries.push_back(make_spin("CorrCont2EvalPct", 0, 200, CorrCont2EvalPct,
+                              [](int64_t v) { CorrCont2EvalPct = static_cast<int>(v); }));
+  entries.push_back(make_spin("CorrCont2UpdPct", 0, 200, CorrCont2UpdPct,
+                              [](int64_t v) { CorrCont2UpdPct = static_cast<int>(v); }));
+
+  // History & Move Ordering
+  entries.push_back(make_spin("HistBonus", 50, 800, HistBonus,
+                              [](int64_t v) { HistBonus = static_cast<int>(v); }));
+  entries.push_back(make_spin("HistMax", 500, 8000, HistMax,
+                              [](int64_t v) { HistMax = static_cast<int>(v); }));
+  entries.push_back(make_spin("HistGravityMax", 2048, 32000, HistGravityMax,
+                              [](int64_t v) { HistGravityMax = static_cast<int>(v); }));
+  entries.push_back(make_spin("HistDepthBoostMargin", 0, 500, HistDepthBoostMargin,
+                              [](int64_t v) { HistDepthBoostMargin = static_cast<int>(v); }));
+  entries.push_back(make_spin("HistCont4UpdPct", 0, 200, HistCont4UpdPct,
+                              [](int64_t v) { HistCont4UpdPct = static_cast<int>(v); }));
+  entries.push_back(make_spin("LowPlyHistDepth", 0, MaxLowPlyHistDepth, LowPlyHistDepth,
+                              [](int64_t v) { LowPlyHistDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("LowPlyDecayDiv", 1, 16, LowPlyDecayDiv,
+                              [](int64_t v) { LowPlyDecayDiv = static_cast<int>(v); }));
+  entries.push_back(make_spin("LowPlyHistMult", 0, 16, LowPlyHistMult,
+                              [](int64_t v) { LowPlyHistMult = static_cast<int>(v); }));
+  entries.push_back(make_spin("Killer2Offset", 0, 10000, Killer2Offset,
+                              [](int64_t v) { Killer2Offset = static_cast<int>(v); }));
+  entries.push_back(make_spin("CounterMoveBonus", 0, 50000, CounterMoveBonus,
+                              [](int64_t v) { CounterMoveBonus = static_cast<int>(v); }));
+  entries.push_back(make_spin("PawnPushRank7Bonus", 0, 50000, PawnPushRank7Bonus,
+                              [](int64_t v) { PawnPushRank7Bonus = static_cast<int>(v); }));
+  entries.push_back(make_spin("PawnPushRank6Bonus", 0, 50000, PawnPushRank6Bonus,
+                              [](int64_t v) { PawnPushRank6Bonus = static_cast<int>(v); }));
+  entries.push_back(make_spin("MvvLvaVictimMult", 10, 500, MvvLvaVictimMult,
+                              [](int64_t v) { MvvLvaVictimMult = static_cast<int>(v); }));
+
+  // Transposition Table
+  entries.push_back(make_spin("TtAgePenalty", 0, 64, TtAgePenalty,
+                              [](int64_t v) { TtAgePenalty = static_cast<int>(v); }));
+  entries.push_back(make_spin("TtPvBonus", 0, 16, TtPvBonus,
+                              [](int64_t v) { TtPvBonus = static_cast<int>(v); }));
+  entries.push_back(make_spin("TtReplaceDepthMargin", 0, 16, TtReplaceDepthMargin,
+                              [](int64_t v) { TtReplaceDepthMargin = static_cast<int>(v); }));
+  entries.push_back(make_spin("TtHalfmoveLimit", 50, 120, TtHalfmoveLimit,
+                              [](int64_t v) { TtHalfmoveLimit = static_cast<int>(v); }));
+
+  // QSearch / SEE
+  entries.push_back(make_spin("DeltaMarginBase", 0, 600, DeltaMarginBase,
+                              [](int64_t v) { DeltaMarginBase = static_cast<int>(v); }));
+  entries.push_back(make_spin("QSearchCheckSeeMargin", -500, 100, QSearchCheckSeeMargin,
+                              [](int64_t v) { QSearchCheckSeeMargin = static_cast<int>(v); }));
+  entries.push_back(make_spin("QSearchCapSeeMargin", -300, 100, QSearchCapSeeMargin,
+                              [](int64_t v) { QSearchCapSeeMargin = static_cast<int>(v); }));
+  entries.push_back(make_spin("MainCapSeeMargin", -500, 100, MainCapSeeMargin,
+                              [](int64_t v) { MainCapSeeMargin = static_cast<int>(v); }));
+
+  // Null Move Pruning
+  entries.push_back(make_spin("NMPMinDepth", 1, 6, NMPMinDepth,
+                              [](int64_t v) { NMPMinDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("NMPBase", 1, 10, NMPBase,
+                              [](int64_t v) { NMPBase = static_cast<int>(v); }));
+  entries.push_back(make_spin("NMPDepthDiv", 1, 32, NMPDepthDiv,
+                              [](int64_t v) { NMPDepthDiv = static_cast<int>(v); }));
+  entries.push_back(make_spin("NMPEvalDiv", 50, 600, NMPEvalDiv,
+                              [](int64_t v) { NMPEvalDiv = static_cast<int>(v); }));
+  entries.push_back(make_spin("NMPEvalMaxRed", 1, 8, NMPEvalMaxRed,
+                              [](int64_t v) { NMPEvalMaxRed = static_cast<int>(v); }));
+  entries.push_back(make_spin("NMPVerifyDepth", 4, 24, NMPVerifyDepth,
+                              [](int64_t v) { NMPVerifyDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("NMPVerifyPct", 25, 100, NMPVerifyPct,
+                              [](int64_t v) { NMPVerifyPct = static_cast<int>(v); }));
+
+  // RFP / Razoring / IIR
+  entries.push_back(make_spin("RFPMargin", 20, 200, RFPMargin,
+                              [](int64_t v) { RFPMargin = static_cast<int>(v); }));
+  entries.push_back(make_spin("RFPMaxDepth", 1, 16, RFPMaxDepth,
+                              [](int64_t v) { RFPMaxDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("RFPTtPvMargin", 0, 150, RFPTtPvMargin,
+                              [](int64_t v) { RFPTtPvMargin = static_cast<int>(v); }));
+  entries.push_back(make_spin("RazorMargin", 50, 500, RazorMargin,
+                              [](int64_t v) { RazorMargin = static_cast<int>(v); }));
+  entries.push_back(make_spin("RazorMaxDepth", 0, 8, RazorMaxDepth,
+                              [](int64_t v) { RazorMaxDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("IIRMinDepth", 1, 12, IIRMinDepth,
+                              [](int64_t v) { IIRMinDepth = static_cast<int>(v); }));
+
+  // ProbCut
+  entries.push_back(make_spin("ProbCutMargin", 50, 500, ProbCutMargin,
+                              [](int64_t v) { ProbCutMargin = static_cast<int>(v); }));
+  entries.push_back(make_spin("ProbCutMinDepth", 2, 12, ProbCutMinDepth,
+                              [](int64_t v) { ProbCutMinDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("ProbCutTtDepthMargin", 0, 10, ProbCutTtDepthMargin,
+                              [](int64_t v) { ProbCutTtDepthMargin = static_cast<int>(v); }));
+  entries.push_back(make_spin("ProbCutReduction", 1, 8, ProbCutReduction,
+                              [](int64_t v) { ProbCutReduction = static_cast<int>(v); }));
+
+  // LMP / Futility / History / SEE Pruning
+  entries.push_back(make_spin("LMPBase", 1, 16, LMPBase,
+                              [](int64_t v) { LMPBase = static_cast<int>(v); }));
+  entries.push_back(make_spin("LMPDepth", 1, 16, LMPDepth,
+                              [](int64_t v) { LMPDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("LmpImprDiv", 1, 8, LmpImprDiv,
+                              [](int64_t v) { LmpImprDiv = static_cast<int>(v); }));
+  entries.push_back(make_spin("LmpNoImprDiv", 1, 8, LmpNoImprDiv,
+                              [](int64_t v) { LmpNoImprDiv = static_cast<int>(v); }));
+  entries.push_back(make_spin("FPDepth", 1, 12, FPDepth,
+                              [](int64_t v) { FPDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("FPMargin1", 10, 300, FPMargin1,
+                              [](int64_t v) { FPMargin1 = static_cast<int>(v); }));
+  entries.push_back(make_spin("FPMargin2", 10, 300, FPMargin2,
+                              [](int64_t v) { FPMargin2 = static_cast<int>(v); }));
+  entries.push_back(make_spin("HistPruneDepth", 0, 10, HistPruneDepth,
+                              [](int64_t v) { HistPruneDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("HistPruneThreshold", 0, 10000, HistPruneThreshold,
+                              [](int64_t v) { HistPruneThreshold = static_cast<int>(v); }));
+  entries.push_back(make_spin("SeePruningDepth", 0, 16, SeePruningDepth,
+                              [](int64_t v) { SeePruningDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("SeePruningQuietMargin", -300, 0, SeePruningQuietMargin,
+                              [](int64_t v) { SeePruningQuietMargin = static_cast<int>(v); }));
+  entries.push_back(make_spin("SeePruningNoisyMargin", -200, 50, SeePruningNoisyMargin,
+                              [](int64_t v) { SeePruningNoisyMargin = static_cast<int>(v); }));
+
+  // Extensions & LMR
+  entries.push_back(make_spin("SEDepth", 4, 16, SEDepth,
+                              [](int64_t v) { SEDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("SETtDepthMargin", 1, 8, SETtDepthMargin,
+                              [](int64_t v) { SETtDepthMargin = static_cast<int>(v); }));
+  entries.push_back(make_spin("SEBetaDepthFactor", 0, 400, SEBetaDepthFactor,
+                              [](int64_t v) { SEBetaDepthFactor = static_cast<int>(v); }));
+  entries.push_back(make_spin("SEDoubleExtMargin", 0, 100, SEDoubleExtMargin,
+                              [](int64_t v) { SEDoubleExtMargin = static_cast<int>(v); }));
+  entries.push_back(make_spin("SETripleExtMargin", 20, 400, SETripleExtMargin,
+                              [](int64_t v) { SETripleExtMargin = static_cast<int>(v); }));
+  entries.push_back(make_spin("HistExtThreshold", 1000, 20000, HistExtThreshold,
+                              [](int64_t v) { HistExtThreshold = static_cast<int>(v); }));
+  entries.push_back(make_spin("HistExtMinDepth", 1, 12, HistExtMinDepth,
+                              [](int64_t v) { HistExtMinDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("MaxExtBudget", 1, 20, MaxExtBudget,
+                              [](int64_t v) { MaxExtBudget = static_cast<int>(v); }));
+  entries.push_back(make_spin("LMRMinDepth", 1, 8, LMRMinDepth,
+                              [](int64_t v) { LMRMinDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("LMRBase", 0, 20, LMRBase, [](int64_t v) {
+    LMRBase = static_cast<int>(v);
+    init_LMR();
+  }));
+  entries.push_back(make_spin("LMRRatio", 4, 64, LMRRatio, [](int64_t v) {
+    LMRRatio = static_cast<int>(v);
+    init_LMR();
+  }));
+  entries.push_back(make_spin("LMRHistoryDiv", 512, 16384, LMRHistoryDiv,
+                              [](int64_t v) { LMRHistoryDiv = static_cast<int>(v); }));
+  entries.push_back(make_spin("LMRCapHistoryDiv", 512, 16384, LMRCapHistoryDiv,
+                              [](int64_t v) { LMRCapHistoryDiv = static_cast<int>(v); }));
+  entries.push_back(make_spin("LMRAdvPawnRed", 0, 8, LMRAdvPawnRed,
+                              [](int64_t v) { LMRAdvPawnRed = static_cast<int>(v); }));
+
+  // Aspiration Windows
+  entries.push_back(make_spin("AspStartWindow", 4, 100, AspStartWindow,
+                              [](int64_t v) { AspStartWindow = static_cast<int>(v); }));
+  entries.push_back(make_spin("AspMinDepth", 2, 16, AspMinDepth,
+                              [](int64_t v) { AspMinDepth = static_cast<int>(v); }));
+  entries.push_back(make_spin("AspMinDelta", 4, 100, AspMinDelta,
+                              [](int64_t v) { AspMinDelta = static_cast<int>(v); }));
+  entries.push_back(make_spin("AspDeltaPct", 50, 400, AspDeltaPct,
+                              [](int64_t v) { AspDeltaPct = static_cast<int>(v); }));
+  entries.push_back(make_spin("AspWidenPct", 10, 200, AspWidenPct,
+                              [](int64_t v) { AspWidenPct = static_cast<int>(v); }));
+  entries.push_back(make_spin("AspMinHalfWin", 5, 100, AspMinHalfWin,
+                              [](int64_t v) { AspMinHalfWin = static_cast<int>(v); }));
+  entries.push_back(make_spin("AspHalfWinOffset", 0, 100, AspHalfWinOffset,
+                              [](int64_t v) { AspHalfWinOffset = static_cast<int>(v); }));
+  entries.push_back(make_spin("AspThreadSpread", 0, 50, AspThreadSpread,
+                              [](int64_t v) { AspThreadSpread = static_cast<int>(v); }));
+
+  // Time Management & Opening Book
+  entries.push_back(make_spin("NodeTmFactor1", 50, 200, NodeTmFactor1,
+                              [](int64_t v) { NodeTmFactor1 = static_cast<int>(v); }));
+  entries.push_back(make_spin("NodeTmFactor2", 50, 250, NodeTmFactor2,
+                              [](int64_t v) { NodeTmFactor2 = static_cast<int>(v); }));
+  entries.push_back(make_spin("BmFactor1", 50, 200, BmFactor1,
+                              [](int64_t v) { BmFactor1 = static_cast<int>(v); }));
+  entries.push_back(make_spin("BmMinFactor", 10, 150, BmMinFactor,
+                              [](int64_t v) { BmMinFactor = static_cast<int>(v); }));
+  entries.push_back(make_spin("BmStabilityStep", 0, 25, BmStabilityStep,
+                              [](int64_t v) { BmStabilityStep = static_cast<int>(v); }));
+  entries.push_back(make_spin("TmReserveMax", 0, 500, TmReserveMax,
+                              [](int64_t v) { TmReserveMax = static_cast<int>(v); }));
+  entries.push_back(make_spin("TmReservePct", 0, 50, TmReservePct,
+                              [](int64_t v) { TmReservePct = static_cast<int>(v); }));
+  entries.push_back(make_spin("TmBaseDiv", 5, 60, TmBaseDiv,
+                              [](int64_t v) { TmBaseDiv = static_cast<int>(v); }));
+  entries.push_back(make_spin("TmIncPct", 0, 150, TmIncPct,
+                              [](int64_t v) { TmIncPct = static_cast<int>(v); }));
+  entries.push_back(make_spin("TmOpeningMoves", 1, 60, TmOpeningMoves,
+                              [](int64_t v) { TmOpeningMoves = static_cast<int>(v); }));
+  entries.push_back(make_spin("TmOpeningPct", 20, 200, TmOpeningPct,
+                              [](int64_t v) { TmOpeningPct = static_cast<int>(v); }));
+  entries.push_back(make_spin("TmMidgameMoves", 10, 100, TmMidgameMoves,
+                              [](int64_t v) { TmMidgameMoves = static_cast<int>(v); }));
+  entries.push_back(make_spin("TmMidgamePct", 20, 200, TmMidgamePct,
+                              [](int64_t v) { TmMidgamePct = static_cast<int>(v); }));
+  entries.push_back(make_spin("TmEndgamePct", 20, 200, TmEndgamePct,
+                              [](int64_t v) { TmEndgamePct = static_cast<int>(v); }));
+  entries.push_back(make_spin("TmMaxAllocMult", 100, 1000, TmMaxAllocMult,
+                              [](int64_t v) { TmMaxAllocMult = static_cast<int>(v); }));
+  entries.push_back(make_spin("TmMaxUsablePct", 10, 99, TmMaxUsablePct,
+                              [](int64_t v) { TmMaxUsablePct = static_cast<int>(v); }));
+  entries.push_back(make_spin("TmSoftExtDiv", 1, 32, TmSoftExtDiv,
+                              [](int64_t v) { TmSoftExtDiv = static_cast<int>(v); }));
+  entries.push_back(make_spin("TmMinOptPct", 1, 100, TmMinOptPct,
+                              [](int64_t v) { TmMinOptPct = static_cast<int>(v); }));
+  entries.push_back(make_spin("FailLowTimePct", 0, 200, FailLowTimePct,
+                              [](int64_t v) { FailLowTimePct = static_cast<int>(v); }));
+  entries.push_back(make_spin("EvalDropThreshold", 1, 100, EvalDropThreshold,
+                              [](int64_t v) { EvalDropThreshold = static_cast<int>(v); }));
+  entries.push_back(make_spin("BmStableCount", 1, 10, BmStableCount,
+                              [](int64_t v) { BmStableCount = static_cast<int>(v); }));
+  entries.push_back(make_spin("EvalScaleSlope", 0, 50, EvalScaleSlope,
+                              [](int64_t v) { EvalScaleSlope = static_cast<int>(v); }));
+  entries.push_back(make_spin("EvalScaleMin", 50, 100, EvalScaleMin,
+                              [](int64_t v) { EvalScaleMin = static_cast<int>(v); }));
+  entries.push_back(make_spin("EvalScaleMax", 100, 250, EvalScaleMax,
+                              [](int64_t v) { EvalScaleMax = static_cast<int>(v); }));
+  entries.push_back(make_spin("FailLowEvalScale", 50, 300, FailLowEvalScale,
+                              [](int64_t v) { FailLowEvalScale = static_cast<int>(v); }));
+  entries.push_back(make_spin("BmChangeTimeScale", 50, 300, BmChangeTimeScale,
+                              [](int64_t v) { BmChangeTimeScale = static_cast<int>(v); }));
+  entries.push_back(make_spin("BookRepeatSkipPct", 0, 100, BookRepeatSkipPct,
+                              [](int64_t v) { BookRepeatSkipPct = static_cast<int>(v); }));
+
   return entries;
 }
 
@@ -359,7 +765,7 @@ inline Action pick_opening_book_move(const BoardState &pos, ThreadInfo &ti) {
       ti.recent_book_keys.end();
   if (recently_played) {
     static thread_local std::mt19937 book_rng(Random::rd());
-    if (std::uniform_int_distribution<int>(0, 99)(book_rng) < 50) return MoveNone;
+    if (std::uniform_int_distribution<int>(0, 99)(book_rng) < BookRepeatSkipPct) return MoveNone;
   }
 
   ti.recent_book_keys[ti.recent_book_head++ % ti.recent_book_keys.size()] = book_key;
@@ -557,7 +963,7 @@ inline void handle_hashfull() {
 inline bool stops_active_search(std::string_view cmd) noexcept {
   return cmd == "setoption" || cmd == "ucinewgame" || cmd == "position" ||
          cmd == "go" || cmd == "eval" || cmd == "evaltrace" || cmd == "flip" ||
-         cmd == "hashfull" || cmd == "d" || cmd == "printparams";
+         cmd == "hashfull" || cmd == "d";
 }
 
 }  // namespace detail_uci
@@ -611,8 +1017,6 @@ inline void uci(ThreadInfo &thread_info, BoardState &position,
       std::string banner = "id name Stallion EAS NNUE\nid author LegendOfCompiling\n";
       for (const UciOption &opt : option_table) banner += opt.uci_declaration() + "\n";
       safe_printf("%suciok\n", banner.c_str());
-    } else if (cmd == "printparams") {
-      print_params_for_ob();
     } else if (cmd == "isready") {
       safe_printf("readyok\n");
     } else if (cmd == "setoption") {

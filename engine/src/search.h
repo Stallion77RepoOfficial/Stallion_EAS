@@ -2,7 +2,6 @@
 
 #include "../fathom/src/tbprobe.h"
 #include "movepick.h"
-#include "params.h"
 #include "position.h"
 #include "utils.h"
 
@@ -117,11 +116,11 @@ inline int probe_wdl_tb(const BoardState &pos, const ThreadInfo &ti) noexcept {
 }
 
 inline void update_history(int16_t &entry, int delta) noexcept {
-  entry += static_cast<int16_t>(delta - entry * std::abs(delta) / 16384);
+  entry += static_cast<int16_t>(delta - entry * std::abs(delta) / HistGravityMax);
 }
 
 inline void update_corrhist(int16_t &entry, int delta) noexcept {
-  entry += static_cast<int16_t>(delta - entry * std::abs(delta) / 1024);
+  entry += static_cast<int16_t>(delta - entry * std::abs(delta) / CorrHistMax);
 }
 
 inline void update_continuation_histories(ThreadInfo &ti, int piece, int sq,
@@ -138,7 +137,7 @@ inline void update_continuation_histories(ThreadInfo &ti, int piece, int sq,
   }
   if (ply4_last != SquareNone) {
     update_history(ti.ContHistScores[ply4_piece][ply4_last][piece][sq],
-                   bonus / 2);
+                   bonus * HistCont4UpdPct / 100);
   }
 }
 
@@ -211,7 +210,8 @@ inline bool has_non_pawn_material(const BoardState &pos, int color) noexcept {
 }
 
 inline int eval(BoardState &pos, ThreadInfo &ti) {
-  return ti.nnue_state.evaluate(pos);
+  const int raw = ti.nnue_state.evaluate(pos);
+  return (NnueEvalScale == 100) ? raw : std::clamp(raw * NnueEvalScale / 100, -MaxEval, MaxEval);
 }
 
 inline int correct_eval(const BoardState &pos, const ThreadInfo &ti,
@@ -230,7 +230,7 @@ inline int correct_eval(const BoardState &pos, const ThreadInfo &ti,
         r1.piece_moved <= Pieces::BKing) {
       const int dst1 = extract_to(r1.played_move);
       if (is_valid_square(dst1)) {
-        corr += (ti.Cont1CorrHist[stm][r1.piece_moved][dst1] * 3) / 4;
+        corr += (ti.Cont1CorrHist[stm][r1.piece_moved][dst1] * CorrCont1EvalPct) / 100;
       }
     }
   }
@@ -240,7 +240,7 @@ inline int correct_eval(const BoardState &pos, const ThreadInfo &ti,
         r2.piece_moved <= Pieces::BKing) {
       const int dst2 = extract_to(r2.played_move);
       if (is_valid_square(dst2)) {
-        corr += ti.Cont2CorrHist[stm][r2.piece_moved][dst2] / 2;
+        corr += (ti.Cont2CorrHist[stm][r2.piece_moved][dst2] * CorrCont2EvalPct) / 100;
       }
     }
   }
@@ -301,8 +301,10 @@ inline bool is_draw(const BoardState &pos, ThreadInfo &ti) noexcept {
   return false;
 }
 
-inline int draw_score([[maybe_unused]] const BoardState &pos, ThreadInfo &ti) noexcept {
-  return 1 - static_cast<int>(ti.nodes.load(std::memory_order_relaxed) & 3ULL);
+inline int draw_score(const BoardState &pos, ThreadInfo &ti) noexcept {
+  const int base = 1 - static_cast<int>(ti.nodes.load(std::memory_order_relaxed) & 3ULL);
+  if (Contempt == 0) return base;
+  return base + (pos.color == ti.root_color ? -Contempt : Contempt);
 }
 
 namespace detail_search {
@@ -375,9 +377,8 @@ inline void update_fail_high_tables(const BoardState &pos, ThreadInfo &ti,
                                     Action best_move, const Action *quiets,
                                     int quiet_count, const Action *captures,
                                     int cap_count) noexcept {
-  const int d = depth + (best_score > beta + 125);
-  const int hb = static_cast<int>(HistBonus);
-  const int bonus = std::min(hb * d * (d + 1) / 4 + hb / 2, static_cast<int>(HistMax));
+  const int d = depth + (best_score > beta + HistDepthBoostMargin);
+  const int bonus = std::min(HistBonus * d * (d + 1) / 4 + HistBonus / 2, HistMax);
   const int best_pc = pos.board[extract_from(best_move)];
   const int best_dst = extract_to(best_move);
 
@@ -396,9 +397,8 @@ inline void update_fail_high_tables(const BoardState &pos, ThreadInfo &ti,
     update_continuation_histories(ti, best_pc, best_dst, bonus, ctx.prev1_sq,
                                   ctx.prev1_pc, ctx.prev2_sq, ctx.prev2_pc,
                                   ctx.prev4_sq, ctx.prev4_pc);
-    if (ply < LowPlyHistDepth) {
-      const int lp_bonus = std::min(bonus * (LowPlyHistDepth - ply) / 2,
-                                    static_cast<int>(HistMax));
+    if (ply < LowPlyHistDepth && ply < MaxLowPlyHistDepth) {
+      const int lp_bonus = std::min(bonus * (LowPlyHistDepth - ply) / 2, HistMax);
       for (int i = 0; i < quiet_count; ++i) {
         const Action m = quiets[i];
         update_history(
@@ -486,7 +486,8 @@ inline bool move_gives_check(const BoardState &pos, Action move) noexcept {
 
 inline void update_all_corrhist(const BoardState &pos, ThreadInfo &ti, int depth,
                                 int best_score, int static_eval) noexcept {
-  const int delta = std::clamp((best_score - static_eval) * depth / 8, -256, 256);
+  const int delta = std::clamp((best_score - static_eval) * depth / CorrDeltaDiv,
+                               -CorrDeltaMax, CorrDeltaMax);
   const int stm = pos.color;
   update_corrhist(ti.PawnCorrHist[stm][get_corrhist_index(pos.pawn_key)], delta);
   update_corrhist(
@@ -513,7 +514,8 @@ inline void update_all_corrhist(const BoardState &pos, ThreadInfo &ti, int depth
         r2.piece_moved <= Pieces::BKing) {
       const int dst2 = extract_to(r2.played_move);
       if (is_valid_square(dst2)) {
-        update_corrhist(ti.Cont2CorrHist[stm][r2.piece_moved][dst2], delta * 3 / 4);
+        update_corrhist(ti.Cont2CorrHist[stm][r2.piece_moved][dst2],
+                        delta * CorrCont2UpdPct / 100);
       }
     }
   }
@@ -642,7 +644,7 @@ inline int qsearch(int alpha, int beta, BoardState &pos, ThreadInfo &ti,
   if (tt_hit) {
     entry_type = tt_entry.get_type();
     tt_static_eval = tt_entry.static_eval;
-    tt_score = (pos.halfmoves < 90) ? score_from_tt(tt_entry.score, ply) : ScoreNone;
+    tt_score = (pos.halfmoves < TtHalfmoveLimit) ? score_from_tt(tt_entry.score, ply) : ScoreNone;
     tt_move = tt_entry.best_move;
   }
 
@@ -692,7 +694,7 @@ inline int qsearch(int alpha, int beta, BoardState &pos, ThreadInfo &ti,
 
   MoveBufferLease lease(ti.move_buffers);
   MovePicker picker(lease.buffers);
-  init_picker(picker, in_check ? -107 : -15, in_check);
+  init_picker(picker, in_check ? QSearchCheckSeeMargin : QSearchCapSeeMargin, in_check);
 
   if (!in_check && tt_move != MoveNone) {
     if (!is_cap(pos, tt_move) && extract_type(tt_move) != MoveTypes::Promotion) {
@@ -850,7 +852,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &pos,
   if (tt_hit && !singular_search) {
     entry_type = tt_entry.get_type();
     tt_static_eval = tt_entry.static_eval;
-    tt_score = (pos.halfmoves < 90) ? score_from_tt(tt_entry.score, ply) : ScoreNone;
+    tt_score = (pos.halfmoves < TtHalfmoveLimit) ? score_from_tt(tt_entry.score, ply) : ScoreNone;
     tt_move = tt_entry.best_move;
   }
 
@@ -896,11 +898,11 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &pos,
 
     if (ti.mate_search == 0) {
       if (depth <= RFPMaxDepth &&
-          static_eval - RFPMargin * (depth - improving) - 25 * tt_pv >= beta) {
+          static_eval - RFPMargin * (depth - improving) - RFPTtPvMargin * tt_pv >= beta) {
         return (static_eval + beta) / 2;
       }
 
-      if (depth <= 3 && static_eval + RazorMargin * depth < alpha) {
+      if (depth <= RazorMaxDepth && static_eval + RazorMargin * depth < alpha) {
         const int razor_val = qsearch(alpha, beta, pos, ti, table);
         if (razor_val <= alpha) return razor_val;
       }
@@ -914,18 +916,18 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &pos,
         ss_push(pos, ti, MoveNone);
 
         const int null_red =
-            NMPBase + depth / NMPDepthDiv + std::min(3, (static_eval - beta) / NMPEvalDiv);
+            NMPBase + depth / NMPDepthDiv + std::min(NMPEvalMaxRed, (static_eval - beta) / NMPEvalDiv);
         int null_score = -search<false>(-beta, -beta + 1, depth - null_red,
                                         !cutnode, null_pos, ti, table);
         ss_pop(ti);
 
         if (null_score >= beta) {
           if (null_score >= MateThreshold) null_score = beta;
-          if (ti.nmp_min_ply > 0 || depth < 12) {
+          if (ti.nmp_min_ply > 0 || depth < NMPVerifyDepth) {
             return null_score;
           }
           const int ver_depth = std::max(1, depth - null_red);
-          ti.nmp_min_ply = ply + (3 * ver_depth) / 4;
+          ti.nmp_min_ply = ply + (NMPVerifyPct * ver_depth) / 100;
           const int ver_score =
               search<false>(beta - 1, beta, ver_depth, false, pos, ti, table);
           ti.nmp_min_ply = 0;
@@ -940,8 +942,8 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &pos,
 
   const int pc_beta = beta + ProbCutMargin;
   if (!at_root && !is_pv && !in_check && !singular_search && ti.mate_search == 0 &&
-      depth >= 5 && std::abs(beta) < MateThreshold &&
-      (!tt_hit || tt_entry.depth + 4 <= depth || tt_score >= pc_beta)) {
+      depth >= ProbCutMinDepth && std::abs(beta) < MateThreshold &&
+      (!tt_hit || tt_entry.depth + ProbCutTtDepthMargin <= depth || tt_score >= pc_beta)) {
     const int pc_threshold = pc_beta - static_eval;
     MovePicker pc_picker(lease.buffers);
     init_picker(pc_picker, pc_threshold, in_check);
@@ -959,7 +961,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &pos,
 
       int pc_score = -qsearch(-pc_beta, -pc_beta + 1, child_pos, ti, table);
       if (pc_score >= pc_beta) {
-        pc_score = -search<is_pv>(-pc_beta, -pc_beta + 1, depth - 4, false,
+        pc_score = -search<is_pv>(-pc_beta, -pc_beta + 1, depth - ProbCutReduction, false,
                                   child_pos, ti, table);
       }
       ss_pop(ti);
@@ -975,7 +977,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &pos,
   ti.KillerMoves[ply + 1][1] = MoveNone;
 
   MovePicker picker(lease.buffers);
-  init_picker(picker, -107, in_check);
+  init_picker(picker, MainCapSeeMargin, in_check);
 
   const detail_search::HistoryContext hist_ctx =
       detail_search::collect_history_context(ti, ss);
@@ -1035,7 +1037,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &pos,
 
     if (!move_is_cap && !is_pv && best_score > -MateScore && ti.mate_search == 0) {
       if (!advanced_pawn && !in_check && !gives_check && depth < LMPDepth &&
-          moves_played >= LMPBase + depth * depth / (2 - improving)) {
+          moves_played >= LMPBase + depth * depth / (improving ? LmpImprDiv : LmpNoImprDiv)) {
         skip_quiets = true;
       }
       if (!advanced_pawn && !in_check && !gives_check && depth < FPDepth &&
@@ -1064,15 +1066,15 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &pos,
     int extension = 0;
     if (!at_root && ply < ti.current_iter * 2 && !singular_search &&
         depth >= SEDepth && move == tt_move && tt_hit && tt_score != ScoreNone &&
-        std::abs(tt_score) < MateThreshold && tt_entry.depth >= depth - 3 &&
+        std::abs(tt_score) < MateThreshold && tt_entry.depth >= depth - SETtDepthMargin &&
         (entry_type == EntryTypes::LBound || entry_type == EntryTypes::Exact)) {
-      const int s_beta = tt_score - (depth * 3) / 2;
+      const int s_beta = tt_score - (depth * SEBetaDepthFactor) / 100;
       ti.excluded_move = move;
       const int s_score = search<false>(s_beta - 1, s_beta, (depth - 1) / 2, cutnode,
                                         pos, ti, table);
       if (s_score < s_beta) {
         if (!is_pv && s_score + SEDoubleExtMargin < s_beta && ply < ti.current_iter) {
-          extension = 2 + (!move_is_cap && s_score < s_beta - 125);
+          extension = 2 + (!move_is_cap && s_score < s_beta - SETripleExtMargin);
         } else {
           extension = 1;
         }
@@ -1083,7 +1085,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &pos,
       }
     }
 
-    if (extension == 0 && !move_is_cap && depth >= 4 && full_hist > HistExtThreshold) {
+    if (extension == 0 && !move_is_cap && depth >= HistExtMinDepth && full_hist > HistExtThreshold) {
       extension = 1;
     }
     if (extension == 0 && !move_is_cap && rel_rank >= 6 && depth >= 2 &&
@@ -1092,8 +1094,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &pos,
     }
 
     if (extension > 0) {
-      constexpr int kMaxExtBudget = 10;
-      const int avail_budget = ti.current_iter + kMaxExtBudget - (ply + depth);
+      const int avail_budget = ti.current_iter + MaxExtBudget - (ply + depth);
       extension = (avail_budget <= 0) ? 0 : std::min(extension, avail_budget);
     }
 
@@ -1110,8 +1111,8 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &pos,
     if (next_depth > 0 && depth >= LMRMinDepth && moves_played > is_pv &&
         ti.mate_search == 0) {
       int r = LMRTable[depth][moves_played];
-      r = move_is_cap ? ((bad_capture ? r : (r / 2)) - cap_hist / 4096)
-                      : (r - full_hist / 4096);
+      r = move_is_cap ? ((bad_capture ? r : (r / 2)) - cap_hist / LMRCapHistoryDiv)
+                      : (r - full_hist / LMRHistoryDiv);
       r -= tt_pv;
       if (!move_is_cap && tt_capture) ++r;
       r -= (tt_hit && tt_entry.depth >= depth);
@@ -1119,7 +1120,7 @@ inline int search(int alpha, int beta, int depth, bool cutnode, BoardState &pos,
       r += cutnode;
       r -= gives_check;
       if (gives_check && depth >= 6) --r;
-      if (advanced_pawn && r > 0) r = (rel_rank >= 6) ? 0 : std::max(0, r - 2);
+      if (advanced_pawn && r > 0) r = (rel_rank >= 6) ? 0 : std::max(0, r - LMRAdvPawnRed);
       r = std::clamp(r, 0, next_depth - 1);
 
       child_score = -search<false>(-alpha - 1, -alpha, next_depth - r,
@@ -1236,6 +1237,7 @@ inline std::string format_pv(const BoardState &pos, const ThreadInfo &ti) {
 inline void iterative_deepen(BoardState &pos, ThreadInfo &ti,
                              std::vector<TTBucket> &table) {
   ti.original_opt = ti.opt_time;
+  ti.root_color = pos.color;
   calculate(pos);
   ti.nodes.store(0);
   ti.time_checks = 0;
@@ -1248,7 +1250,7 @@ inline void iterative_deepen(BoardState &pos, ThreadInfo &ti,
   for (auto &row : ti.KillerMoves) row.fill(MoveNone);
   for (auto &tbl : ti.LowPlyHistory) {
     for (auto &row : tbl) {
-      for (int16_t &v : row) v /= 4;
+      for (int16_t &v : row) v /= LowPlyDecayDiv;
     }
   }
 
@@ -1314,7 +1316,7 @@ inline void iterative_deepen(BoardState &pos, ThreadInfo &ti,
 
     for (ti.multipv_index = 0; ti.multipv_index < active_multipv; ++ti.multipv_index) {
       int window_depth = depth;
-      int delta = std::max(24, static_cast<int>(AspStartWindow) * 3 / 2);
+      int delta = std::max(AspMinDelta, AspStartWindow * AspDeltaPct / 100);
       bool extended_fail_low = false;
       bool saw_fail_low = false;
       int score = search<true>(alpha, beta, depth, false, pos, ti, table);
@@ -1352,12 +1354,14 @@ inline void iterative_deepen(BoardState &pos, ThreadInfo &ti,
           alpha -= delta;
           if (score <= -MateScore + MaxSearchPly) alpha = ScoreNone;
           window_depth = depth;
-          if (ti.thread_id == 0 && !extended_fail_low && depth > 6 &&
+          if (ti.thread_id == 0 && !extended_fail_low && depth > AspMinDepth &&
               !ti.is_movetime && !ti.infinite_search && !thread_data.pondering) {
             extended_fail_low = true;
             saw_fail_low = true;
             ti.eval_dropping = true;
-            ti.opt_time = std::min(ti.max_time, ti.opt_time + ti.original_opt / 3ULL);
+            ti.opt_time = std::min<uint64_t>(
+                ti.max_time,
+                ti.opt_time + ti.original_opt * static_cast<uint64_t>(FailLowTimePct) / 100ULL);
             ti.time_manager.soft_limit = ti.opt_time;
           }
         } else if (score >= beta) {
@@ -1365,7 +1369,7 @@ inline void iterative_deepen(BoardState &pos, ThreadInfo &ti,
           if (score >= MateScore - MaxSearchPly) beta = -ScoreNone;
           window_depth = std::max(window_depth - 1, std::max(1, depth - 2));
         }
-        delta += delta / 2;
+        delta += delta * AspWidenPct / 100;
         score = search<true>(alpha, beta, window_depth, false, pos, ti, table);
       }
 
@@ -1408,11 +1412,13 @@ inline void iterative_deepen(BoardState &pos, ThreadInfo &ti,
                std::abs(prev_score) < MateThreshold)
                   ? (prev_score - score)
                   : 0;
-          ti.eval_dropping = saw_fail_low || (eval_drop > 15) || best_move_changed;
-          ti.best_move_stable = (ti.stability_counter >= 3 && !ti.eval_dropping);
-          double eval_scale = std::clamp(1.0 + eval_drop * 0.010, 0.92, 1.35);
-          if (saw_fail_low) eval_scale = std::max(eval_scale, 1.25);
-          if (best_move_changed) eval_scale = std::max(eval_scale, 1.15);
+          ti.eval_dropping = saw_fail_low || (eval_drop > EvalDropThreshold) || best_move_changed;
+          ti.best_move_stable = (ti.stability_counter >= BmStableCount && !ti.eval_dropping);
+          double eval_scale = std::clamp(
+              1.0 + eval_drop * (EvalScaleSlope / 1000.0),
+              EvalScaleMin / 100.0, EvalScaleMax / 100.0);
+          if (saw_fail_low) eval_scale = std::max(eval_scale, FailLowEvalScale / 100.0);
+          if (best_move_changed) eval_scale = std::max(eval_scale, BmChangeTimeScale / 100.0);
           RootAction *best_entry = find_root_move(ti, ti.best_moves[0]);
           adjust_soft_limit(ti, best_entry ? best_entry->nodes : 0ULL, bm_stability,
                             eval_scale);
@@ -1438,10 +1444,11 @@ inline void iterative_deepen(BoardState &pos, ThreadInfo &ti,
         prev_score = score;
       }
 
-      if (depth > 6 && ti.multipv_index == 0 && active_multipv == 1) {
+      if (depth > AspMinDepth && ti.multipv_index == 0 && active_multipv == 1) {
         // Stagger helper aspiration windows around the score to vary worker trees.
         const int half_win =
-            std::max(26, static_cast<int>(AspStartWindow) + 15) + (ti.thread_id % 4) * 8;
+            std::max(AspMinHalfWin, AspStartWindow + AspHalfWinOffset) +
+            (ti.thread_id % 4) * AspThreadSpread;
         alpha = score - half_win;
         beta = score + half_win;
       } else {

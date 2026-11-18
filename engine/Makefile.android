@@ -1,14 +1,49 @@
 # Makefile.android — Android (NDK) için bağımsız derleme
 EXE := stallion_eas_android
-ANDROID_NDK_HOME ?= $(patsubst %/toolchains,%,$(lastword $(sort $(wildcard $(HOME)/Library/Android/sdk/ndk/*/toolchains $(HOME)/Library/Android/sdk/ndk/*/*/toolchains $(HOME)/Android/Sdk/ndk/*/toolchains))))
-NDK_HOST_TAG ?= $(if $(filter Darwin,$(shell uname -s)),darwin-x86_64,linux-x86_64)
+
+NDK_SEARCH_PATTERNS := \
+	$(if $(ANDROID_SDK_ROOT),$(ANDROID_SDK_ROOT)/ndk/*/toolchains $(ANDROID_SDK_ROOT)/ndk/*/*/toolchains,) \
+	$(if $(ANDROID_HOME),$(ANDROID_HOME)/ndk/*/toolchains $(ANDROID_HOME)/ndk/*/*/toolchains,) \
+	$(HOME)/Library/Android/sdk/ndk/*/toolchains $(HOME)/Library/Android/sdk/ndk/*/*/toolchains \
+	$(HOME)/Android/Sdk/ndk/*/toolchains $(HOME)/Android/Sdk/ndk/*/*/toolchains \
+	/opt/homebrew/share/android-ndk/toolchains /opt/homebrew/Caskroom/android-ndk/*/*/toolchains \
+	/usr/local/share/android-ndk/toolchains /opt/android-ndk*/toolchains
+
+NDK_CANDIDATES := $(strip $(foreach p,$(NDK_SEARCH_PATTERNS),$(wildcard $(p))))
+DETECTED_NDK := $(shell python3 -c 'import os,re,sys; c=sorted({os.path.normpath(p[:-11]) for p in sys.argv[1:] if os.path.isdir(p)}); pairs=[(open(os.path.join(d,"source.properties")).read() if os.path.isfile(os.path.join(d,"source.properties")) else "",d) for d in c]; k=lambda td: (tuple((([int(x) for x in re.search(r"Pkg\.BaseRevision\s*=\s*([0-9.]+)",td[0]).group(1).split(".")] if re.search(r"Pkg\.BaseRevision\s*=\s*([0-9.]+)",td[0]) else [0])+[0]*4)[:4]), 0 if re.search(r"Pkg\.Revision\s*=.*(?:beta|rc)",td[0],re.I) else 1, td[1]); print(max(pairs,key=k)[1] if pairs else "")' $(NDK_CANDIDATES))
+
+ifeq ($(and $(strip $(ANDROID_NDK_HOME)),$(wildcard $(ANDROID_NDK_HOME)/toolchains)),)
+  ifneq ($(and $(strip $(ANDROID_NDK_ROOT)),$(wildcard $(ANDROID_NDK_ROOT)/toolchains)),)
+    ANDROID_NDK_HOME := $(ANDROID_NDK_ROOT)
+  else
+    ANDROID_NDK_HOME := $(DETECTED_NDK)
+  endif
+endif
+
+ifeq ($(strip $(ANDROID_NDK_HOME)),)
+  $(error Android NDK bulunamadı. ANDROID_NDK_HOME ayarlayın veya NDK kurun)
+endif
+
+HOST_OS := $(shell uname -s)
+HOST_ARCH := $(shell uname -m)
+PREBUILT_DIR := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt
+ifeq ($(HOST_OS),Darwin)
+  NDK_HOST_TAG ?= $(if $(and $(filter arm64,$(HOST_ARCH)),$(wildcard $(PREBUILT_DIR)/darwin-arm64)),darwin-arm64,darwin-x86_64)
+else
+  NDK_HOST_TAG ?= $(if $(and $(filter aarch64 arm64,$(HOST_ARCH)),$(wildcard $(PREBUILT_DIR)/linux-aarch64)),linux-aarch64,linux-x86_64)
+endif
+
 ANDROID_API ?= 24
-CXX := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/$(NDK_HOST_TAG)/bin/aarch64-linux-android$(ANDROID_API)-clang++
+CXX := $(PREBUILT_DIR)/$(NDK_HOST_TAG)/bin/aarch64-linux-android$(ANDROID_API)-clang++
+ifeq ($(strip $(wildcard $(CXX))),)
+  $(error NDK derleyicisi bulunamadı: $(CXX))
+endif
+
 CXXFLAGS := -O3 -std=c++23 -ffast-math -pthread
 ARCH_FLAGS ?= -march=armv8-a
 LDLIBS := -lm
 LDFLAGS := -static-libstdc++
-STRIP := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/$(NDK_HOST_TAG)/bin/llvm-strip
+STRIP := $(PREBUILT_DIR)/$(NDK_HOST_TAG)/bin/llvm-strip
 include Makefile.rules
 .PHONY: android
 android: all

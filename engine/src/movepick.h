@@ -76,7 +76,7 @@ inline void score_capture_list(MovePicker &picker, const Position &pos,
     const int victim_pt = (kind == MoveTypes::EnPassant)
                               ? static_cast<int>(PieceTypes::Pawn)
                               : cap_pt;
-    const int mvv_lva = SeeValues[static_cast<size_t>(victim_pt)] * 100 -
+    const int mvv_lva = SeeValues[static_cast<size_t>(victim_pt)] * MvvLvaVictimMult -
                         SeeValues[static_cast<size_t>(get_piece_type(mover_code))] / 100;
     picker.captures.scores[static_cast<size_t>(i)] =
         GoodCaptureBaseScore + mvv_lva +
@@ -134,28 +134,28 @@ inline void score_quiet_list(MovePicker &picker, const Position &pos,
       continue;
     }
     if (candidate == k1) {
-      picker.quiets.scores[static_cast<size_t>(i)] = KillerMoveScore - 1000;
+      picker.quiets.scores[static_cast<size_t>(i)] = KillerMoveScore - Killer2Offset;
       continue;
     }
 
     const int mover_code = pos.board[static_cast<size_t>(src)];
     int val = ti.HistoryScores[static_cast<size_t>(mover_code)][static_cast<size_t>(dst)];
-    if (ti.search_ply < LowPlyHistDepth) {
-      val += 2 * ti.LowPlyHistory[ti.search_ply][static_cast<size_t>(mover_code)]
-                                 [static_cast<size_t>(dst)];
+    if (ti.search_ply < LowPlyHistDepth && ti.search_ply < MaxLowPlyHistDepth) {
+      val += LowPlyHistMult * ti.LowPlyHistory[ti.search_ply][static_cast<size_t>(mover_code)]
+                                              [static_cast<size_t>(dst)];
     }
     if (ch1 != nullptr) val += (*ch1)[static_cast<size_t>(mover_code)][static_cast<size_t>(dst)];
     if (ch2 != nullptr) val += (*ch2)[static_cast<size_t>(mover_code)][static_cast<size_t>(dst)];
     if (ch4 != nullptr) val += (*ch4)[static_cast<size_t>(mover_code)][static_cast<size_t>(dst)];
-    if (counter != MoveNone && candidate == counter) val += 8000;
+    if (counter != MoveNone && candidate == counter) val += CounterMoveBonus;
 
     if (get_piece_type(mover_code) == PieceTypes::Pawn) {
       const int rel_rank =
           (pos.color == Colors::White) ? get_rank(dst) : (7 - get_rank(dst));
       if (rel_rank >= 6) {
-        val += 14000;
+        val += PawnPushRank7Bonus;
       } else if (rel_rank == 5) {
-        val += 7000;
+        val += PawnPushRank6Bonus;
       }
     }
     picker.quiets.scores[static_cast<size_t>(i)] = val;

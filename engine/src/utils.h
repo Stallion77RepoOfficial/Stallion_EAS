@@ -3,7 +3,6 @@
 #include "bitboard.h"
 #include "defs.h"
 #include "nnue.h"
-#include "params.h"
 #include "poly_random.h"
 
 #include <algorithm>
@@ -107,7 +106,7 @@ struct ThreadInfoBase {
   MultiArray<int16_t, 14, 64> HistoryScores;
   MultiArray<int16_t, 14, 64, 14, 64> ContHistScores;
   MultiArray<int16_t, 14, 64, 7> CapHistScores;
-  MultiArray<int16_t, LowPlyHistDepth, 14, 64> LowPlyHistory;
+  MultiArray<int16_t, MaxLowPlyHistDepth, 14, 64> LowPlyHistory;
   MultiArray<int16_t, 2, 16384> PawnCorrHist;
   MultiArray<int16_t, 2, 2, 16384> NonPawnCorrHist;
   MultiArray<int16_t, 2, 14, 64> Cont1CorrHist;
@@ -173,6 +172,7 @@ struct ThreadInfoBase {
 
   std::array<uint64_t, 32> recent_book_keys{};
   uint8_t recent_book_head = 0;
+  uint8_t root_color = Colors::White;
 };
 
 constexpr int MinUciElo = 1000;
@@ -286,9 +286,9 @@ inline uint64_t safe_TT_size() noexcept {
   return require_TT_size(TT);
 }
 
-constexpr inline int entry_quality(const TTEntry &entry, int searches) noexcept {
+inline int entry_quality(const TTEntry &entry, int searches) noexcept {
   const int elapsed_age = (MaxAge + searches - entry.get_age()) % MaxAge;
-  return entry.depth - elapsed_age * 8 + (entry.get_pv() ? 2 : 0);
+  return entry.depth - elapsed_age * TtAgePenalty + (entry.get_pv() ? TtPvBonus : 0);
 }
 
 namespace detail_util {
@@ -436,7 +436,7 @@ inline void insert_entry(uint64_t hash, int depth, Action best_move,
     const bool same_key = (!empty && slot.position_key == tag);
     const bool pv_flag = tt_pv || (same_key && slot.get_pv());
     if (best_move != MoveNone || !same_key) slot.best_move = best_move;
-    if (same_key && bound_type != EntryTypes::Exact && slot.depth > depth + 4) {
+    if (same_key && bound_type != EntryTypes::Exact && slot.depth > depth + TtReplaceDepthMargin) {
       if (pv_flag && !slot.get_pv()) {
         slot.age_bound = detail_util::pack_age_bound(searches, slot.get_type(), true);
       }
@@ -654,25 +654,35 @@ inline uint64_t OpeningBook::polyglot_key(const BoardState &pos) {
 
 inline void TimeManager::initialize(uint64_t time_left, uint64_t increment,
                                     int moves_to_go, uint32_t game_move) noexcept {
-  const uint64_t reserve = std::min<uint64_t>(50ULL, time_left / 10ULL);
+  const uint64_t reserve = std::min<uint64_t>(
+      static_cast<uint64_t>(TmReserveMax),
+      time_left * static_cast<uint64_t>(TmReservePct) / 100ULL);
   const uint64_t usable =
       (time_left > reserve) ? (time_left - reserve) : std::max<uint64_t>(1ULL, time_left / 2ULL);
 
   if (moves_to_go > 0) {
     const uint64_t rem = static_cast<uint64_t>(moves_to_go);
     const uint64_t pool = usable + increment * (rem - 1ULL);
-    allocated_time = std::min(pool / rem, usable / 2ULL);
+    allocated_time = std::min<uint64_t>(pool / rem, usable / 2ULL);
   } else {
     const double phase_scale =
-        (game_move < 20U) ? 0.8 : ((game_move < 40U) ? 1.1 : 1.0);
-    const double base_budget = (usable / 22.0 + increment * 0.75) * phase_scale;
+        (game_move < static_cast<uint32_t>(TmOpeningMoves))
+            ? (TmOpeningPct / 100.0)
+            : ((game_move < static_cast<uint32_t>(TmMidgameMoves))
+                   ? (TmMidgamePct / 100.0)
+                   : (TmEndgamePct / 100.0));
+    const double base_budget =
+        (usable / static_cast<double>(TmBaseDiv) + increment * (TmIncPct / 100.0)) * phase_scale;
     allocated_time = std::max<uint64_t>(1ULL, static_cast<uint64_t>(base_budget));
   }
 
-  allocated_time = std::min(allocated_time, usable);
-  max_time = std::max(allocated_time, std::min(allocated_time * 3ULL, usable * 7ULL / 10ULL));
-  hard_limit = std::min(max_time, usable);
-  soft_limit = std::min(allocated_time, hard_limit);
+  allocated_time = std::min<uint64_t>(allocated_time, usable);
+  max_time = std::max<uint64_t>(
+      allocated_time,
+      std::min<uint64_t>(allocated_time * static_cast<uint64_t>(TmMaxAllocMult) / 100ULL,
+                         usable * static_cast<uint64_t>(TmMaxUsablePct) / 100ULL));
+  hard_limit = std::min<uint64_t>(max_time, usable);
+  soft_limit = std::min<uint64_t>(allocated_time, hard_limit);
 }
 
 inline bool TimeManager::should_stop(uint64_t elapsed, bool best_move_stable,
@@ -682,7 +692,8 @@ inline bool TimeManager::should_stop(uint64_t elapsed, bool best_move_stable,
   if (is_movetime) return false;
   if (elapsed >= soft_limit) {
     if (best_move_stable && !eval_dropping) return true;
-    soft_limit = std::min(soft_limit + allocated_time / 8ULL, hard_limit);
+    soft_limit = std::min<uint64_t>(
+        soft_limit + allocated_time / static_cast<uint64_t>(TmSoftExtDiv), hard_limit);
   }
   return false;
 }
@@ -698,12 +709,14 @@ inline void adjust_soft_limit(ThreadInfo &ti, uint64_t best_move_nodes,
   const double node_scale =
       (static_cast<double>(NodeTmFactor1) / 100.0 - bm_share) * NodeTmFactor2 / 100.0;
   const double stability_scale =
-      std::max(0.55, BmFactor1 / 100.0 - (bm_stability * 0.06));
+      std::max(BmMinFactor / 100.0,
+               BmFactor1 / 100.0 - (bm_stability * (BmStabilityStep / 100.0)));
 
   const long double scaled_time = static_cast<long double>(ti.original_opt) *
                                   node_scale * stability_scale * eval_scale;
-  const uint64_t min_opt =
-      std::min<uint64_t>(ti.max_time, std::max<uint64_t>(1ULL, ti.original_opt / 4ULL));
+  const uint64_t min_opt = std::min<uint64_t>(
+      ti.max_time,
+      std::max<uint64_t>(1ULL, ti.original_opt * static_cast<uint64_t>(TmMinOptPct) / 100ULL));
   const uint64_t clamped_time = static_cast<uint64_t>(std::clamp<long double>(
       scaled_time, static_cast<long double>(min_opt), static_cast<long double>(ti.max_time)));
   ti.opt_time = std::min<uint64_t>(clamped_time, ti.max_time);

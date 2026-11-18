@@ -105,9 +105,12 @@ struct ThreadInfoBase {
 
   MultiArray<int16_t, 14, 64> HistoryScores;
   MultiArray<int16_t, 14, 64, 14, 64> ContHistScores;
-  MultiArray<int16_t, 14, 64> CapHistScores;
+  MultiArray<int16_t, 14, 64, 7> CapHistScores;
+  MultiArray<int16_t, LowPlyHistDepth, 14, 64> LowPlyHistory;
   MultiArray<int16_t, 2, 16384> PawnCorrHist;
   MultiArray<int16_t, 2, 2, 16384> NonPawnCorrHist;
+  MultiArray<int16_t, 2, 14, 64> Cont1CorrHist;
+  MultiArray<int16_t, 2, 14, 64> Cont2CorrHist;
   MultiArray<Action, MaxSearchPly + 1, 2> KillerMoves;
   MultiArray<Action, 14, 64> CounterMoves;
 
@@ -117,6 +120,7 @@ struct ThreadInfoBase {
   uint16_t multipv_index = 0;
 
   Action excluded_move = MoveNone;
+  int nmp_min_ply = 0;
   std::array<Action, MaxActions> best_moves{};
   std::array<int, MaxActions> best_scores{};
 
@@ -282,7 +286,7 @@ inline uint64_t safe_TT_size() noexcept {
 
 constexpr inline int entry_quality(const TTEntry &entry, int searches) noexcept {
   const int elapsed_age = (MaxAge + searches - entry.get_age()) % MaxAge;
-  return entry.depth - elapsed_age * 8;
+  return entry.depth - elapsed_age * 8 + (entry.get_pv() ? 2 : 0);
 }
 
 namespace detail_util {
@@ -295,8 +299,10 @@ constexpr inline bool is_empty_slot(const TTEntry &entry) noexcept {
   return entry.score == 0 && entry.get_type() == EntryTypes::None;
 }
 
-constexpr inline uint8_t pack_age_bound(uint8_t age_gen, uint8_t bound_type) noexcept {
-  return static_cast<uint8_t>((age_gen << 2) | bound_type);
+constexpr inline uint8_t pack_age_bound(uint8_t age_gen, uint8_t bound_type,
+                                        bool is_pv = false) noexcept {
+  return static_cast<uint8_t>(((age_gen & 0x1FU) << 3U) | (is_pv ? 0x04U : 0U) |
+                              (bound_type & 0x03U));
 }
 
 inline TTEntry &select_victim(std::array<TTEntry, BucketEntries> &slots,
@@ -336,8 +342,11 @@ inline void new_game(ThreadInfo &ti, std::vector<TTBucket> &table) {
   ti.HistoryScores.fill({});
   ti.ContHistScores.fill({});
   ti.CapHistScores.fill({});
+  ti.LowPlyHistory.fill({});
   ti.PawnCorrHist.fill({});
   ti.NonPawnCorrHist.fill({});
+  ti.Cont1CorrHist.fill({});
+  ti.Cont2CorrHist.fill({});
   ti.KillerMoves.fill({});
   ti.CounterMoves.fill({});
   ti.game_hist.fill({});
@@ -378,33 +387,35 @@ inline TTEntry probe_entry(uint64_t hash, bool &hit, uint8_t searches,
   const uint32_t tag = get_hash_low_bits(hash);
   const uint64_t idx = detail_util::tt_slot_index(hash, len);
 
-  std::lock_guard<std::mutex> guard(tt_mutexes[idx % tt_mutexes.size()]);
-  TTBucket &bucket = table[static_cast<size_t>(idx)];
-  __builtin_prefetch(&bucket, 0, 1);
+  std::unique_lock<std::mutex> guard(
+      tt_mutexes[idx % tt_mutexes.size()], std::defer_lock);
+  if (!thread_data.thread_infos.empty()) guard.lock();
 
+  TTBucket &bucket = table[static_cast<size_t>(idx)];
   for (TTEntry &slot : bucket.entries) {
     const bool empty = detail_util::is_empty_slot(slot);
-    if (empty || slot.position_key == tag) {
-      hit = !empty;
-      slot.age_bound = detail_util::pack_age_bound(searches, slot.get_type());
+    if (empty) break;
+    if (slot.position_key == tag) {
+      hit = true;
+      slot.age_bound =
+          detail_util::pack_age_bound(searches, slot.get_type(), slot.get_pv());
       return slot;
     }
   }
 
   hit = false;
-  return detail_util::select_victim(bucket.entries, searches);
+  return TTEntry{};
 }
 
 inline void insert_entry(uint64_t hash, int depth, Action best_move,
                          int32_t static_eval, int32_t score, uint8_t bound_type,
-                         uint8_t searches) {
+                         uint8_t searches, bool tt_pv = false) {
   const uint64_t len = require_TT_size(TT);
   const uint32_t tag = get_hash_low_bits(hash);
   const uint64_t idx = detail_util::tt_slot_index(hash, len);
 
   const uint8_t clamped_depth = static_cast<uint8_t>(std::clamp(depth, 0, 255));
-  const uint8_t meta = detail_util::pack_age_bound(searches, bound_type);
-  auto write_fields = [&](TTEntry &slot) noexcept {
+  auto write_fields = [&](TTEntry &slot, uint8_t meta) noexcept {
     slot.position_key = tag;
     slot.depth = clamped_depth;
     slot.static_eval = static_eval;
@@ -412,22 +423,29 @@ inline void insert_entry(uint64_t hash, int depth, Action best_move,
     slot.age_bound = meta;
   };
 
-  std::lock_guard<std::mutex> guard(tt_mutexes[idx % tt_mutexes.size()]);
+  std::unique_lock<std::mutex> guard(
+      tt_mutexes[idx % tt_mutexes.size()], std::defer_lock);
+  if (!thread_data.thread_infos.empty()) guard.lock();
   auto &slots = TT[static_cast<size_t>(idx)].entries;
 
   for (TTEntry &slot : slots) {
-    if (!detail_util::is_empty_slot(slot) && slot.position_key != tag) continue;
-    if (best_move != MoveNone || tag != slot.position_key) slot.best_move = best_move;
-    if (slot.position_key == tag && bound_type != EntryTypes::Exact &&
-        slot.depth > depth + 4) {
+    const bool empty = detail_util::is_empty_slot(slot);
+    if (!empty && slot.position_key != tag) continue;
+    const bool same_key = (!empty && slot.position_key == tag);
+    const bool pv_flag = tt_pv || (same_key && slot.get_pv());
+    if (best_move != MoveNone || !same_key) slot.best_move = best_move;
+    if (same_key && bound_type != EntryTypes::Exact && slot.depth > depth + 4) {
+      if (pv_flag && !slot.get_pv()) {
+        slot.age_bound = detail_util::pack_age_bound(searches, slot.get_type(), true);
+      }
       return;
     }
-    write_fields(slot);
+    write_fields(slot, detail_util::pack_age_bound(searches, bound_type, pv_flag));
     return;
   }
 
   TTEntry &victim = detail_util::select_victim(slots, searches);
-  write_fields(victim);
+  write_fields(victim, detail_util::pack_age_bound(searches, bound_type, tt_pv));
   victim.best_move = best_move;
 }
 
@@ -650,7 +668,7 @@ inline void TimeManager::initialize(uint64_t time_left, uint64_t increment,
   }
 
   allocated_time = std::min(allocated_time, usable);
-  max_time = std::max(allocated_time, std::min(allocated_time * 3ULL, usable * 8ULL / 10ULL));
+  max_time = std::max(allocated_time, std::min(allocated_time * 3ULL, usable * 7ULL / 10ULL));
   hard_limit = std::min(max_time, usable);
   soft_limit = std::min(allocated_time, hard_limit);
 }
@@ -674,13 +692,13 @@ inline void adjust_soft_limit(ThreadInfo &ti, uint64_t best_move_nodes,
   const double bm_share = static_cast<double>(best_move_nodes) / visited;
   const double node_scale =
       (static_cast<double>(NodeTmFactor1) / 100.0 - bm_share) * NodeTmFactor2 / 100.0;
-  const double stability_scale = BmFactor1 / 100.0f - (bm_stability * 0.06);
-  const double volume_scale =
-      (visited > 100000ULL) ? std::min(2.0, visited / 50000.0) : 1.0;
+  const double stability_scale = BmFactor1 / 100.0 - (bm_stability * 0.06);
 
   const long double scaled_time =
-      static_cast<long double>(ti.original_opt) * node_scale * stability_scale * volume_scale;
+      static_cast<long double>(ti.original_opt) * node_scale * stability_scale;
+  const uint64_t min_opt = std::min<uint64_t>(ti.max_time, std::max<uint64_t>(1ULL, ti.original_opt / 4ULL));
   const uint64_t clamped_time = static_cast<uint64_t>(std::clamp<long double>(
-      scaled_time, 1.0L, static_cast<long double>(ti.max_time)));
+      scaled_time, static_cast<long double>(min_opt), static_cast<long double>(ti.max_time)));
   ti.opt_time = std::min<uint64_t>(clamped_time, ti.max_time);
+  ti.time_manager.soft_limit = ti.opt_time;
 }

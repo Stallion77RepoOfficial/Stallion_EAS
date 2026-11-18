@@ -338,6 +338,14 @@ constexpr inline bool is_cap(const BoardState &pos, Action move) noexcept {
   return dst == pos.ep_square && pos.board[src] == Pieces::WPawn + pos.color;
 }
 
+[[nodiscard]] constexpr inline int captured_piece_type(const Position &pos,
+                                                       Action move) noexcept {
+  if (extract_type(move) == MoveTypes::EnPassant) return PieceTypes::Pawn;
+  const int dst = extract_to(move);
+  return is_valid_square(dst) ? get_piece_type(pos.board[static_cast<size_t>(dst)])
+                              : PieceTypes::PieceNone;
+}
+
 inline bool can_castle(const BoardState &pos, int king_sq, int rook_sq) noexcept {
   const int stm = pos.color;
   const int wing = (rook_sq > king_sq) ? Sides::Kingside : Sides::Queenside;

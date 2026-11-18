@@ -194,7 +194,8 @@ struct GameHistory {
 };
 
 inline constexpr int BucketEntries = 3;
-inline constexpr int MaxAge = 64;
+inline constexpr int MaxAge = 32;
+inline constexpr int LowPlyHistDepth = 4;
 
 struct TTEntry {
   uint32_t position_key{0};
@@ -207,8 +208,11 @@ struct TTEntry {
   [[nodiscard]] constexpr uint8_t get_type() const noexcept {
     return static_cast<uint8_t>(age_bound & 0x03U);
   }
+  [[nodiscard]] constexpr bool get_pv() const noexcept {
+    return (age_bound & 0x04U) != 0U;
+  }
   [[nodiscard]] constexpr int get_age() const noexcept {
-    return static_cast<int>(age_bound >> 2U);
+    return static_cast<int>(age_bound >> 3U);
   }
 };
 
